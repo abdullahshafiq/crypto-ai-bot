@@ -98,7 +98,7 @@ auto_learning:
 # Quant Strategy Parameters
 strategy:
   max_spread: 0.0005        # TIGHT: 0.05% max spread
-  min_conf: 0.15            # AGGRESSIVE SCALP: 15% min confidence
+  min_conf: 0.05            # ACTIVE SCALP: allow aligned 5%+ signals
   max_ret_30s: 0.0050     
   max_ret_5s: 0.0025      
   block_on_volume_spike: false  
