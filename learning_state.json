@@ -1,0 +1,31 @@
+{
+    "learned_at": "2026-04-29T18:25:15.715478+00:00",
+    "model_type": "logistic_regression",
+    "completed_trades": 143,
+    "win_rate": 0.2867,
+    "net_pnl": -25.9811,
+    "avg_win": 0.344898,
+    "avg_loss": -0.393352,
+    "risk_multiplier": 0.25,
+    "train_accuracy": 0.614,
+    "holdout_accuracy": 0.7931,
+    "weights": {
+        "mr": 0.1603,
+        "vwap": 0.0953,
+        "bb": 0.0348,
+        "macd": 0.0915,
+        "pa": 0.1145,
+        "smc": 0.1855,
+        "sr": 0.0695,
+        "kdj": 0.1477,
+        "st": 0.1009
+    },
+    "ai_advisor": {
+        "enabled": true,
+        "applied": true,
+        "model": "gpt-4o-mini",
+        "rationale": "The current win rate is below 0.50 and net PnL is negative, indicating that the model is not performing well. To mitigate risk, I recommend reducing the weight of all indicators to 0.88 to minimize overfitting and noise. The risk multiplier remains unchanged at 0.25 to avoid further losses.",
+        "error": "",
+        "risk_multiplier": 0.25
+    }
+}

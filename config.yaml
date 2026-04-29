@@ -1,0 +1,137 @@
+# High-Frequency Scalping Configuration (DOGE/USDT)
+
+symbol: "DOGE/USDT"
+timeframe: "5m"           # Base timeframe for execution (matches 15m structure)
+macro_timeframe: "1h"     # Macro timeframe for trend alignment
+
+# Market data source (spot vs futures)
+data:
+  market: "usdm"          # usdm | spot
+
+# Execution Settings
+execution:
+  mode: "demo"                # paper | demo | live
+  leverage: 10               # BOOSTER: 10x leverage for zero-fee sniping
+  dynamic_leverage: true       
+  paper_starting_balance_usdt: 100
+  fee_rate: 0.0             
+  dca_enabled: true            # ENABLED: Averaging down to recover trades
+  dca_max_steps: 2             # Max 2 extra entries (3 total)
+  dca_distance_pct: 0.006      # DCA every -0.60% drop
+  fee_slippage_buffer_pct: 0.0  # Zero buffer for aggressive entry
+  fee_edge_multiplier: 0.2      # AGGRESSIVE: Trade even if profit is only slightly above fees
+  min_seconds_between_trades: 5     # cooldown between any ENTRY/EXIT (very fast)
+  min_seconds_before_reversal: 5    # Back to fast reversals
+  reversal_min_confidence: 0.08     # BALANCED: 8% min for reversal
+  reversal_min_score: 0.05          # Low threshold for score
+  reversal_min_net_edge_pct: 0.0002    # 0.02% edge to flip position
+  break_even_trigger_pct: 0.0005    # SNIPER: Move to breakeven after only +0.05%
+  break_even_buffer_pct: 0.0001     # keep tiny buffer
+  trail_tighten_1_pct: 0.0010       # tighten trail after +0.10%
+  trail_tighten_2_pct: 0.0020       # tighten further after +0.20%
+  min_profit_after_fees: 0.0001     # 0.01% min profit target (Pure profit on USDC!)
+  exit_on_reversal_only_in_profit: true 
+  use_limit_orders: true            # Use Maker orders to save fees
+  use_native_trailing_stop: true    # ENABLED: Uses Binance's own trailing stop engine
+  trailing_callback_pct: 0.5        # 0.5% callback (perfect for DOGE scalps)
+  ttl_exit_seconds: 300             # 5min candles need more time to play out
+
+# Dynamic Leverage (volatility + confidence based position sizing)
+leverage:
+  enabled: true                # Enable dynamic leverage scaling
+  min_leverage: 5              # SNIPER FLOOR: Never drop below 5x
+  max_leverage: 10             # SNIPER CAP: Allow full 10x power
+  # Confidence thresholds for leverage levels (0-1 scale)
+  confidence_levels:
+    0.05: 5.0                  # Any edge -> 5x leverage
+    0.15: 7.5                  # Low confidence -> 7.5x leverage
+    0.30: 10.0                 # Moderate confidence -> 10x leverage
+    0.50: 10.0                 # Strong signal -> 10x leverage
+    0.75: 10.0                 # MAX -> 10x leverage
+  use_score_multiplier: true   # Also factor in signal score (0-1) to adjust leverage
+  score_weight: 0.3            # Balanced score weight
+  atr_volatility_scaling: false # DISABLED: Don't scale down in high vol for ruthless mode
+  atr_reference_pct: 0.015     # Target ATR% (1.5% of price) for full leverage (DOGE moderate vol)
+  atr_min_multiplier: 0.2      # Minimum leverage multiplier when ATR is very high
+
+# Multi-Timeframe Trend + S/R
+mtf:
+  enabled: true
+  timeframes: ["3m", "15m", "1h", "4h"]
+  min_agree: 2                  # RELAXED: Only 2 timeframes needed
+  veto_on_missing: false        # DISABLED: Don't wait for all indicators to be perfect
+  max_age_seconds: 300          # 5min stale threshold (faster updates)
+  sr_buffer_pct: 0.0015         # Tighter S/R buffer (0.15%) for DOGE
+  mode: "soft"                  # soft => penalize counter-trend, don't hard block
+
+# Terminal UI
+ui:
+  mode: "ansi"
+  compact: true
+  status_lines: 3
+  alt_screen: true
+
+# Memory/Log limits (prevents long runs from growing unbounded)
+memory:
+  max_closed_trades: 5000
+
+logging:
+  max_mb: 5
+  backups: 3
+
+# Auto-learning from closed trades
+# Learns conservative indicator weights from recent ENTRY/EXIT outcomes.
+auto_learning:
+  enabled: true
+  min_completed_trades: 30
+  refresh_closed_trades: 10
+  max_recent_trades: 300
+  shrinkage: 0.35
+  ai_advisor:
+    enabled: true
+    model: "gpt-4o-mini"
+    max_weight_shift: 0.12
+
+# Quant Strategy Parameters
+strategy:
+  max_spread: 0.0005        # TIGHT: 0.05% max spread
+  min_conf: 0.15            # AGGRESSIVE SCALP: 15% min confidence
+  max_ret_30s: 0.0050     
+  max_ret_5s: 0.0025      
+  block_on_volume_spike: false  
+  fixed_trade_usdt: 50   
+  tp_pct: 0.0015          # QUICK SCALP: 0.15% profit target (Pure profit on USDC!)
+  sl_pct: 0.0010          # TIGHT SL: 0.10% (Cuts losses twice as fast)
+  vol_filter_atr_pct: 0.0005  # Minimum ATR% (0.05%)
+  vol_filter_atr_max_pct: 0.08  # Maximum ATR% (8%)
+
+# Risk Limits
+risk:
+  daily_loss_cap: 0.05     # 5% max daily drawdown → halt (higher for scalping)
+  max_open_positions: 1    # Strictly 1 trade at a time as requested
+  min_balance_floor: 60.0  # Emergency stop at $60 (plenty of room for scalping)
+
+# Refresh Intervals (in ticks, 1 tick ≈ 1 second)
+intervals:
+  indicator_refresh: 10    # Re-fetch OHLCV & recalculate indicators every 10 ticks (ultra fast)
+  regime_refresh: 600      # Re-query AI macro regime every 600 ticks (~10 min)
+  tick_delay_seconds: 1    # Seconds between each polling loop iteration
+
+# AI Settings
+ai:
+  model: "gpt-4o-mini"
+  enabled: false           # Disabled AI so it stops vetoing trades for testing
+
+# AI Overlay (Tactical context based on MTF charts)
+ai_overlay:
+  enabled: true          # ENABLED: AI now watches the 3m/5m/15m charts
+  model: "gpt-4o-mini"
+  refresh_seconds: 300    # refresh every 5 minutes (matches candle close)
+
+# Trade-Gating AI (evaluates each BUY/SELL before execution)
+ai_trade:
+  enabled: true           # ENABLED: Final safety check before every order
+  model: "gpt-4o-mini"
+  min_interval_seconds: 30     # rate-limit AI calls
+  on_error: "allow"            # allow | veto
+  max_hold_minutes: 60
