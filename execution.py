@@ -265,12 +265,17 @@ class BinanceFuturesExecution:
         entry = float(pos.get("entry", exit_price) or exit_price)
         side = str(pos.get("side", "")).upper()
         amount = float(amount if amount is not None else pos.get("amount", 0.0) or 0.0)
+        exit_price, amount, fill_fees, realized_pnl = self._resolve_order_fill(pos, exit_price, amount)
         trade_id = int(pos.get("trade_id", 0) or 0)
         fee_rate = float(getattr(self, "fee_rate", 0.0) or 0.0)
         order_side = "SELL" if side == "LONG" else "BUY"
-        profit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
-        pnl = (exit_price - entry) * amount if side == "LONG" else (entry - exit_price) * amount
-        fees = (amount * entry * fee_rate) + (amount * exit_price * fee_rate)
+        if realized_pnl is not None:
+            pnl = float(realized_pnl)
+            profit_pct = pnl / (entry * amount) if entry and amount else 0.0
+        else:
+            profit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
+            pnl = (exit_price - entry) * amount if side == "LONG" else (entry - exit_price) * amount
+        fees = float(fill_fees) if fill_fees else (amount * entry * fee_rate) + (amount * exit_price * fee_rate)
 
         self._record_closed_trade(exit_type, entry, exit_price, pnl, profit_pct * 100, fees)
         self._log_trade(trade_id, "EXIT", order_side, exit_price, amount, pnl, fees, t_type=exit_type)
@@ -291,6 +296,53 @@ class BinanceFuturesExecution:
         except Exception as e:
             logger.debug(f"Pending exit status check skipped: {e}")
             return True
+
+    def _resolve_order_fill(self, pos: dict, fallback_price: float, fallback_amount: float):
+        order_id = str(pos.get("pending_exit_order_id") or "")
+        since = None
+        if pos.get("pending_exit_ts"):
+            since = max(0, int((float(pos.get("pending_exit_ts")) - 60.0) * 1000))
+
+        try:
+            trades = self.exchange.fetch_my_trades(self.symbol, since=since, limit=50)
+            matched = []
+            for trade in trades:
+                info = trade.get("info", {}) or {}
+                ids = {str(trade.get("order", "")), str(info.get("orderId", ""))}
+                if order_id and order_id in ids:
+                    matched.append(trade)
+            if matched:
+                filled = sum(float(t.get("amount", 0.0) or 0.0) for t in matched)
+                cost = sum(float(t.get("cost", 0.0) or 0.0) for t in matched)
+                if cost <= 0:
+                    cost = sum(float(t.get("price", 0.0) or 0.0) * float(t.get("amount", 0.0) or 0.0) for t in matched)
+                fees = 0.0
+                realized_values = []
+                for trade in matched:
+                    fee = trade.get("fee", {}) or {}
+                    fees += float(fee.get("cost", 0.0) or 0.0)
+                    realized = (trade.get("info", {}) or {}).get("realizedPnl")
+                    if realized not in (None, ""):
+                        realized_values.append(float(realized))
+                avg_price = cost / filled if filled > 0 else float(fallback_price)
+                realized_pnl = sum(realized_values) if realized_values else None
+                return avg_price, filled or float(fallback_amount), fees, realized_pnl
+        except Exception as e:
+            logger.debug(f"Exit fill trade lookup skipped: {e}")
+
+        try:
+            if order_id:
+                order = self.exchange.fetch_order(order_id, self.symbol)
+                filled = float(order.get("filled", 0.0) or 0.0)
+                avg_price = float(order.get("average", 0.0) or order.get("price", 0.0) or fallback_price)
+                fee = order.get("fee", {}) or {}
+                fees = float(fee.get("cost", 0.0) or 0.0)
+                if filled > 0:
+                    return avg_price, filled, fees, None
+        except Exception as e:
+            logger.debug(f"Exit fill order lookup skipped: {e}")
+
+        return float(fallback_price), float(fallback_amount), 0.0, None
 
     def _fetch_free_usdt(self):
         target_asset = _settlement_asset_from_symbol(getattr(self, 'symbol', ''), default='USDT')
@@ -369,7 +421,7 @@ class BinanceFuturesExecution:
 
     def get_open_orders(self, symbol: str = None) -> list:
         try:
-            target = symbol or self.symbol
+            target = _normalize_futures_symbol(symbol or self.symbol)
             orders = self.exchange.fetch_open_orders(target)
             return [{
                 'id': o.get('id'),
@@ -383,6 +435,29 @@ class BinanceFuturesExecution:
         except Exception as e:
             logger.debug(f"Open Orders Fetch Error: {e}")
             return []
+
+    def cancel_open_orders(self, symbol: str = None) -> int:
+        target_symbol = _normalize_futures_symbol(symbol or self.symbol)
+        target_id = _market_id_from_symbol(target_symbol).upper()
+        cancelled = 0
+        try:
+            self.exchange.cancel_all_orders(target_symbol)
+        except Exception as e:
+            logger.debug(f"Unified order cleanup skipped: {e}")
+        try:
+            self.exchange.fapiPrivateDeleteAllOpenOrders({'symbol': target_id})
+        except Exception as e:
+            logger.debug(f"Direct order cleanup skipped: {e}")
+        try:
+            for order in self.exchange.fetch_open_orders(target_symbol):
+                try:
+                    self.exchange.cancel_order(order['id'], target_symbol)
+                    cancelled += 1
+                except Exception as e:
+                    logger.debug(f"Individual order cleanup skipped for {order.get('id')}: {e}")
+        except Exception as e:
+            logger.debug(f"Open-order sweep skipped: {e}")
+        return cancelled
 
     def get_portfolio_value(self, current_price: float) -> float:
         target_asset = _settlement_asset_from_symbol(getattr(self, 'symbol', ''), default='USDT')
@@ -440,6 +515,7 @@ class BinanceFuturesExecution:
                     break
             
             if exch_pos is None:
+                self.cancel_open_orders(self.symbol)
                 # No position on exchange, clear local state
                 if self.active_positions:
                     for pos in list(self.active_positions):
@@ -450,10 +526,6 @@ class BinanceFuturesExecution:
                             self._finalize_position_exit(pos, exit_type, exit_price, exit_amount)
                     logger.info(f"[SYNC] No position on exchange for {self.symbol}, clearing local state.")
                     self.active_positions = []
-                    try:
-                        self.exchange.cancel_all_orders(self.symbol)
-                    except Exception as e:
-                        logger.debug(f"[SYNC] Open-order cleanup skipped: {e}")
             else:
                 # Position exists on exchange
                 exch_size = abs(float(exch_pos.get('contracts', 0)))
@@ -541,11 +613,8 @@ class BinanceFuturesExecution:
                         if scalp_cfg:
                             tp_pct = float(scalp_cfg.get('tp_pct', 0.003))
                             if profit_pct >= tp_pct and hold_time >= int(scalp_cfg.get('min_hold_seconds', 10)) and profit_pct >= min_net_profit:
-                                # Trailing TP: ride momentum with super-tight stop
-                                tight_sl = current_price * (1 - 0.0010)
-                                if tight_sl > float(pos['sl']):
-                                    pos['sl'] = tight_sl
-                                    pos['sl_pct_dist'] = 0.0010
+                                closed = True
+                                exit_type = "TAKE_PROFIT"
                             elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
                                 exit_type = "SCALP_EXIT"
@@ -641,11 +710,8 @@ class BinanceFuturesExecution:
                         if scalp_cfg:
                             tp_pct = float(scalp_cfg.get('tp_pct', 0.003))
                             if profit_pct >= tp_pct and hold_time >= int(scalp_cfg.get('min_hold_seconds', 10)) and profit_pct >= min_net_profit:
-                                # Trailing TP: ride momentum with super-tight stop
-                                tight_sl = current_price * (1 + 0.0010)
-                                if tight_sl < float(pos['sl']):
-                                    pos['sl'] = tight_sl
-                                    pos['sl_pct_dist'] = 0.0010
+                                closed = True
+                                exit_type = "TAKE_PROFIT"
                             elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
                                 exit_type = "SCALP_EXIT"
@@ -1176,6 +1242,10 @@ class BinanceFuturesExecution:
                                 self.exchange.create_market_order(target_symbol, side, abs(amt))
                                 print(f"    + Liquidation order sent.")
                                 time.sleep(0.5)
+
+                # After flattening, wipe again so stale reduce-only or post-only
+                # orders cannot trigger later after the bot exits.
+                self.cancel_open_orders(target_symbol)
                 
                 # Final Verification
                 remaining = self.exchange.fetch_open_orders(target_symbol)
@@ -1399,13 +1469,8 @@ class PaperFuturesExecution:
                         if scalp_cfg:
                             tp_pct = float(scalp_cfg.get('tp_pct', 0.003))
                             if profit_pct >= tp_pct and hold_time >= int(scalp_cfg.get('min_hold_seconds', 10)) and profit_pct >= min_net_profit:
-                                # Instead of closing, activate super-tight trailing stop
-                                # Lock SL at (current_price - 0.10% of price) to ride momentum
-                                tight_sl = current_price * (1 - 0.0010)  # 0.10% behind current price
-                                if tight_sl > float(pos['sl']):
-                                    pos['sl'] = tight_sl
-                                    pos['sl_pct_dist'] = 0.0010  # Ultra-tight trail from now on
-                                # Don't close — let trailing stop handle the exit
+                                closed = True
+                                exit_type = "TAKE_PROFIT"
                             elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
                                 exit_type = "SCALP_EXIT"
@@ -1452,11 +1517,8 @@ class PaperFuturesExecution:
                         if scalp_cfg:
                             tp_pct = float(scalp_cfg.get('tp_pct', 0.003))
                             if profit_pct >= tp_pct and hold_time >= int(scalp_cfg.get('min_hold_seconds', 10)) and profit_pct >= min_net_profit:
-                                # Instead of closing, activate super-tight trailing stop
-                                tight_sl = current_price * (1 + 0.0010)  # 0.10% above current price
-                                if tight_sl < float(pos['sl']):
-                                    pos['sl'] = tight_sl
-                                    pos['sl_pct_dist'] = 0.0010
+                                closed = True
+                                exit_type = "TAKE_PROFIT"
                             elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
                                 exit_type = "SCALP_EXIT"

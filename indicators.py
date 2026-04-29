@@ -157,10 +157,6 @@ def calculate_base_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Simplified SuperTrend for high-speed calculation
     df['st_upper'] = df['bb_mid'] + (df['atr'] * 3)
     df['st_lower'] = df['bb_mid'] - (df['atr'] * 3)
-    # 9. SuperTrend Proxy (Trend Bias)
-    # Simplified SuperTrend for high-speed calculation
-    df['st_upper'] = df['bb_mid'] + (df['atr'] * 3)
-    df['st_lower'] = df['bb_mid'] - (df['atr'] * 3)
     df['trend_bias'] = np.where(df['close'] > df['ema_21'], 1, -1)
 
     return df
@@ -487,7 +483,7 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
         "r_dist": f"{r_dist:+.1f}%"
     }
 
-def generate_quant_signal(state, latest_indicators, strategy_config, df_indicators, latest_macro, mtf_context=None, mtf_config=None, pivot_data=None) -> dict:
+def generate_quant_signal(state: dict, latest_indicators: dict, strategy_config: dict, df_indicators: pd.DataFrame, latest_macro: dict = None, mtf_context: dict = None, mtf_config: dict = None, pivot_data: dict = None) -> dict:
     """
     MASTER RECONSTRUCTION: The 725-Line Institutional Sniper Signal Engine.
     Exhaustive synthesis of 10 primary indicators with 4 advanced alpha overlays.
@@ -496,6 +492,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     of confidence matters. It factors in structural breaks, volatility squeezes, 
     institutional pivot penalties, and liquidity pool proximity.
     """
+    signal = {"action": "HOLD", "score": 0, "confidence": 0, "reason": "Warming Up", "weights": {}}
     if df_indicators is None or len(df_indicators) < 50:
         return {"action": "HOLD", "score": 0, "confidence": 0, "reason": "Warming Up", "weights": {}}
 
@@ -548,12 +545,37 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # The 'No-Man's Land' Guard prevents trading in the center of the trading range.
     penalty = 1.0
     pivot_msg = "Near Level"
-    if pivot_data and pivot_data.get('pp'):
-        pp = pivot_data['pp']
-        dist_from_pivot = abs(current_price - pp) / pp
-        if dist_from_pivot > 0.0015: # Not near a pivot zone
-            penalty = 0.8
-            pivot_msg = "Between PP [Caution: Mid-Range]"
+    hard_veto = False
+    
+    if pivot_data:
+        # Combine all institutional levels (Daily + Intraday 4H)
+        daily = pivot_data.get('daily', {})
+        h4 = pivot_data.get('h4', {})
+        
+        levels = []
+        # Add Daily levels (Heavy Armor)
+        levels += [daily.get('pp'), daily.get('s1'), daily.get('r1'), daily.get('s2'), daily.get('r2')]
+        # Add 4H levels (Scalper Shields)
+        levels += [h4.get('pp'), h4.get('s1'), h4.get('r1')]
+        
+        levels = [l for l in levels if l is not None]
+        
+        # Calculate distance to the nearest level
+        min_dist = min([abs(current_price - l) / l for l in levels]) if levels else 1.0
+        
+        # Proximity threshold
+        threshold = float(strategy_config.get('pivot_proximity_threshold', 0.0020))
+        
+        if min_dist > threshold:
+            penalty = 0.5 
+            pivot_msg = "Between Levels [Caution: Mid-Range]"
+            if strategy_config.get('pivot_discipline', True):
+                hard_veto = True
+        else:
+            # We are near a level! Identify if it's Daily or 4H
+            is_daily = any([abs(current_price - daily.get(k,0))/current_price < threshold for k in ['pp','s1','r1','s2','r2']])
+            pivot_msg = "Near DAILY Level" if is_daily else "Near 4H Level"
+    
             
     # --- 6. FINAL WEIGHTED SYNTHESIS ---
     total_score = (
@@ -575,33 +597,139 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     
     # --- 7. SIGNAL INTEGRITY & VALIDATION ---
     action = "HOLD"
-    if total_score > 0.15: action = "BUY"
-    elif total_score < -0.15: action = "SELL"
+    # --- 8. SMART VETO BYPASS (The Sniper Logic) ---
+    # If we are at a strong Institutional Wall (Daily/4H) AND Book Pressure is high,
+    # we bypass the MTF Trend Veto to front-run the reversal.
     
+    is_at_wall = (pivot_msg != "Between Levels [Caution: Mid-Range]")
+    book_pressure = map_order_book_pressure(state)
+    
+    # RUTHLESS BYPASS: If we are at a wall AND we have a strong structural signal (SMC/Score),
+    # we enter IMMEDIATELY. We don't wait for the trend or even the order book.
+    bypass_veto = False
+    if is_at_wall:
+        # If score is very strong (>0.3) at a wall, we trust the structure
+        if abs(total_score) > 0.30: 
+            bypass_veto = True
+            pivot_msg += " [RUTHLESS SNIPE]"
+        # Or if book pressure is starting to build
+        elif (total_score > 0 and book_pressure > 0.05) or (total_score < 0 and book_pressure < -0.05):
+            bypass_veto = True
+            pivot_msg += " [BOOK BYPASS]"
+
+    if hard_veto and not bypass_veto:
+        action = "HOLD"
+        signal['action'] = "HOLD"
+        signal['hold_reason'] = "MTF Veto (No Structural Edge)"
+    elif total_score > float(strategy_config.get('min_conf', 0.15)):
+        action = "BUY"
+    elif total_score < -float(strategy_config.get('min_conf', 0.15)):
+        action = "SELL"
+    
+    
+
+    # --- MTF ALIGNMENT VETO ---
+    if mtf_context and mtf_config and mtf_config.get('enabled') and not bypass_veto:
+        mode = mtf_config.get('mode', 'soft')
+        min_agree = int(mtf_config.get('min_agree', 2))
+        tfs = mtf_config.get('timeframes', [])
+        
+        bull_count = 0
+        bear_count = 0
+        for tf in tfs:
+            ctx = mtf_context.get(tf)
+            if isinstance(ctx, dict) and ctx.get('trend'):
+                if ctx['trend'] == 'BULL': bull_count += 1
+                elif ctx['trend'] == 'BEAR': bear_count += 1
+        
+        if mode == 'hard':
+            if action == 'BUY' and bull_count < min_agree:
+                action = "HOLD"
+                pivot_msg += f" [MTF Veto: Bulls {bull_count}<{min_agree}]"
+            elif action == 'SELL' and bear_count < min_agree:
+                action = "HOLD"
+                pivot_msg += f" [MTF Veto: Bears {bear_count}<{min_agree}]"
+                
+            # Sniper Guard: Specifically veto if the fastest timeframe (e.g. 3m) disagrees
+            if tfs and action != "HOLD":
+                fastest_tf = tfs[0]
+                fast_ctx = mtf_context.get(fastest_tf)
+                if isinstance(fast_ctx, dict) and fast_ctx.get('trend'):
+                    if action == "BUY" and fast_ctx['trend'] == "BEAR":
+                        action = "HOLD"
+                        pivot_msg += f" [MTF Veto: {fastest_tf} BEAR]"
+                    elif action == "SELL" and fast_ctx['trend'] == "BULL":
+                        action = "HOLD"
+                        pivot_msg += f" [MTF Veto: {fastest_tf} BULL]"
+
+    # --- 8. ORDER BOOK PRESSURE ANALYSIS ---
+    # Detecting 'The Wall of Money' to prevent trading into massive institutional walls.
+    book_pressure = map_order_book_pressure(state)
+    book_msg = "Balanced"
+    
+    if book_pressure > 0.3: book_msg = "Heavy Buy Pressure"
+    elif book_pressure < -0.3: book_msg = "Heavy Sell Pressure"
+    
+    # Order Book Veto: Never buy into a sell wall, never sell into a buy wall.
+    if action == "BUY" and book_pressure < -0.3:
+        action = "HOLD"
+        pivot_msg += f" [Book Veto: Sell Wall {book_pressure:.2f}]"
+    elif action == "SELL" and book_pressure > 0.3:
+        action = "HOLD"
+        pivot_msg += f" [Book Veto: Buy Wall {book_pressure:.2f}]"
+
     # The reason string used for the professional dashboard.
     reason = (
-        f"Score:{total_score:.3f} SMC:{smc_label} Pivot:{pivot_msg} "
+        f"Score:{total_score:.3f} SMC:{smc_label} Pivot:{pivot_msg} Book:{book_msg} "
         f"(MR:{mr_score:.1f} OB:{smc_score:.1f} SR:{sr_score:.1f} VWAP:{vwap_score:.1f} BB:{bb_score:.1f} "
         f"MACD:{macd_score:.1f} PA:{pa_score:.1f} KDJ:{kdj_score:.1f} ST:{st_score:.1f})"
     )
     
-    signal = {
+    # Build the final signal object without overwriting the existing one
+    signal.update({
         "action": action,
         "score": total_score,
         "confidence": min(abs(total_score), 1.0),
         "reason": reason,
-        "market_bias": "LONG_ONLY" if total_score > 0 else "SHORT_ONLY",
-        "hold_reason": ""
-    }
+        "market_bias": "LONG_ONLY" if total_score > 0 else "SHORT_ONLY"
+    })
+    
+    # Only set the default hold reason if it wasn't already set by a veto
+    if not signal.get('hold_reason'):
+        signal['hold_reason'] = "Pivot Discipline: Mid-Range" if hard_veto else ""
+    
+    
+    # Final Order Book refinement to Confidence
+    if action != "HOLD":
+        # If book pressure aligns with our direction, boost confidence
+        if (action == "BUY" and book_pressure > 0.2) or (action == "SELL" and book_pressure < -0.2):
+            signal['confidence'] = min(1.0, signal['confidence'] * 1.2)
+    
+    try:
+        tp_pct = float(strategy_config.get("tp_pct", 0.0030))
+        sl_pct = float(strategy_config.get("sl_pct", 0.0050))
+    except (TypeError, ValueError, AttributeError):
+        tp_pct = 0.0030
+        sl_pct = 0.0050
+
+    if action == "BUY":
+        signal.update({
+            "entry": current_price,
+            "tp": current_price * (1 + tp_pct),
+            "sl": current_price * (1 - sl_pct),
+        })
+    elif action == "SELL":
+        signal.update({
+            "entry": current_price,
+            "tp": current_price * (1 - tp_pct),
+            "sl": current_price * (1 + sl_pct),
+        })
     
     # Final filter for dangerous volatility conditions
     signal = validate_signal_integrity(signal, vol_context)
     
+    
     return signal
-
-# ==================================================================================================
-# SUB-ANALYTICAL MODULES (THE 'THINKING' ENGINE)
-# ==================================================================================================
 
 def get_trend_status(df: pd.DataFrame) -> str:
     """
@@ -736,8 +864,9 @@ def _calculate_volume_delta(df: pd.DataFrame) -> float:
     delta = price_change * vol_rel * 10.0
     return max(min(delta, 1.0), -1.0)
 
-def _map_order_book_pressure(state: dict) -> float:
+def map_order_book_pressure(state: dict) -> float:
     """
+    MASTER RECONSTRUCTION: Order Book Pressure Mapping.
     Uses real-time Order Book data to find 'The Wall of Money'.
     Bids > Asks = Buying Pressure.
     Asks > Bids = Selling Pressure.
@@ -751,6 +880,7 @@ def _map_order_book_pressure(state: dict) -> float:
     if (bids + asks) == 0: return 0.0
     pressure = (bids - asks) / (bids + asks)
     return pressure
+    
 
 # ==================================================================================================
 # RISK WARNING & LEGAL DISCLAIMER

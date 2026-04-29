@@ -25,16 +25,17 @@ execution:
   reversal_min_confidence: 0.08     # BALANCED: 8% min for reversal
   reversal_min_score: 0.05          # Low threshold for score
   reversal_min_net_edge_pct: 0.0002    # 0.02% edge to flip position
-  break_even_trigger_pct: 0.0005    # SNIPER: Move to breakeven after only +0.05%
-  break_even_buffer_pct: 0.0001     # keep tiny buffer
-  trail_tighten_1_pct: 0.0010       # tighten trail after +0.10%
-  trail_tighten_2_pct: 0.0020       # tighten further after +0.20%
-  min_profit_after_fees: 0.0001     # 0.01% min profit target (Pure profit on USDC!)
+  break_even_trigger_pct: 0.0005    # Move to breakeven after +0.05%
+  break_even_buffer_pct: 0.0001     # lock in small profit
+  trail_tighten_1_pct: 0.0010       # move SL closer after +0.10%
+  trail_tighten_2_pct: 0.0020       # move SL very tight after +0.20%
+  min_profit_after_fees: 0.0001     
   exit_on_reversal_only_in_profit: true 
-  use_limit_orders: true            # Use Maker orders to save fees
-  maker_only: true                  # Post-only entries/exits to avoid taker fees
-  use_native_trailing_stop: false   # Disabled because trailing-stop-market pays taker fees
-  trailing_callback_pct: 0.5        # 0.5% callback (perfect for DOGE scalps)
+  use_limit_orders: true            
+  maker_only: true                  
+  use_native_trailing_stop: false   
+  trailing_callback_pct: 0.5        
+    
   ttl_exit_seconds: 300             # 5min candles need more time to play out
 
 # Dynamic Leverage (volatility + confidence based position sizing)
@@ -59,11 +60,12 @@ leverage:
 mtf:
   enabled: true
   timeframes: ["3m", "15m", "1h", "4h"]
-  min_agree: 2                  # RELAXED: Only 2 timeframes needed
-  veto_on_missing: false        # DISABLED: Don't wait for all indicators to be perfect
+  min_agree: 2
+  veto_on_missing: false
   max_age_seconds: 300          # 5min stale threshold (faster updates)
   sr_buffer_pct: 0.0015         # Tighter S/R buffer (0.15%) for DOGE
   mode: "soft"                  # soft => penalize counter-trend, don't hard block
+    
 
 # Terminal UI
 ui:
@@ -101,10 +103,14 @@ strategy:
   max_ret_5s: 0.0025      
   block_on_volume_spike: false  
   fixed_trade_usdt: 50   
-  tp_pct: 0.0015          # QUICK SCALP: 0.15% profit target (Pure profit on USDC!)
-  sl_pct: 0.0010          # TIGHT SL: 0.10% (Cuts losses twice as fast)
-  vol_filter_atr_pct: 0.0005  # Minimum ATR% (0.05%)
-  vol_filter_atr_max_pct: 0.08  # Maximum ATR% (8%)
+  tp_pct: 0.0015          # QUICK SCALP: 0.15% target
+  sl_pct: 0.0010          # TIGHT SL: 0.10%
+    
+  vol_filter_atr_pct: 0.0005  
+  vol_filter_atr_max_pct: 0.08  
+  pivot_discipline: false     # soft filter only; do not block valid scalps
+  pivot_proximity_threshold: 0.0050 # WIDER GATES: 0.50% proximity (stops missing 'close' touches)
+    
 
 # Risk Limits
 risk:
@@ -112,11 +118,12 @@ risk:
   max_open_positions: 1    # Strictly 1 trade at a time as requested
   min_balance_floor: 60.0  # Emergency stop at $60 (plenty of room for scalping)
 
-# Refresh Intervals (in ticks, 1 tick ≈ 1 second)
+# Refresh Intervals (in ticks, 1 tick ≈ 0.2 seconds)
 intervals:
-  indicator_refresh: 10    # Re-fetch OHLCV & recalculate indicators every 10 ticks (ultra fast)
-  regime_refresh: 600      # Re-query AI macro regime every 600 ticks (~10 min)
-  tick_delay_seconds: 1    # Seconds between each polling loop iteration
+  indicator_refresh: 150   # Refresh MTF every 30 seconds (150 * 0.2s)
+  regime_refresh: 3000     # Refresh macro AI every 10 min
+  tick_delay_seconds: 0.2  # HIGH FREQUENCY: Poll every 200ms
+    
 
 # AI Settings
 ai:
@@ -131,7 +138,7 @@ ai_overlay:
 
 # Trade-Gating AI (evaluates each BUY/SELL before execution)
 ai_trade:
-  enabled: true           # ENABLED: Final safety check before every order
+  enabled: false          # disabled so AI does not veto fast scalps
   model: "gpt-4o-mini"
   min_interval_seconds: 30     # rate-limit AI calls
   on_error: "allow"            # allow | veto

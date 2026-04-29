@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 from market_data import MarketData
-from indicators import calculate_base_indicators, generate_quant_signal, build_mtf_timeframe_context, compute_advanced_pivots
+from indicators import calculate_base_indicators, generate_quant_signal, build_mtf_timeframe_context, compute_advanced_pivots, map_order_book_pressure
 from news_data import NewsData
 from agents import HybridAIOrchestrator
 from execution import BinanceFuturesExecution, PaperFuturesExecution
@@ -310,20 +310,28 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
         return f"{pre}:{d:+.1%}"
 
     out.append(f" {BLUE}{BOLD}[ MARKET & TECH ]{RESET}{CL}")
-    out.append(ln("Price", f"${current_price:.5f}", "Spread", f"{state.get('spread_pct', 0):.4%}"))
+    pressure = map_order_book_pressure(state)
+    pressure_c = GREEN if pressure > 0.2 else (RED if pressure < -0.2 else YELLOW)
+    pressure_str = f"{pressure_c}{pressure:+.1%}{RESET}"
+    out.append(f" {YELLOW}Price:{RESET} ${current_price:.5f}  {YELLOW}Book:{RESET} {pressure_str}  {YELLOW}Spread:{RESET} {state.get('spread_pct', 0):.4%}{CL}")
     
     # Inline MTF if available
     if mtf_cfg.get("enabled", False) and isinstance(mtf_context, dict):
-        for tf in mtf_cfg.get("timeframes", ["3m", "15m", "1h"]):
+        # Show the High-Frequency cluster (1m, 3m, 5m, 15m)
+        for tf in mtf_cfg.get("timeframes", ["1m", "3m", "5m", "15m"]):
             entry = mtf_context.get(tf)
             if isinstance(entry, dict):
                 trend = str(entry.get("trend", "NEUT")).upper()[:4]
                 out.append(f"  {tf:<3}: {trend} | {fmt_level('S', nearest_levels(current_price, entry.get('support_levels',[]) or [], [])[0])} | {fmt_level('R', nearest_levels(current_price, [], entry.get('resistance_levels',[]) or [])[1])}{CL}")
 
-    if pivot_data and pivot_data.get('classic'):
-        pp = pivot_data['classic']['pp']
-        pp_c = GREEN if current_price > pp else RED
-        out.append(f"  {YELLOW}Pivot:{RESET} {pp_c}${pp:.5f}{RESET}  {RED}R1:{RESET}${pivot_data['classic']['r1']:.5f}  {GREEN}S1:{RESET}${pivot_data['classic']['s1']:.5f}{CL}")
+    if pivot_data and pivot_data.get('daily'):
+        daily = pivot_data['daily']
+        h4 = pivot_data.get('h4', {})
+        pp_c = GREEN if current_price > daily.get('pp',0) else RED
+        out.append(f"  {YELLOW}Daily-P:{RESET} {pp_c}${daily.get('pp',0):.5f}{RESET}  {RED}R1:{RESET}${daily.get('r1',0):.5f}  {GREEN}S1:{RESET}${daily.get('s1',0):.5f}{CL}")
+        if h4:
+            pp4_c = GREEN if current_price > h4.get('pp',0) else RED
+            out.append(f"  {YELLOW}4H-Piv:{RESET} {pp4_c}${h4.get('pp',0):.5f}{RESET}  {RED}R1:{RESET}${h4.get('r1',0):.5f}  {GREEN}S1:{RESET}${h4.get('s1',0):.5f}{CL}")
 
     out.append(f"{'-'*frame_width}{CL}")
     out.append(f" {BLUE}{BOLD}[ STRATEGY & AI ]{RESET}{CL}")
@@ -712,6 +720,7 @@ def run_hybrid_bot():
     # Keep this bounded so long runs don't grow memory (and we only show the last few anyway).
     status_buf = deque(maxlen=80)
     signal_history = deque(maxlen=5) # 5-second smoothing buffer
+    shutdown_cleanup_done = False
 
     def status(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -747,18 +756,23 @@ def run_hybrid_bot():
                     macro_indicators_df = calculate_base_indicators(macro_df)
                     latest_macro = macro_indicators_df.iloc[-1].to_dict()
 
-                # Refresh Advanced Pivot Points from daily OHLCV (every 15 min)
+                # Refresh Multi-Layer Pivot Points (Daily + 4H Intraday) every 15 min
                 if time.time() - last_pivot_refresh_ts >= 900 or not pivot_data:
                     try:
                         daily_df = market.fetch_ohlcv(symbol, timeframe='1d', limit=5)
-                        if not daily_df.empty and len(daily_df) >= 2:
-                            pivot_data = compute_advanced_pivots(daily_df)
+                        h4_df = market.fetch_ohlcv(symbol, timeframe='4h', limit=5)
+                        
+                        if not daily_df.empty and not h4_df.empty:
+                            pivot_data = {
+                                "daily": compute_advanced_pivots(daily_df).get('classic', {}),
+                                "h4": compute_advanced_pivots(h4_df).get('classic', {})
+                            }
                             last_pivot_refresh_ts = time.time()
-                            classic_pp = pivot_data.get('classic', {})
-                            if classic_pp:
-                                status(f"Pivots: PP={classic_pp['pp']:.5f} S1={classic_pp['s1']:.5f} R1={classic_pp['r1']:.5f}")
+                            status(f"Pivots: Daily & 4H Walls synchronized")
                     except Exception as e:
-                        logger.warning(f"Failed to compute pivots: {e}")
+                        logger.warning(f"Failed to compute multi-pivots: {e}")
+    
+    
 
             if ai_enabled and (ticks == 1 or ticks % regime_refresh_interval == 0):
                 logger.info("Refreshing AI macro regime...")
@@ -915,13 +929,21 @@ def run_hybrid_bot():
                     signal["hold_reason"] = "AI overlay: no new entries"
                     signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
                 elif overlay_bias == "LONG_ONLY" and signal.get("action") == "SELL":
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = "AI overlay long-only: sell disabled"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
+                    # EXPERT OVERRIDE: Let Ruthless Wall Snipes bypass the AI bias
+                    if "[RUTHLESS SNIPE]" in signal.get("reason", ""):
+                        logger.info("EXPERT OVERRIDE: Allowing SHORT at wall despite AI LONG_ONLY bias.")
+                    else:
+                        signal["action"] = "HOLD"
+                        signal["hold_reason"] = "AI overlay long-only: sell disabled"
+                        signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
                 elif overlay_bias == "SHORT_ONLY" and signal.get("action") == "BUY":
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = "AI overlay short-only: buy disabled"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
+                    # EXPERT OVERRIDE: Let Ruthless Wall Snipes bypass the AI bias
+                    if "[RUTHLESS SNIPE]" in signal.get("reason", ""):
+                        logger.info("EXPERT OVERRIDE: Allowing LONG at wall despite AI SHORT_ONLY bias.")
+                    else:
+                        signal["action"] = "HOLD"
+                        signal["hold_reason"] = "AI overlay short-only: buy disabled"
+                        signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
 
                 if signal.get("action") in {"BUY", "SELL"} and overlay_hold_minutes > 0:
                     signal["hold_until_ts"] = time.time() + (overlay_hold_minutes * 60)
@@ -1056,8 +1078,14 @@ def run_hybrid_bot():
         logger.info("\nBot stopped by user (Ctrl+C). Initiating graceful shutdown...")
         print("\nBot stopped by user. Gracefully closing active positions and open orders...")
         executor.close_all_positions(symbol)
+        shutdown_cleanup_done = True
         print("Shutdown complete. All positions liquidated and orders cancelled.")
     finally:
+        if not shutdown_cleanup_done:
+            try:
+                executor.close_all_positions(symbol)
+            except Exception as e:
+                logger.warning(f"Final shutdown cleanup failed: {e}")
         # Restore terminal if we hid cursor or used alt screen
         _show_cursor_ansi()
         _exit_alt_screen_ansi()
