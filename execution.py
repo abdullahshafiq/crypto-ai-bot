@@ -261,6 +261,37 @@ class BinanceFuturesExecution:
         self.stats_gross += float(pnl)
         self.stats_fees += float(fees)
 
+    def _finalize_position_exit(self, pos: dict, exit_type: str, exit_price: float, amount: float = None):
+        entry = float(pos.get("entry", exit_price) or exit_price)
+        side = str(pos.get("side", "")).upper()
+        amount = float(amount if amount is not None else pos.get("amount", 0.0) or 0.0)
+        trade_id = int(pos.get("trade_id", 0) or 0)
+        fee_rate = float(getattr(self, "fee_rate", 0.0) or 0.0)
+        order_side = "SELL" if side == "LONG" else "BUY"
+        profit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
+        pnl = (exit_price - entry) * amount if side == "LONG" else (entry - exit_price) * amount
+        fees = (amount * entry * fee_rate) + (amount * exit_price * fee_rate)
+
+        self._record_closed_trade(exit_type, entry, exit_price, pnl, profit_pct * 100, fees)
+        self._log_trade(trade_id, "EXIT", order_side, exit_price, amount, pnl, fees, t_type=exit_type)
+        self.trade_count += 1
+        self._last_trade_ts = time.time()
+        self._recently_closed_ts = time.time()
+        self._last_closed_side = side
+        self.last_status = f"{exit_type}: {side} @ ${exit_price:.5f} P&L ${pnl:+,.2f}"
+
+    def _pending_exit_order_is_open(self, order_id: str) -> bool:
+        try:
+            for order in self.exchange.fetch_open_orders(self.symbol):
+                info = order.get("info", {}) or {}
+                ids = {str(order.get("id", "")), str(info.get("orderId", ""))}
+                if str(order_id) in ids:
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"Pending exit status check skipped: {e}")
+            return True
+
     def _fetch_free_usdt(self):
         target_asset = _settlement_asset_from_symbol(getattr(self, 'symbol', ''), default='USDT')
         fallback_asset = 'USDT' if target_asset == 'USDC' else 'USDC'
@@ -411,6 +442,12 @@ class BinanceFuturesExecution:
             if exch_pos is None:
                 # No position on exchange, clear local state
                 if self.active_positions:
+                    for pos in list(self.active_positions):
+                        if pos.get("pending_exit_ts"):
+                            exit_price = float(pos.get("pending_exit_price", current_price) or current_price)
+                            exit_amount = float(pos.get("pending_exit_amount", pos.get("amount", 0.0)) or 0.0)
+                            exit_type = str(pos.get("pending_exit_type", "EXIT") or "EXIT")
+                            self._finalize_position_exit(pos, exit_type, exit_price, exit_amount)
                     logger.info(f"[SYNC] No position on exchange for {self.symbol}, clearing local state.")
                     self.active_positions = []
                     try:
@@ -468,6 +505,18 @@ class BinanceFuturesExecution:
         remaining = []
         try:
             for pos in self.active_positions:
+                pending_exit_id = str(pos.get("pending_exit_order_id") or "")
+                if pos.get("pending_exit_ts"):
+                    pending_age = time.time() - float(pos.get("pending_exit_ts", time.time()) or time.time())
+                    pending_still_open = self._pending_exit_order_is_open(pending_exit_id) if pending_exit_id else pending_age < 10
+                    if pending_still_open:
+                        self.last_status = f"Waiting maker exit fill @ ${float(pos.get('pending_exit_price', current_price) or current_price):.5f}"
+                        remaining.append(pos)
+                        continue
+                    logger.info("[ZERO_FEE_EXIT] Pending maker exit no longer open while position remains; retrying close")
+                    for key in ("pending_exit_order_id", "pending_exit_type", "pending_exit_price", "pending_exit_amount", "pending_exit_ts"):
+                        pos.pop(key, None)
+
                 closed = False
                 entry = pos['entry']
                 side = pos['side']
@@ -693,7 +742,7 @@ class BinanceFuturesExecution:
                     try:
                         # Place post-only limit at current price (Maker order)
                         price_s = self.exchange.price_to_precision(self.symbol, current_price)
-                        self.exchange.create_order(
+                        order_resp = self.exchange.create_order(
                             symbol=self.symbol, 
                             type='LIMIT', 
                             side=order_side, 
@@ -702,6 +751,14 @@ class BinanceFuturesExecution:
                             params=_post_only_params({'reduceOnly': True})
                         )
                         logger.info(f"[ZERO_FEE_EXIT] Limit exit placed at {price_s}")
+                        pos['pending_exit_order_id'] = str(order_resp.get('id') or (order_resp.get('info', {}) or {}).get('orderId') or "")
+                        pos['pending_exit_type'] = exit_type
+                        pos['pending_exit_price'] = float(price_s)
+                        pos['pending_exit_amount'] = float(amount)
+                        pos['pending_exit_ts'] = time.time()
+                        self.last_status = f"Maker exit placed @ ${float(price_s):.5f}"
+                        remaining.append(pos)
+                        continue
                     except Exception as e:
                         if getattr(self, 'maker_only', False):
                             logger.warning(f"Post-only maker exit rejected; keeping position open for retry: {e}")
