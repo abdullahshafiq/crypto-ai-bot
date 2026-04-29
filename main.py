@@ -490,6 +490,7 @@ def run_hybrid_bot():
     min_profit_after_fees = float(exec_cfg.get("min_profit_after_fees", 0.0010))
     exit_on_reversal_only_in_profit = bool(exec_cfg.get("exit_on_reversal_only_in_profit", True))
     use_limit_orders = bool(exec_cfg.get("use_limit_orders", False))
+    use_native_stop_loss = bool(exec_cfg.get("use_native_stop_loss", False))
     trailing_callback_pct = float(exec_cfg.get("trailing_callback_pct", 0.5))
     trailing_stop_callback = trailing_callback_pct / 100.0
 
@@ -575,6 +576,7 @@ def run_hybrid_bot():
             executor.trail_tighten_2_pct = trail_tighten_2_pct
             executor.min_profit_after_fees = min_profit_after_fees
             executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
+            executor.use_native_stop_loss = use_native_stop_loss
             executor.use_native_trailing_stop = bool(cfg.get('execution', {}).get('use_native_trailing_stop', False))
             executor.trailing_callback_pct = trailing_callback_pct
             executor.trailing_stop_callback = trailing_stop_callback
@@ -608,6 +610,7 @@ def run_hybrid_bot():
         executor.trail_tighten_2_pct = trail_tighten_2_pct
         executor.min_profit_after_fees = min_profit_after_fees
         executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
+        executor.use_native_stop_loss = use_native_stop_loss
         executor.use_limit_orders = use_limit_orders
 
     executor.max_open_positions = cfg['risk'].get('max_open_positions', 1)

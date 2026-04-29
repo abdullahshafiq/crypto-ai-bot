@@ -11,12 +11,12 @@ data:
 # Execution Settings
 execution:
   mode: "live"                # paper | demo | live
-  leverage: 10               # BOOSTER: 10x leverage for zero-fee sniping
+  leverage: 5                # SAFER LIVE: cap base leverage at 5x
   dynamic_leverage: true       
   paper_starting_balance_usdt: 100
   fee_rate: 0.0             
-  dca_enabled: true            # ENABLED: Averaging down to recover trades
-  dca_max_steps: 2             # Max 2 extra entries (3 total)
+  dca_enabled: false           # SAFER LIVE: no averaging down unattended
+  dca_max_steps: 0             # No extra entries
   dca_distance_pct: 0.006      # DCA every -0.60% drop
   fee_slippage_buffer_pct: 0.0  # Zero buffer for aggressive entry
   fee_edge_multiplier: 0.2      # AGGRESSIVE: Trade even if profit is only slightly above fees
@@ -33,6 +33,7 @@ execution:
   exit_on_reversal_only_in_profit: true 
   use_limit_orders: true            
   maker_only: true                  
+  use_native_stop_loss: true    # Exchange-side reduce-only emergency stop after fill
   use_native_trailing_stop: false   
   trailing_callback_pct: 0.5        
     
@@ -41,15 +42,15 @@ execution:
 # Dynamic Leverage (volatility + confidence based position sizing)
 leverage:
   enabled: true                # Enable dynamic leverage scaling
-  min_leverage: 5              # SNIPER FLOOR: Never drop below 5x
-  max_leverage: 10             # SNIPER CAP: Allow full 10x power
+  min_leverage: 3              # SAFER LIVE: smaller minimum leverage
+  max_leverage: 5              # SAFER LIVE: cap dynamic leverage
   # Confidence thresholds for leverage levels (0-1 scale)
   confidence_levels:
-    0.05: 5.0                  # Any edge -> 5x leverage
-    0.15: 7.5                  # Low confidence -> 7.5x leverage
-    0.30: 10.0                 # Moderate confidence -> 10x leverage
-    0.50: 10.0                 # Strong signal -> 10x leverage
-    0.75: 10.0                 # MAX -> 10x leverage
+    0.05: 3.0                  # Small edge -> 3x leverage
+    0.15: 4.0                  # Low confidence -> 4x leverage
+    0.30: 5.0                  # Moderate confidence -> 5x leverage
+    0.50: 5.0                  # Strong signal -> 5x leverage
+    0.75: 5.0                  # MAX -> 5x leverage
   use_score_multiplier: true   # Also factor in signal score (0-1) to adjust leverage
   score_weight: 0.3            # Balanced score weight
   atr_volatility_scaling: false # DISABLED: Don't scale down in high vol for ruthless mode
@@ -98,7 +99,7 @@ auto_learning:
 # Quant Strategy Parameters
 strategy:
   max_spread: 0.0005        # TIGHT: 0.05% max spread
-  min_conf: 0.05            # ACTIVE SCALP: allow aligned 5%+ signals
+  min_conf: 0.10            # SAFER LIVE: require 10%+ confidence
   max_ret_30s: 0.0050     
   max_ret_5s: 0.0025      
   block_on_volume_spike: false  

@@ -178,6 +178,7 @@ class BinanceFuturesExecution:
         self.leverage_score_weight = 0.3
         self.min_profit_after_fees = 0.0015
         self.exit_on_reversal_only_in_profit = True
+        self.use_native_stop_loss = False
         self.use_native_trailing_stop = False
         self.trailing_stop_callback = 0.005
         self.scalp_config = {
@@ -464,6 +465,30 @@ class BinanceFuturesExecution:
             logger.debug(f"Open-order sweep skipped: {e}")
         return cancelled
 
+    def _place_native_stop_loss(self, side: str, amount: float, stop_price: float) -> bool:
+        if not getattr(self, 'use_native_stop_loss', False):
+            return False
+        try:
+            stop_side = 'SELL' if side == 'LONG' else 'BUY'
+            amount_str = self.exchange.amount_to_precision(self.symbol, float(amount))
+            stop_str = self.exchange.price_to_precision(self.symbol, float(stop_price))
+            self.exchange.create_order(
+                symbol=self.symbol,
+                type='STOP_MARKET',
+                side=stop_side,
+                amount=float(amount_str),
+                params={
+                    'stopPrice': float(stop_str),
+                    'reduceOnly': True,
+                    'workingType': 'MARK_PRICE',
+                },
+            )
+            logger.info(f"[EXCHANGE] Native stop loss set: {side} {amount_str} @ {stop_str}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to place native stop loss: {e}")
+            return False
+
     def get_portfolio_value(self, current_price: float) -> float:
         target_asset = _settlement_asset_from_symbol(getattr(self, 'symbol', ''), default='USDT')
         fallback_asset = 'USDT' if target_asset == 'USDC' else 'USDC'
@@ -606,6 +631,7 @@ class BinanceFuturesExecution:
                             confidence=float(pending_entry.get("confidence", 0.0) or 0.0),
                             reason=str(pending_entry.get("reason", "") or ""),
                         )
+                        self._place_native_stop_loss(exch_side, exch_size, sl_price)
                         self.pending_entry = None
                         self.last_status = f"Entry filled: {exch_side} {exch_size:.0f} @ ${entry_price:.5f}"
                         return
@@ -1243,6 +1269,7 @@ class BinanceFuturesExecution:
                 'sl': sl_price,
                 'tp_price': tp_price
             })
+            self._place_native_stop_loss('LONG' if action == "BUY" else 'SHORT', amount, sl_price)
             
             # NATIVE BINANCE TRAILING STOP: Place the official order if enabled
             if getattr(self, 'use_native_trailing_stop', False):
