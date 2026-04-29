@@ -168,6 +168,8 @@ class BinanceFuturesExecution:
         self.stats_fees = 0.0
         self.trade_count = 0
         self._next_trade_id = 1
+        self.pending_entry = None
+        self.pending_entry_ttl_seconds = 20
         
         self.max_open_positions = 1
         self.min_balance_floor = 90.0
@@ -285,7 +287,7 @@ class BinanceFuturesExecution:
         self._last_closed_side = side
         self.last_status = f"{exit_type}: {side} @ ${exit_price:.5f} P&L ${pnl:+,.2f}"
 
-    def _pending_exit_order_is_open(self, order_id: str) -> bool:
+    def _order_is_open(self, order_id: str) -> bool:
         try:
             for order in self.exchange.fetch_open_orders(self.symbol):
                 info = order.get("info", {}) or {}
@@ -294,8 +296,11 @@ class BinanceFuturesExecution:
                     return True
             return False
         except Exception as e:
-            logger.debug(f"Pending exit status check skipped: {e}")
+            logger.debug(f"Order status check skipped: {e}")
             return True
+
+    def _pending_exit_order_is_open(self, order_id: str) -> bool:
+        return self._order_is_open(order_id)
 
     def _resolve_order_fill(self, pos: dict, fallback_price: float, fallback_amount: float):
         order_id = str(pos.get("pending_exit_order_id") or "")
@@ -515,7 +520,19 @@ class BinanceFuturesExecution:
                     break
             
             if exch_pos is None:
-                self.cancel_open_orders(self.symbol)
+                pending_entry = getattr(self, 'pending_entry', None)
+                if pending_entry:
+                    order_id = str(pending_entry.get('order_id') or "")
+                    age = time.time() - float(pending_entry.get('ts', time.time()) or time.time())
+                    ttl = float(getattr(self, 'pending_entry_ttl_seconds', 20) or 20)
+                    if order_id and self._order_is_open(order_id) and age < ttl:
+                        self.last_status = f"Waiting entry fill @ ${float(pending_entry.get('price', current_price)):.5f}"
+                        return
+                    self.cancel_open_orders(self.symbol)
+                    self.pending_entry = None
+                    self.last_status = "Entry not filled; order cancelled"
+                    return
+
                 # No position on exchange, clear local state
                 if self.active_positions:
                     for pos in list(self.active_positions):
@@ -526,6 +543,9 @@ class BinanceFuturesExecution:
                             self._finalize_position_exit(pos, exit_type, exit_price, exit_amount)
                     logger.info(f"[SYNC] No position on exchange for {self.symbol}, clearing local state.")
                     self.active_positions = []
+                    self.cancel_open_orders(self.symbol)
+                else:
+                    self.cancel_open_orders(self.symbol)
             else:
                 # Position exists on exchange
                 exch_size = abs(float(exch_pos.get('contracts', 0)))
@@ -546,6 +566,50 @@ class BinanceFuturesExecution:
                         return
 
                 if not self.active_positions:
+                    pending_entry = getattr(self, 'pending_entry', None)
+                    if pending_entry:
+                        action = str(pending_entry.get('action', 'BUY'))
+                        trade_id = int(pending_entry.get('trade_id', 0) or 0)
+                        sl_price = float(pending_entry.get('sl', entry_price * (0.99 if exch_side == 'LONG' else 1.01)))
+                        tp_price = pending_entry.get('tp')
+                        sl_dist = abs(entry_price - sl_price) / entry_price if entry_price else 0.005
+                        logger.info(f"[SYNC] Entry filled: {exch_side} {exch_size} @ {entry_price}")
+                        self.active_positions.append({
+                            'trade_id': trade_id,
+                            'side': exch_side,
+                            'entry': entry_price,
+                            'amount': exch_size,
+                            'entry_ts': time.time(),
+                            'hold_until_ts': float(pending_entry.get("hold_until_ts", 0.0) or 0.0),
+                            'highest_price': current_price if exch_side == 'LONG' else 0,
+                            'lowest_price': current_price if exch_side == 'SHORT' else 0,
+                            'highest_profit_pct': 0.0,
+                            'sl_pct_dist': sl_dist,
+                            'fee_rate': float(self.fee_rate),
+                            'min_profit_after_fees': float(getattr(self, 'min_profit_after_fees', 0.0001)),
+                            'break_even_trigger_pct': float(self.break_even_trigger_pct),
+                            'break_even_buffer_pct': float(self.break_even_buffer_pct),
+                            'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
+                            'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
+                            'sl': sl_price,
+                            'tp_price': float(tp_price) if tp_price else None,
+                        })
+                        self.trade_count += 1
+                        self._last_trade_ts = time.time()
+                        self._log_trade(
+                            trade_id,
+                            "ENTRY",
+                            action,
+                            entry_price,
+                            exch_size,
+                            score=float(pending_entry.get("score", 0.0) or 0.0),
+                            confidence=float(pending_entry.get("confidence", 0.0) or 0.0),
+                            reason=str(pending_entry.get("reason", "") or ""),
+                        )
+                        self.pending_entry = None
+                        self.last_status = f"Entry filled: {exch_side} {exch_size:.0f} @ ${entry_price:.5f}"
+                        return
+
                     # ADOPT position: It's on exchange but not in our local memory (e.g. after restart)
                     logger.info(f"[SYNC] Adopting existing {exch_side} position for {self.symbol} (Size: {exch_size}, Entry: {entry_price})")
                     self.active_positions.append({
@@ -864,6 +928,20 @@ class BinanceFuturesExecution:
 
         try:
             now = time.time()
+            pending_entry = getattr(self, 'pending_entry', None)
+            if pending_entry:
+                order_id = str(pending_entry.get('order_id') or "")
+                age = now - float(pending_entry.get('ts', now) or now)
+                ttl = float(getattr(self, 'pending_entry_ttl_seconds', 20) or 20)
+                if order_id and self._order_is_open(order_id) and age < ttl:
+                    self.last_status = f"Waiting entry fill @ ${float(pending_entry.get('price', current_price)):.5f}"
+                    return
+                self.cancel_open_orders(self.symbol)
+                self.pending_entry = None
+                self._last_trade_ts = now
+                self.last_status = "Entry expired; retrying after cooldown"
+                return
+
             if self.min_seconds_between_trades and (now - float(self._last_trade_ts)) < float(self.min_seconds_between_trades):
                 self.last_status = f"Cooldown ({int(self.min_seconds_between_trades)}s)"
                 return
@@ -1082,6 +1160,29 @@ class BinanceFuturesExecution:
                     )
                     real_entry_price = float(price_str)
                     self.last_status = f"Limit placed: {action} {amount_str} @ {price_str}"
+                    if getattr(self, 'maker_only', False) and not is_dca:
+                        sl_price = signal.get('sl', current_price * (0.993 if action == "BUY" else 1.007))
+                        try:
+                            tp_price = float(signal.get('tp')) if signal.get('tp') else None
+                        except (TypeError, ValueError):
+                            tp_price = None
+                        self.pending_entry = {
+                            'order_id': str(order_resp.get('id') or (order_resp.get('info', {}) or {}).get('orderId') or ""),
+                            'trade_id': trade_id,
+                            'action': action,
+                            'side': 'LONG' if action == "BUY" else 'SHORT',
+                            'amount': float(amount_str),
+                            'price': real_entry_price,
+                            'ts': now,
+                            'sl': float(sl_price),
+                            'tp': tp_price,
+                            'hold_until_ts': float(signal.get("hold_until_ts", 0.0) or 0.0),
+                            'score': float(signal.get("score", 0.0) or 0.0),
+                            'confidence': float(signal.get("confidence", 0.0) or 0.0),
+                            'reason': str(signal.get("reason", "") or ""),
+                        }
+                        self._last_trade_ts = now
+                        return
                 else:
                     order_resp = self.exchange.create_market_order(self.symbol, side, amount)
                     # Fetch EXACT average fill price from Binance API to fix P&L discrepancy
@@ -1257,6 +1358,7 @@ class BinanceFuturesExecution:
                 time.sleep(1.0)
 
         self.active_positions = []
+        self.pending_entry = None
         print("[SHUTDOWN] CLEANUP COMPLETE. Account is FLAT.")
 
 
