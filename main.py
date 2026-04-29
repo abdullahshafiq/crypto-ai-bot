@@ -232,6 +232,7 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     
     m, s = divmod(int(uptime), 60)
     h, m = divmod(m, 60)
+    uptime_str = f"{h:02d}:{m:02d}:{s:02d}"
     
     ret_30s = state.get('ret_30s', 0)
     ret_30s_str = f"{ret_30s:+.2%}" if ret_30s is not None else "0.00%"
@@ -295,7 +296,7 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     exec_label = getattr(executor, "label", "EXEC")
     bal_str = f"{GREEN}${val:,.2f}{RESET}" if val >= executor.initial_balance else f"{RED}${val:,.2f}{RESET}"
-    out.append(f" {BOLD}🚀 {exec_label} | {symbol} | {regime_str}{RESET} | Bal: {bal_str} | {datetime.now().strftime('%H:%M:%S')} | {pnl_str}{CL}")
+    out.append(f" {BOLD}🚀 {exec_label} | {symbol} | {regime_str}{RESET} | Bal: {bal_str} | Run: {uptime_str} | {pnl_str}{CL}")
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     
     # Combined Data & Technicals
