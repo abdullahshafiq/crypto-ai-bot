@@ -454,9 +454,10 @@ def run_hybrid_bot():
                 fee_symbol = f"{base}/{quote}:{quote}"
             _fee_info = _tmp_ex.fetch_trading_fee(fee_symbol)
             if _fee_info:
-                real_maker = float(_fee_info.get('maker', 0) or 0)
+                maker_raw = _fee_info.get('maker')
+                real_maker = float(maker_raw) if maker_raw is not None else 0.0
                 real_taker = float(_fee_info.get('taker', 0) or 0)
-                if real_maker > 0:
+                if maker_raw is not None:
                     fee_rate = real_maker  # Use maker fee (limit orders)
                     print(f"Fetched real Binance fees: maker={real_maker:.4%}, taker={real_taker:.4%} -> using {fee_rate:.4%}")
                 elif real_taker > 0:
@@ -467,6 +468,7 @@ def run_hybrid_bot():
             print(f"Could not fetch Binance fees ({e}), using config: {fee_rate:.4%}")
     fee_slippage_buffer_pct = float(exec_cfg.get("fee_slippage_buffer_pct", 0.0))
     fee_edge_multiplier = float(exec_cfg.get("fee_edge_multiplier", 1.0))
+    maker_only = bool(exec_cfg.get("maker_only", False))
     min_seconds_between_trades = int(exec_cfg.get("min_seconds_between_trades", 0))
     min_seconds_before_reversal = int(exec_cfg.get("min_seconds_before_reversal", 0))
     reversal_min_confidence = float(exec_cfg.get("reversal_min_confidence", 0.0))
@@ -550,6 +552,7 @@ def run_hybrid_bot():
             executor.fee_rate = fee_rate
             executor.fee_slippage_buffer_pct = fee_slippage_buffer_pct
             executor.fee_edge_multiplier = fee_edge_multiplier
+            executor.maker_only = maker_only
             executor.fixed_trade_usdt = fixed_trade_usdt
             executor.min_seconds_between_trades = min_seconds_between_trades
             executor.min_seconds_before_reversal = min_seconds_before_reversal
@@ -583,6 +586,7 @@ def run_hybrid_bot():
         )
         executor.fee_slippage_buffer_pct = fee_slippage_buffer_pct
         executor.fee_edge_multiplier = fee_edge_multiplier
+        executor.maker_only = maker_only
         executor.fixed_trade_usdt = fixed_trade_usdt
         executor.min_seconds_between_trades = min_seconds_between_trades
         executor.min_seconds_before_reversal = min_seconds_before_reversal

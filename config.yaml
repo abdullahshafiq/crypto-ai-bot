@@ -32,7 +32,8 @@ execution:
   min_profit_after_fees: 0.0001     # 0.01% min profit target (Pure profit on USDC!)
   exit_on_reversal_only_in_profit: true 
   use_limit_orders: true            # Use Maker orders to save fees
-  use_native_trailing_stop: true    # ENABLED: Uses Binance's own trailing stop engine
+  maker_only: true                  # Post-only entries/exits to avoid taker fees
+  use_native_trailing_stop: false   # Disabled because trailing-stop-market pays taker fees
   trailing_callback_pct: 0.5        # 0.5% callback (perfect for DOGE scalps)
   ttl_exit_seconds: 300             # 5min candles need more time to play out
 

@@ -50,6 +50,13 @@ def _settlement_asset_from_symbol(symbol: str, default: str = "USDT") -> str:
     return default
 
 
+def _post_only_params(extra: dict | None = None) -> dict:
+    params = {'timeInForce': 'GTX', 'postOnly': True}
+    if extra:
+        params.update(extra)
+    return params
+
+
 def _compute_trailing_stop(pos: dict, current_price: float) -> float:
     entry = float(pos.get("entry", current_price) or current_price)
     side = str(pos.get("side", "LONG"))
@@ -111,6 +118,7 @@ class BinanceFuturesExecution:
         self.fee_rate = 0.0004
         self.fee_slippage_buffer_pct = 0.0
         self.fee_edge_multiplier = 1.0
+        self.maker_only = False
         self.fixed_trade_usdt = 0.0
         self.learning_risk_multiplier = 1.0
         self.min_seconds_between_trades = 0
@@ -683,7 +691,7 @@ class BinanceFuturesExecution:
                     # ZERO FEE EXIT: We now use LIMIT orders for BOTH Take-Profit and Stop-Loss.
                     # This ensures you pay $0.00 in fees on almost every exit.
                     try:
-                        # Place limit at current price (Maker order)
+                        # Place post-only limit at current price (Maker order)
                         price_s = self.exchange.price_to_precision(self.symbol, current_price)
                         self.exchange.create_order(
                             symbol=self.symbol, 
@@ -691,11 +699,16 @@ class BinanceFuturesExecution:
                             side=order_side, 
                             amount=amount, 
                             price=float(price_s), 
-                            params={'reduceOnly': True, 'postOnly': True} # postOnly ensures Maker status
+                            params=_post_only_params({'reduceOnly': True})
                         )
                         logger.info(f"[ZERO_FEE_EXIT] Limit exit placed at {price_s}")
                     except Exception as e:
-                        # Fallback: If Post-Only fails (price moved), use a standard Market order to ensure we exit
+                        if getattr(self, 'maker_only', False):
+                            logger.warning(f"Post-only maker exit rejected; keeping position open for retry: {e}")
+                            self.last_status = "Maker exit rejected; retrying"
+                            remaining.append(pos)
+                            continue
+                        # Fallback: If Post-Only fails (price moved), use a standard Market order to ensure we exit.
                         logger.warning(f"Post-Only Limit Exit failed, falling back to Market: {e}")
                         self.exchange.create_market_order(self.symbol, order_side, amount)
                     
@@ -783,6 +796,22 @@ class BinanceFuturesExecution:
                     if getattr(self, 'exit_on_reversal_only_in_profit', True):
                         logger.info(f"[PROFIT_BANK] Reversal detected while in profit (+{profit_pct:.2%}). Banking green!")
                         order_side = 'SELL' if current_pos['side'] == 'LONG' else 'BUY'
+                        if getattr(self, 'maker_only', False):
+                            price_s = self.exchange.price_to_precision(self.symbol, current_price)
+                            try:
+                                self.exchange.create_order(
+                                    symbol=self.symbol,
+                                    type='LIMIT',
+                                    side=order_side,
+                                    amount=current_pos['amount'],
+                                    price=float(price_s),
+                                    params=_post_only_params({'reduceOnly': True}),
+                                )
+                                self.last_status = f"Maker reversal exit placed @ {price_s}"
+                            except Exception as e:
+                                self.last_status = f"Maker reversal rejected: {str(e)[:40]}"
+                                logger.warning(f"Maker-only reversal exit rejected: {e}")
+                            return
                         self.exchange.create_market_order(self.symbol, order_side, current_pos['amount'])
                         
                         pnl = (current_price - current_pos['entry']) * current_pos['amount'] if current_pos['side'] == 'LONG' else (current_pos['entry'] - current_price) * current_pos['amount']
@@ -796,6 +825,22 @@ class BinanceFuturesExecution:
                     else:
                         logger.info(f"[REVERSAL] Flipping {current_pos['side']} to {action} (Profit: {profit_pct:+.2%})")
                         order_side = 'SELL' if current_pos['side'] == 'LONG' else 'BUY'
+                        if getattr(self, 'maker_only', False):
+                            price_s = self.exchange.price_to_precision(self.symbol, current_price)
+                            try:
+                                self.exchange.create_order(
+                                    symbol=self.symbol,
+                                    type='LIMIT',
+                                    side=order_side,
+                                    amount=current_pos['amount'],
+                                    price=float(price_s),
+                                    params=_post_only_params({'reduceOnly': True}),
+                                )
+                                self.last_status = f"Maker reversal exit placed @ {price_s}"
+                            except Exception as e:
+                                self.last_status = f"Maker reversal rejected: {str(e)[:40]}"
+                                logger.warning(f"Maker-only reversal exit rejected: {e}")
+                            return
                         self.exchange.create_market_order(self.symbol, order_side, current_pos['amount'])
                         
                         pnl = (current_price - current_pos['entry']) * current_pos['amount'] if current_pos['side'] == 'LONG' else (current_pos['entry'] - current_price) * current_pos['amount']
@@ -910,7 +955,7 @@ class BinanceFuturesExecution:
                         side=side,
                         amount=float(amount_str),
                         price=float(price_str),
-                        params={'timeInForce': 'GTC'} # Removed postOnly to ensure it always triggers
+                        params=_post_only_params() if getattr(self, 'maker_only', False) else {'timeInForce': 'GTC'}
                     )
                     real_entry_price = float(price_str)
                     self.last_status = f"Limit placed: {action} {amount_str} @ {price_str}"
@@ -1099,6 +1144,7 @@ class PaperFuturesExecution:
         self.fee_rate = float(fee_rate) 
         self.fee_slippage_buffer_pct = 0.0
         self.fee_edge_multiplier = 1.0
+        self.maker_only = False
         self.fixed_trade_usdt = 0.0
         self.learning_risk_multiplier = 1.0
         self.min_seconds_between_trades = 15
