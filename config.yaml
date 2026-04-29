@@ -1,6 +1,6 @@
-# High-Frequency Scalping Configuration (DOGE/USDT)
+# High-Frequency Scalping Configuration (DOGE/USDC)
 
-symbol: "DOGE/USDT"
+symbol: "DOGE/USDC"
 timeframe: "5m"           # Base timeframe for execution (matches 15m structure)
 macro_timeframe: "1h"     # Macro timeframe for trend alignment
 
@@ -10,7 +10,7 @@ data:
 
 # Execution Settings
 execution:
-  mode: "demo"                # paper | demo | live
+  mode: "live"                # paper | demo | live
   leverage: 10               # BOOSTER: 10x leverage for zero-fee sniping
   dynamic_leverage: true       
   paper_starting_balance_usdt: 100

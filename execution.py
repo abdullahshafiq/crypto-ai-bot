@@ -41,6 +41,15 @@ def _market_id_from_symbol(symbol: str) -> str:
     return str(symbol or "").replace("/", "").replace(":USDT", "").replace(":USDC", "")
 
 
+def _settlement_asset_from_symbol(symbol: str, default: str = "USDT") -> str:
+    symbol = str(symbol or "").upper()
+    if ":USDC" in symbol or "/USDC" in symbol:
+        return "USDC"
+    if ":USDT" in symbol or "/USDT" in symbol:
+        return "USDT"
+    return default
+
+
 def _compute_trailing_stop(pos: dict, current_price: float) -> float:
     entry = float(pos.get("entry", current_price) or current_price)
     side = str(pos.get("side", "LONG"))
@@ -245,14 +254,16 @@ class BinanceFuturesExecution:
         self.stats_fees += float(fees)
 
     def _fetch_free_usdt(self):
+        target_asset = _settlement_asset_from_symbol(getattr(self, 'symbol', ''), default='USDT')
+        fallback_asset = 'USDT' if target_asset == 'USDC' else 'USDC'
         try:
             balance = self.exchange.fetch_balance()
-            # 1. Standard CCXT
-            free = float(balance.get('free', {}).get('USDT', 0.0))
+            # 1. Standard CCXT for the settlement asset
+            free = float(balance.get('free', {}).get(target_asset, 0.0))
             if free > 0: return free
             
             # 2. Try total
-            total = float(balance.get('total', {}).get('USDT', 0.0))
+            total = float(balance.get('total', {}).get(target_asset, 0.0))
             if total > 0: return total
             
             # 3. Deep dive into raw 'info' from Binance API
@@ -265,12 +276,10 @@ class BinanceFuturesExecution:
                 
                 # Check nested assets list
                 if 'assets' in info:
-                    # Detect which asset to look for based on symbol (USDT or USDC)
-                    target_asset = 'USDC' if 'USDC' in str(getattr(self, 'symbol', 'USDT')) else 'USDT'
                     for asset in info['assets']:
                         if asset['asset'] == target_asset:
                             return float(asset.get('availableBalance', 0.0))
-            return 0.0
+            return float(balance.get('free', {}).get(fallback_asset, 0.0) or 0.0)
         except Exception as e:
             logger.error(f"Balance Fetch Error: {e}")
             self.last_status = f"Balance error: {e}"
@@ -337,15 +346,23 @@ class BinanceFuturesExecution:
             return []
 
     def get_portfolio_value(self, current_price: float) -> float:
+        target_asset = _settlement_asset_from_symbol(getattr(self, 'symbol', ''), default='USDT')
+        fallback_asset = 'USDT' if target_asset == 'USDC' else 'USDC'
         try:
             balance = self.exchange.fetch_balance()
-            # On Futures, total equity is 'total' -> 'USDT' or 'USDC'
-            total_equity = float(balance.get('total', {}).get('USDT', 0.0))
+            # On Futures, total equity is in the settlement asset.
+            total_equity = float(balance.get('total', {}).get(target_asset, 0.0))
             if total_equity == 0:
-                total_equity = float(balance.get('total', {}).get('USDC', 0.0))
+                total_equity = float(balance.get('total', {}).get(fallback_asset, 0.0))
             
             if total_equity == 0 and 'info' in balance:
-                total_equity = float(balance['info'].get('totalWalletBalance', 0.0))
+                assets = balance['info'].get('assets', [])
+                for asset in assets:
+                    if asset.get('asset') == target_asset:
+                        total_equity = float(asset.get('walletBalance', 0.0) or asset.get('availableBalance', 0.0) or 0.0)
+                        break
+                if total_equity == 0:
+                    total_equity = float(balance['info'].get('totalWalletBalance', 0.0))
             
             if not self._initial_price_set and total_equity > 0:
                 self.initial_balance = total_equity

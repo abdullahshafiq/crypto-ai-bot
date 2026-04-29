@@ -45,12 +45,12 @@ class MarketData:
         if not symbol:
             return symbol
         if self.market == "usdm" and ":" not in symbol:
-            # CCXT futures symbols use the settlement asset suffix, e.g. BTC/USDT:USDT.
+            # CCXT futures symbols use the settlement asset suffix, e.g. BTC/USDT:USDT or DOGE/USDC:USDC.
             if "/" in symbol:
                 base, quote = symbol.split("/", 1)
                 if ":" not in quote:
                     quote = quote.split(":")[0]
-                return f"{base}/{quote}:USDT"
+                return f"{base}/{quote}:{quote}"
         return symbol
 
     def _resample_ohlcv(self, df: pd.DataFrame, rule: str) -> pd.DataFrame:

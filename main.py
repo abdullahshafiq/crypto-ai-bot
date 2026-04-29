@@ -441,13 +441,18 @@ def run_hybrid_bot():
     if api_key and api_secret and "your_testnet" not in str(api_key):
         try:
             import ccxt
-            _tmp_ex = ccxt.binance({
+            _tmp_ex = ccxt.binanceusdm({
                 'apiKey': api_key,
                 'secret': api_secret,
                 'enableRateLimit': True,
-                'options': {'defaultType': 'future', 'adjustForTimeDifference': True}
+                'options': {'adjustForTimeDifference': True}
             })
-            _fee_info = _tmp_ex.fetch_trading_fee(symbol)
+            fee_symbol = symbol
+            if "/" in fee_symbol and ":" not in fee_symbol:
+                base, quote = fee_symbol.split("/", 1)
+                quote = quote.split(":", 1)[0]
+                fee_symbol = f"{base}/{quote}:{quote}"
+            _fee_info = _tmp_ex.fetch_trading_fee(fee_symbol)
             if _fee_info:
                 real_maker = float(_fee_info.get('maker', 0) or 0)
                 real_taker = float(_fee_info.get('taker', 0) or 0)
