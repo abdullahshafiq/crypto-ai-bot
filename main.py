@@ -1005,12 +1005,6 @@ def run_hybrid_bot():
                     signal['action'] = "HOLD"
                     signal['hold_reason'] = "Signal smoothing: weak confidence"
 
-            sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
-            if sig_str != last_reported_signal:
-                status(sig_str)
-                logger.info(f"ANALYSIS: {sig_str}")
-                last_reported_signal = sig_str
-
             if bool(ai_overlay_cfg.get("enabled", False)):
                 overlay_bias = str(ai_overlay_state.get("bias", "NEUTRAL") or "NEUTRAL").upper()
                 overlay_risk = str(ai_overlay_state.get("risk_mode", "NORMAL") or "NORMAL").upper()
@@ -1163,17 +1157,22 @@ def run_hybrid_bot():
                         signal['action'] = "HOLD"
                         signal['reason'] += " [AI Veto: Volatile regime]"
 
-                # Re-check action after vetoes
-                if signal['action'] != "HOLD":
-                    entry_style = str(ai_overlay_state.get('entry_style', 'MIXED')).upper()
-                    target_price = float(signal.get('entry', state['price']) or state['price'])
-                    
-                    if entry_style == "BUY_PULLBACKS" and signal['action'] == "BUY":
-                        target_price = min(target_price, state['price'] * 0.999)
-                    elif entry_style == "SELL_RALLIES" and signal['action'] == "SELL":
-                        target_price = max(target_price, state['price'] * 1.001)
+            sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
+            if sig_str != last_reported_signal:
+                status(sig_str)
+                logger.info(f"ANALYSIS: {sig_str}")
+                last_reported_signal = sig_str
 
-                    executor.place_limit_order(signal, symbol, target_price)
+            if signal['action'] != "HOLD":
+                entry_style = str(ai_overlay_state.get('entry_style', 'MIXED')).upper()
+                target_price = float(signal.get('entry', state['price']) or state['price'])
+                
+                if entry_style == "BUY_PULLBACKS" and signal['action'] == "BUY":
+                    target_price = min(target_price, state['price'] * 0.999)
+                elif entry_style == "SELL_RALLIES" and signal['action'] == "SELL":
+                    target_price = max(target_price, state['price'] * 1.001)
+
+                executor.place_limit_order(signal, symbol, target_price)
 
             curr_status = str(getattr(executor, 'last_status', '') or "")
             if curr_status != last_reported_status:
