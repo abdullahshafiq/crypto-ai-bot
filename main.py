@@ -34,6 +34,109 @@ BOLD    = '\033[1m'
 RESET   = '\033[0m'
 CL      = '\033[K' # Clear line
 
+
+def _count_mtf_trends(mtf_context: dict, mtf_cfg: dict) -> tuple[int, int]:
+    bull_count = 0
+    bear_count = 0
+    for tf in mtf_cfg.get("timeframes", []):
+        ctx = mtf_context.get(str(tf))
+        if not isinstance(ctx, dict):
+            continue
+        trend = str(ctx.get("trend", "") or "").upper()
+        if trend == "BULL":
+            bull_count += 1
+        elif trend == "BEAR":
+            bear_count += 1
+    return bull_count, bear_count
+
+
+def _nearest_mtf_level(price: float, mtf_context: dict, mtf_cfg: dict, level_key: str, below: bool) -> float | None:
+    levels = []
+    for tf in mtf_cfg.get("timeframes", []):
+        ctx = mtf_context.get(str(tf))
+        if not isinstance(ctx, dict):
+            continue
+        for raw in ctx.get(level_key, []) or []:
+            try:
+                level = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if below and level < price:
+                levels.append(level)
+            elif not below and level > price:
+                levels.append(level)
+    if not levels:
+        return None
+    return max(levels) if below else min(levels)
+
+
+def _apply_trend_pullback_signal(signal: dict, state: dict, mtf_context: dict, mtf_cfg: dict, overlay_state: dict, pullback_cfg: dict, strategy_cfg: dict) -> bool:
+    if not bool(pullback_cfg.get("enabled", False)):
+        return False
+    if signal.get("action") != "HOLD":
+        return False
+
+    price = float(state.get("price", 0.0) or 0.0)
+    if price <= 0:
+        return False
+
+    overlay_bias = str(overlay_state.get("bias", "NEUTRAL") or "NEUTRAL").upper()
+    overlay_avoid = bool(overlay_state.get("avoid_new_entries", False))
+    if overlay_avoid:
+        return False
+
+    bull_count, bear_count = _count_mtf_trends(mtf_context, mtf_cfg)
+    min_agree = int(pullback_cfg.get("min_mtf_agree", 3) or 3)
+    max_counter_conf = float(pullback_cfg.get("max_counter_conf", 0.35) or 0.35)
+    min_conf = float(strategy_cfg.get("min_conf", 0.10) or 0.10)
+    confidence = float(signal.get("confidence", 0.0) or 0.0)
+    score = float(signal.get("score", 0.0) or 0.0)
+    if confidence < min_conf or confidence > max_counter_conf:
+        return False
+
+    max_level_distance = float(pullback_cfg.get("max_level_distance_pct", 0.015) or 0.015)
+    entry_offset = float(pullback_cfg.get("entry_offset_pct", 0.0008) or 0.0008)
+    tp_pct = float(strategy_cfg.get("tp_pct", 0.0015) or 0.0015)
+    sl_pct = float(strategy_cfg.get("sl_pct", 0.0010) or 0.0010)
+
+    if overlay_bias == "LONG_ONLY" and bull_count >= min_agree and score < 0:
+        support = _nearest_mtf_level(price, mtf_context, mtf_cfg, "support_levels", below=True)
+        if support is not None and ((price - support) / price) > max_level_distance:
+            return False
+        target = price * (1.0 - entry_offset)
+        signal.update({
+            "action": "BUY",
+            "entry": target,
+            "tp": target * (1.0 + tp_pct),
+            "sl": target * (1.0 - sl_pct),
+            "score": max(min_conf, min(confidence, max_counter_conf)) * 0.75,
+            "confidence": max(min_conf, min(confidence, max_counter_conf)),
+            "market_bias": "LONG_ONLY",
+            "hold_reason": "",
+            "reason": f"{signal.get('reason','')} [TREND_PULLBACK_LONG bull_mtf={bull_count}]",
+        })
+        return True
+
+    if overlay_bias == "SHORT_ONLY" and bear_count >= min_agree and score > 0:
+        resistance = _nearest_mtf_level(price, mtf_context, mtf_cfg, "resistance_levels", below=False)
+        if resistance is not None and ((resistance - price) / price) > max_level_distance:
+            return False
+        target = price * (1.0 + entry_offset)
+        signal.update({
+            "action": "SELL",
+            "entry": target,
+            "tp": target * (1.0 - tp_pct),
+            "sl": target * (1.0 + sl_pct),
+            "score": -max(min_conf, min(confidence, max_counter_conf)) * 0.75,
+            "confidence": max(min_conf, min(confidence, max_counter_conf)),
+            "market_bias": "SHORT_ONLY",
+            "hold_reason": "",
+            "reason": f"{signal.get('reason','')} [TREND_PULLBACK_SHORT bear_mtf={bear_count}]",
+        })
+        return True
+
+    return False
+
 def _get_windows_console_handle():
     if os.name != "nt":
         return None
@@ -950,6 +1053,25 @@ def run_hybrid_bot():
 
                 if signal.get("action") in {"BUY", "SELL"} and overlay_hold_minutes > 0:
                     signal["hold_until_ts"] = time.time() + (overlay_hold_minutes * 60)
+
+            if not getattr(executor, "active_positions", []) and not getattr(executor, "pending_entry", None):
+                if _apply_trend_pullback_signal(
+                    signal,
+                    state,
+                    mtf_context,
+                    mtf_cfg,
+                    ai_overlay_state,
+                    cfg.get("trend_pullback", {}) or {},
+                    strategy_config,
+                ):
+                    status(f"Trend pullback: {signal.get('action')} @ ${float(signal.get('entry', state['price'])):.5f}")
+                    logger.info(
+                        "TREND_PULLBACK: action=%s entry=%s confidence=%.1f%% reason=%s",
+                        signal.get("action"),
+                        signal.get("entry"),
+                        float(signal.get("confidence", 0.0) or 0.0) * 100.0,
+                        signal.get("reason", ""),
+                    )
 
             # Legacy trade-gating AI (evaluates each BUY/SELL before execution)
             if ai_trade_cfg.get("enabled", False) and signal.get("action") in {"BUY", "SELL"}:

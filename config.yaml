@@ -111,6 +111,16 @@ strategy:
   vol_filter_atr_max_pct: 0.08  
   pivot_discipline: false     # soft filter only; do not block valid scalps
   pivot_proximity_threshold: 0.0050 # WIDER GATES: 0.50% proximity (stops missing 'close' touches)
+
+# Trend-pullback continuation entries
+# If MTF + AI agree one way but the fast quant score is a mild pullback,
+# place a resting maker order with the trend instead of doing nothing.
+trend_pullback:
+  enabled: true
+  min_mtf_agree: 3
+  max_counter_conf: 0.35
+  max_level_distance_pct: 0.015
+  entry_offset_pct: 0.0008
     
 
 # Risk Limits
