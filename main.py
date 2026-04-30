@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 from market_data import MarketData
-from indicators import calculate_base_indicators, generate_quant_signal, build_mtf_timeframe_context, compute_advanced_pivots, map_order_book_pressure
+from indicators import calculate_base_indicators, generate_quant_signal, build_mtf_timeframe_context, compute_advanced_pivots
 from news_data import NewsData
 from agents import HybridAIOrchestrator
 from execution import BinanceFuturesExecution, PaperFuturesExecution
@@ -33,109 +33,6 @@ RED     = '\033[91m'
 BOLD    = '\033[1m'
 RESET   = '\033[0m'
 CL      = '\033[K' # Clear line
-
-
-def _count_mtf_trends(mtf_context: dict, mtf_cfg: dict) -> tuple[int, int]:
-    bull_count = 0
-    bear_count = 0
-    for tf in mtf_cfg.get("timeframes", []):
-        ctx = mtf_context.get(str(tf))
-        if not isinstance(ctx, dict):
-            continue
-        trend = str(ctx.get("trend", "") or "").upper()
-        if trend == "BULL":
-            bull_count += 1
-        elif trend == "BEAR":
-            bear_count += 1
-    return bull_count, bear_count
-
-
-def _nearest_mtf_level(price: float, mtf_context: dict, mtf_cfg: dict, level_key: str, below: bool) -> float | None:
-    levels = []
-    for tf in mtf_cfg.get("timeframes", []):
-        ctx = mtf_context.get(str(tf))
-        if not isinstance(ctx, dict):
-            continue
-        for raw in ctx.get(level_key, []) or []:
-            try:
-                level = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if below and level < price:
-                levels.append(level)
-            elif not below and level > price:
-                levels.append(level)
-    if not levels:
-        return None
-    return max(levels) if below else min(levels)
-
-
-def _apply_trend_pullback_signal(signal: dict, state: dict, mtf_context: dict, mtf_cfg: dict, overlay_state: dict, pullback_cfg: dict, strategy_cfg: dict) -> bool:
-    if not bool(pullback_cfg.get("enabled", False)):
-        return False
-    if signal.get("action") != "HOLD":
-        return False
-
-    price = float(state.get("price", 0.0) or 0.0)
-    if price <= 0:
-        return False
-
-    overlay_bias = str(overlay_state.get("bias", "NEUTRAL") or "NEUTRAL").upper()
-    overlay_avoid = bool(overlay_state.get("avoid_new_entries", False))
-    if overlay_avoid:
-        return False
-
-    bull_count, bear_count = _count_mtf_trends(mtf_context, mtf_cfg)
-    min_agree = int(pullback_cfg.get("min_mtf_agree", 3) or 3)
-    max_counter_conf = float(pullback_cfg.get("max_counter_conf", 0.35) or 0.35)
-    min_conf = float(strategy_cfg.get("min_conf", 0.10) or 0.10)
-    confidence = float(signal.get("confidence", 0.0) or 0.0)
-    score = float(signal.get("score", 0.0) or 0.0)
-    if confidence < min_conf or confidence > max_counter_conf:
-        return False
-
-    max_level_distance = float(pullback_cfg.get("max_level_distance_pct", 0.015) or 0.015)
-    entry_offset = float(pullback_cfg.get("entry_offset_pct", 0.0008) or 0.0008)
-    tp_pct = float(strategy_cfg.get("tp_pct", 0.0015) or 0.0015)
-    sl_pct = float(strategy_cfg.get("sl_pct", 0.0010) or 0.0010)
-
-    if overlay_bias == "LONG_ONLY" and bull_count >= min_agree and score < 0:
-        support = _nearest_mtf_level(price, mtf_context, mtf_cfg, "support_levels", below=True)
-        if support is not None and ((price - support) / price) > max_level_distance:
-            return False
-        target = price * (1.0 - entry_offset)
-        signal.update({
-            "action": "BUY",
-            "entry": target,
-            "tp": target * (1.0 + tp_pct),
-            "sl": target * (1.0 - sl_pct),
-            "score": max(min_conf, min(confidence, max_counter_conf)) * 0.75,
-            "confidence": max(min_conf, min(confidence, max_counter_conf)),
-            "market_bias": "LONG_ONLY",
-            "hold_reason": "",
-            "reason": f"{signal.get('reason','')} [TREND_PULLBACK_LONG bull_mtf={bull_count}]",
-        })
-        return True
-
-    if overlay_bias == "SHORT_ONLY" and bear_count >= min_agree and score > 0:
-        resistance = _nearest_mtf_level(price, mtf_context, mtf_cfg, "resistance_levels", below=False)
-        if resistance is not None and ((resistance - price) / price) > max_level_distance:
-            return False
-        target = price * (1.0 + entry_offset)
-        signal.update({
-            "action": "SELL",
-            "entry": target,
-            "tp": target * (1.0 - tp_pct),
-            "sl": target * (1.0 + sl_pct),
-            "score": -max(min_conf, min(confidence, max_counter_conf)) * 0.75,
-            "confidence": max(min_conf, min(confidence, max_counter_conf)),
-            "market_bias": "SHORT_ONLY",
-            "hold_reason": "",
-            "reason": f"{signal.get('reason','')} [TREND_PULLBACK_SHORT bear_mtf={bear_count}]",
-        })
-        return True
-
-    return False
 
 def _get_windows_console_handle():
     if os.name != "nt":
@@ -335,7 +232,6 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     
     m, s = divmod(int(uptime), 60)
     h, m = divmod(m, 60)
-    uptime_str = f"{h:02d}:{m:02d}:{s:02d}"
     
     ret_30s = state.get('ret_30s', 0)
     ret_30s_str = f"{ret_30s:+.2%}" if ret_30s is not None else "0.00%"
@@ -380,12 +276,14 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     regime_str = f"{regime_color}{regime}{RESET}"
 
     # Helper to pad content to fixed width regardless of ANSI codes
-    def ln(label, value, label2="", value2="", width=frame_width):
+    def ln(label, value, label2="", value2="", label3="", value3="", width=frame_width):
         # We manually build the line to avoid layout shifting
         left = f" {YELLOW}{label}:{RESET} {value}"
         right = ""
         if label2:
             right = f" {YELLOW}{label2}:{RESET} {value2}"
+        if label3:
+            right = f"{right}  {YELLOW}{label3}:{RESET} {value3}" if right else f" {YELLOW}{label3}:{RESET} {value3}"
         
         # Estimate plain text length (labels are usually 5-10 chars, values vary)
         # To be safe, we just use the CL code to wipe the rest of the terminal line
@@ -399,7 +297,7 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     exec_label = getattr(executor, "label", "EXEC")
     bal_str = f"{GREEN}${val:,.2f}{RESET}" if val >= executor.initial_balance else f"{RED}${val:,.2f}{RESET}"
-    out.append(f" {BOLD}🚀 {exec_label} | {symbol} | {regime_str}{RESET} | Bal: {bal_str} | Run: {uptime_str} | {pnl_str}{CL}")
+    out.append(f" {BOLD}🚀 {exec_label} | {symbol} | {regime_str}{RESET} | Bal: {bal_str} | {datetime.now().strftime('%H:%M:%S')} | {pnl_str}{CL}")
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     
     # Combined Data & Technicals
@@ -413,32 +311,24 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
         return f"{pre}:{d:+.1%}"
 
     out.append(f" {BLUE}{BOLD}[ MARKET & TECH ]{RESET}{CL}")
-    pressure = map_order_book_pressure(state)
-    pressure_c = GREEN if pressure > 0.2 else (RED if pressure < -0.2 else YELLOW)
-    pressure_str = f"{pressure_c}{pressure:+.1%}{RESET}"
-    out.append(f" {YELLOW}Price:{RESET} ${current_price:.5f}  {YELLOW}Book:{RESET} {pressure_str}  {YELLOW}Spread:{RESET} {state.get('spread_pct', 0):.4%}{CL}")
+    out.append(ln("Price", f"${current_price:.5f}", "Spread", f"{state.get('spread_pct', 0):.4%}"))
     
     # Inline MTF if available
     if mtf_cfg.get("enabled", False) and isinstance(mtf_context, dict):
-        # Show the High-Frequency cluster (1m, 3m, 5m, 15m)
-        for tf in mtf_cfg.get("timeframes", ["1m", "3m", "5m", "15m"]):
+        for tf in mtf_cfg.get("timeframes", ["3m", "15m", "1h"]):
             entry = mtf_context.get(tf)
             if isinstance(entry, dict):
                 trend = str(entry.get("trend", "NEUT")).upper()[:4]
                 out.append(f"  {tf:<3}: {trend} | {fmt_level('S', nearest_levels(current_price, entry.get('support_levels',[]) or [], [])[0])} | {fmt_level('R', nearest_levels(current_price, [], entry.get('resistance_levels',[]) or [])[1])}{CL}")
 
-    if pivot_data and pivot_data.get('daily'):
-        daily = pivot_data['daily']
-        h4 = pivot_data.get('h4', {})
-        pp_c = GREEN if current_price > daily.get('pp',0) else RED
-        out.append(f"  {YELLOW}Daily-P:{RESET} {pp_c}${daily.get('pp',0):.5f}{RESET}  {RED}R1:{RESET}${daily.get('r1',0):.5f}  {GREEN}S1:{RESET}${daily.get('s1',0):.5f}{CL}")
-        if h4:
-            pp4_c = GREEN if current_price > h4.get('pp',0) else RED
-            out.append(f"  {YELLOW}4H-Piv:{RESET} {pp4_c}${h4.get('pp',0):.5f}{RESET}  {RED}R1:{RESET}${h4.get('r1',0):.5f}  {GREEN}S1:{RESET}${h4.get('s1',0):.5f}{CL}")
+    if pivot_data and pivot_data.get('classic'):
+        pp = pivot_data['classic']['pp']
+        pp_c = GREEN if current_price > pp else RED
+        out.append(f"  {YELLOW}Pivot:{RESET} {pp_c}${pp:.5f}{RESET}  {RED}R1:{RESET}${pivot_data['classic']['r1']:.5f}  {GREEN}S1:{RESET}${pivot_data['classic']['s1']:.5f}{CL}")
 
     out.append(f"{'-'*frame_width}{CL}")
     out.append(f" {BLUE}{BOLD}[ STRATEGY & AI ]{RESET}{CL}")
-    out.append(ln("Action", f"{action_str} ({signal.get('confidence',0):.1%})", "Bias", f"{bias_str} / {overlay_bias_c}{overlay_bias}{RESET}"))
+    out.append(ln("Action", f"{action_str} ({signal.get('confidence',0):.1%})", "Bias", f"{bias_str}", "Overlay", f"{overlay_bias_c}{overlay_bias}{RESET}"))
     if overlay:
         out.append(f" {YELLOW}Thinking:{RESET} {trim_text(overlay_rationale, frame_width - 12)}{CL}")
         if overlay_avoid:
@@ -476,7 +366,28 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
             pnl_pct = pnl_val / pos['entry'] * 100 if pos['entry'] else 0
             val_pnl = pnl_val * pos['amount']
             pnl_c = GREEN if val_pnl >= 0 else RED
-            out.append(f"  {side_c}{pos['side']}{RESET} ${pos['amount']*pos['entry']:.0f} @ ${pos['entry']:.5f} | {pnl_c}PnL:${val_pnl:+,.2f} ({pnl_pct:+.2f}%){RESET}{CL}")
+            sl_price = float(pos.get('sl', 0.0) or 0.0)
+            support = float(pos.get('structure_support', 0.0) or 0.0)
+            resistance = float(pos.get('structure_resistance', 0.0) or 0.0)
+            ref_price = support if pos['side'] == 'LONG' else resistance
+            ref_label = "S" if pos['side'] == 'LONG' else "R"
+            ref_str = f"{ref_label}:${ref_price:.5f}" if ref_price > 0 else f"{ref_label}:--"
+            trail_mode = "NATIVE" if bool(getattr(executor, 'use_native_trailing_stop', False)) else "LOCAL"
+            trail_id = str(pos.get('native_trailing_order_id', '') or '')
+            trail_id_str = f"#{trail_id[-6:]}" if trail_id else ""
+            if pnl_pct >= 0.50:
+                trail_stage = "T2"
+            elif pnl_pct >= 0.25:
+                trail_stage = "T1"
+            elif pnl_pct >= 0.15:
+                trail_stage = "BE+"
+            else:
+                trail_stage = "BASE"
+            out.append(
+                f"  {side_c}{pos['side']}{RESET} ${pos['amount']*pos['entry']:.0f} @ ${pos['entry']:.5f} | "
+                f"{pnl_c}PnL:${val_pnl:+,.2f} ({pnl_pct:+.2f}%){RESET} | "
+                f"SL:${sl_price:.5f} | {ref_str} | Trail:{trail_mode}{trail_id_str}/{trail_stage}{CL}"
+            )
 
     closed = getattr(executor, 'closed_trades', [])
     if closed:
@@ -550,37 +461,10 @@ def run_hybrid_bot():
     fee_rate = float(exec_cfg.get("fee_rate", 0.0004))
 
     # Try to fetch real fee rate from Binance (works even in paper mode)
-    if api_key and api_secret and "your_testnet" not in str(api_key):
-        try:
-            import ccxt
-            _tmp_ex = ccxt.binanceusdm({
-                'apiKey': api_key,
-                'secret': api_secret,
-                'enableRateLimit': True,
-                'options': {'adjustForTimeDifference': True}
-            })
-            fee_symbol = symbol
-            if "/" in fee_symbol and ":" not in fee_symbol:
-                base, quote = fee_symbol.split("/", 1)
-                quote = quote.split(":", 1)[0]
-                fee_symbol = f"{base}/{quote}:{quote}"
-            _fee_info = _tmp_ex.fetch_trading_fee(fee_symbol)
-            if _fee_info:
-                maker_raw = _fee_info.get('maker')
-                real_maker = float(maker_raw) if maker_raw is not None else 0.0
-                real_taker = float(_fee_info.get('taker', 0) or 0)
-                if maker_raw is not None:
-                    fee_rate = real_maker  # Use maker fee (limit orders)
-                    print(f"Fetched real Binance fees: maker={real_maker:.4%}, taker={real_taker:.4%} -> using {fee_rate:.4%}")
-                elif real_taker > 0:
-                    fee_rate = real_taker
-                    print(f"Fetched real Binance fees: taker={real_taker:.4%} -> using {fee_rate:.4%}")
-            del _tmp_ex
-        except Exception as e:
-            print(f"Could not fetch Binance fees ({e}), using config: {fee_rate:.4%}")
+    # Keep the configured fee rate instead of overriding it from Binance.
+    # This lets the bot's PnL and fee display follow the strategy config.
     fee_slippage_buffer_pct = float(exec_cfg.get("fee_slippage_buffer_pct", 0.0))
     fee_edge_multiplier = float(exec_cfg.get("fee_edge_multiplier", 1.0))
-    maker_only = bool(exec_cfg.get("maker_only", False))
     min_seconds_between_trades = int(exec_cfg.get("min_seconds_between_trades", 0))
     min_seconds_before_reversal = int(exec_cfg.get("min_seconds_before_reversal", 0))
     reversal_min_confidence = float(exec_cfg.get("reversal_min_confidence", 0.0))
@@ -591,13 +475,8 @@ def run_hybrid_bot():
     trail_tighten_1_pct = float(exec_cfg.get("trail_tighten_1_pct", 0.0030))
     trail_tighten_2_pct = float(exec_cfg.get("trail_tighten_2_pct", 0.0060))
     min_profit_after_fees = float(exec_cfg.get("min_profit_after_fees", 0.0010))
-    runner_mode = bool(exec_cfg.get("runner_mode", False))
-    runner_take_profit_pct = float(exec_cfg.get("runner_take_profit_pct", 0.0060))
-    runner_fade_trigger_pct = float(exec_cfg.get("runner_fade_trigger_pct", 0.0030))
-    runner_fade_exit_pct = float(exec_cfg.get("runner_fade_exit_pct", 0.0012))
     exit_on_reversal_only_in_profit = bool(exec_cfg.get("exit_on_reversal_only_in_profit", True))
     use_limit_orders = bool(exec_cfg.get("use_limit_orders", False))
-    use_native_stop_loss = bool(exec_cfg.get("use_native_stop_loss", False))
     trailing_callback_pct = float(exec_cfg.get("trailing_callback_pct", 0.5))
     trailing_stop_callback = trailing_callback_pct / 100.0
 
@@ -607,6 +486,8 @@ def run_hybrid_bot():
         'fixed_trade_usdt': cfg['strategy'].get('fixed_trade_usdt', 100),
         'tp_pct': cfg['strategy']['tp_pct'],
         'sl_pct': cfg['strategy']['sl_pct'],
+        'max_structural_sl_pct': cfg['strategy'].get('max_structural_sl_pct', 0.0030),
+        'min_reward_risk': cfg['strategy'].get('min_reward_risk', 0.90),
     }
     fixed_trade_usdt = float(strategy_config.get('fixed_trade_usdt', 0.0) or 0.0)
 
@@ -669,7 +550,6 @@ def run_hybrid_bot():
             executor.fee_rate = fee_rate
             executor.fee_slippage_buffer_pct = fee_slippage_buffer_pct
             executor.fee_edge_multiplier = fee_edge_multiplier
-            executor.maker_only = maker_only
             executor.fixed_trade_usdt = fixed_trade_usdt
             executor.min_seconds_between_trades = min_seconds_between_trades
             executor.min_seconds_before_reversal = min_seconds_before_reversal
@@ -682,12 +562,7 @@ def run_hybrid_bot():
             executor.trail_tighten_1_pct = trail_tighten_1_pct
             executor.trail_tighten_2_pct = trail_tighten_2_pct
             executor.min_profit_after_fees = min_profit_after_fees
-            executor.runner_mode = runner_mode
-            executor.runner_take_profit_pct = runner_take_profit_pct
-            executor.runner_fade_trigger_pct = runner_fade_trigger_pct
-            executor.runner_fade_exit_pct = runner_fade_exit_pct
             executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
-            executor.use_native_stop_loss = use_native_stop_loss
             executor.use_native_trailing_stop = bool(cfg.get('execution', {}).get('use_native_trailing_stop', False))
             executor.trailing_callback_pct = trailing_callback_pct
             executor.trailing_stop_callback = trailing_stop_callback
@@ -708,7 +583,6 @@ def run_hybrid_bot():
         )
         executor.fee_slippage_buffer_pct = fee_slippage_buffer_pct
         executor.fee_edge_multiplier = fee_edge_multiplier
-        executor.maker_only = maker_only
         executor.fixed_trade_usdt = fixed_trade_usdt
         executor.min_seconds_between_trades = min_seconds_between_trades
         executor.min_seconds_before_reversal = min_seconds_before_reversal
@@ -720,19 +594,14 @@ def run_hybrid_bot():
         executor.trail_tighten_1_pct = trail_tighten_1_pct
         executor.trail_tighten_2_pct = trail_tighten_2_pct
         executor.min_profit_after_fees = min_profit_after_fees
-        executor.runner_mode = runner_mode
-        executor.runner_take_profit_pct = runner_take_profit_pct
-        executor.runner_fade_trigger_pct = runner_fade_trigger_pct
-        executor.runner_fade_exit_pct = runner_fade_exit_pct
         executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
-        executor.use_native_stop_loss = use_native_stop_loss
         executor.use_limit_orders = use_limit_orders
 
     executor.max_open_positions = cfg['risk'].get('max_open_positions', 1)
     executor.daily_loss_cap_pct = cfg['risk'].get('daily_loss_cap')
     executor.min_balance_floor = float(cfg['risk'].get('min_balance_floor', 90.0))
 
-    auto_learning_enabled = bool(auto_learning_cfg.get("enabled", False))
+    auto_learning_enabled = False  # rollback-old-behavior branch: keep auto-learning inactive
     auto_learning_min_trades = int(auto_learning_cfg.get("min_completed_trades", 30))
     auto_learning_refresh_trades = max(1, int(auto_learning_cfg.get("refresh_closed_trades", 10)))
     auto_learning_max_recent = int(auto_learning_cfg.get("max_recent_trades", 300))
@@ -823,7 +692,6 @@ def run_hybrid_bot():
     last_ai_trade_resp = None
     last_reported_status = ""
     last_reported_signal = ""
-    last_trend_pullback_ts = 0.0
     last_learning_closed_trades = int(getattr(executor, "stats_trades", 0) or 0)
     ai_overlay_state = {
         "bias": "NEUTRAL",
@@ -839,7 +707,6 @@ def run_hybrid_bot():
     # Keep this bounded so long runs don't grow memory (and we only show the last few anyway).
     status_buf = deque(maxlen=80)
     signal_history = deque(maxlen=5) # 5-second smoothing buffer
-    shutdown_cleanup_done = False
 
     def status(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -875,23 +742,18 @@ def run_hybrid_bot():
                     macro_indicators_df = calculate_base_indicators(macro_df)
                     latest_macro = macro_indicators_df.iloc[-1].to_dict()
 
-                # Refresh Multi-Layer Pivot Points (Daily + 4H Intraday) every 15 min
+                # Refresh Advanced Pivot Points from daily OHLCV (every 15 min)
                 if time.time() - last_pivot_refresh_ts >= 900 or not pivot_data:
                     try:
                         daily_df = market.fetch_ohlcv(symbol, timeframe='1d', limit=5)
-                        h4_df = market.fetch_ohlcv(symbol, timeframe='4h', limit=5)
-                        
-                        if not daily_df.empty and not h4_df.empty:
-                            pivot_data = {
-                                "daily": compute_advanced_pivots(daily_df).get('classic', {}),
-                                "h4": compute_advanced_pivots(h4_df).get('classic', {})
-                            }
+                        if not daily_df.empty and len(daily_df) >= 2:
+                            pivot_data = compute_advanced_pivots(daily_df)
                             last_pivot_refresh_ts = time.time()
-                            status(f"Pivots: Daily & 4H Walls synchronized")
+                            classic_pp = pivot_data.get('classic', {})
+                            if classic_pp:
+                                status(f"Pivots: PP={classic_pp['pp']:.5f} S1={classic_pp['s1']:.5f} R1={classic_pp['r1']:.5f}")
                     except Exception as e:
-                        logger.warning(f"Failed to compute multi-pivots: {e}")
-    
-    
+                        logger.warning(f"Failed to compute pivots: {e}")
 
             if ai_enabled and (ticks == 1 or ticks % regime_refresh_interval == 0):
                 logger.info("Refreshing AI macro regime...")
@@ -1017,6 +879,12 @@ def run_hybrid_bot():
                     signal['action'] = "HOLD"
                     signal['hold_reason'] = "Signal smoothing: weak confidence"
 
+            sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
+            if sig_str != last_reported_signal:
+                status(sig_str)
+                logger.info(f"ANALYSIS: {sig_str}")
+                last_reported_signal = sig_str
+
             if bool(ai_overlay_cfg.get("enabled", False)):
                 overlay_bias = str(ai_overlay_state.get("bias", "NEUTRAL") or "NEUTRAL").upper()
                 overlay_risk = str(ai_overlay_state.get("risk_mode", "NORMAL") or "NORMAL").upper()
@@ -1042,38 +910,12 @@ def run_hybrid_bot():
                     signal["hold_reason"] = "AI overlay: no new entries"
                     signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
                 elif overlay_bias == "LONG_ONLY" and signal.get("action") == "SELL":
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = "AI overlay long-only: sell disabled"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
+                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay Soft Bias] {overlay_note}"
                 elif overlay_bias == "SHORT_ONLY" and signal.get("action") == "BUY":
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = "AI overlay short-only: buy disabled"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
+                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay Soft Bias] {overlay_note}"
 
                 if signal.get("action") in {"BUY", "SELL"} and overlay_hold_minutes > 0:
                     signal["hold_until_ts"] = time.time() + (overlay_hold_minutes * 60)
-
-            if not getattr(executor, "active_positions", []) and not getattr(executor, "pending_entry", None):
-                pullback_cfg = cfg.get("trend_pullback", {}) or {}
-                pullback_cooldown = float(pullback_cfg.get("cooldown_seconds", 120) or 120)
-                if _apply_trend_pullback_signal(
-                    signal,
-                    state,
-                    mtf_context,
-                    mtf_cfg,
-                    ai_overlay_state,
-                    pullback_cfg if (time.time() - last_trend_pullback_ts) >= pullback_cooldown else {"enabled": False},
-                    strategy_config,
-                ):
-                    last_trend_pullback_ts = time.time()
-                    status(f"Trend pullback: {signal.get('action')} @ ${float(signal.get('entry', state['price'])):.5f}")
-                    logger.info(
-                        "TREND_PULLBACK: action=%s entry=%s confidence=%.1f%% reason=%s",
-                        signal.get("action"),
-                        signal.get("entry"),
-                        float(signal.get("confidence", 0.0) or 0.0) * 100.0,
-                        signal.get("reason", ""),
-                    )
 
             # Legacy trade-gating AI (evaluates each BUY/SELL before execution)
             if ai_trade_cfg.get("enabled", False) and signal.get("action") in {"BUY", "SELL"}:
@@ -1142,12 +984,24 @@ def run_hybrid_bot():
                     hold_minutes = 0
                 if hold_minutes > max_hold_minutes:
                     hold_minutes = max_hold_minutes
+                scalp_friendly = (
+                    signal.get("action") in {"BUY", "SELL"}
+                    and float(signal.get("confidence", 0.0) or 0.0) >= float(strategy_config.get("min_conf", 0.05))
+                    and not bool(ai_overlay_state.get("avoid_new_entries", False))
+                    and str(ai_overlay_state.get("risk_mode", "NORMAL") or "NORMAL").upper() not in {"HIGH", "EXTREME"}
+                )
 
                 if decision == "VETO":
-                    signal["action"] = "HOLD"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Veto] {str((ai_resp or {}).get('rationale',''))[:120]}"
-                    if not use_cached and not should_skip_ai:
-                        status("AI: VETO")
+                    veto_note = str((ai_resp or {}).get("rationale", "") or "")[:120]
+                    if scalp_friendly:
+                        signal["reason"] = f"{signal.get('reason','')} [AI Soft Veto Ignored] {veto_note}"
+                        if not use_cached and not should_skip_ai:
+                            status("AI: SOFT ALLOW")
+                    else:
+                        signal["action"] = "HOLD"
+                        signal["reason"] = f"{signal.get('reason','')} [AI Veto] {veto_note}"
+                        if not use_cached and not should_skip_ai:
+                            status("AI: VETO")
                 else:
                     if not use_cached and not should_skip_ai:
                         status("AI: ALLOW")
@@ -1169,22 +1023,17 @@ def run_hybrid_bot():
                         signal['action'] = "HOLD"
                         signal['reason'] += " [AI Veto: Volatile regime]"
 
-            sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
-            if sig_str != last_reported_signal:
-                status(sig_str)
-                logger.info(f"ANALYSIS: {sig_str}")
-                last_reported_signal = sig_str
+                # Re-check action after vetoes
+                if signal['action'] != "HOLD":
+                    entry_style = str(ai_overlay_state.get('entry_style', 'MIXED')).upper()
+                    target_price = float(signal.get('entry', state['price']) or state['price'])
 
-            if signal['action'] != "HOLD":
-                entry_style = str(ai_overlay_state.get('entry_style', 'MIXED')).upper()
-                target_price = float(signal.get('entry', state['price']) or state['price'])
-                
-                if entry_style == "BUY_PULLBACKS" and signal['action'] == "BUY":
-                    target_price = min(target_price, state['price'] * 0.999)
-                elif entry_style == "SELL_RALLIES" and signal['action'] == "SELL":
-                    target_price = max(target_price, state['price'] * 1.001)
+                    if entry_style == "BUY_PULLBACKS" and signal['action'] == "BUY":
+                        target_price = min(target_price, state['price'] * 0.999)
+                    elif entry_style == "SELL_RALLIES" and signal['action'] == "SELL":
+                        target_price = max(target_price, state['price'] * 1.001)
 
-                executor.place_limit_order(signal, symbol, target_price)
+                    executor.place_limit_order(signal, symbol, target_price)
 
             curr_status = str(getattr(executor, 'last_status', '') or "")
             if curr_status != last_reported_status:
@@ -1210,14 +1059,8 @@ def run_hybrid_bot():
         logger.info("\nBot stopped by user (Ctrl+C). Initiating graceful shutdown...")
         print("\nBot stopped by user. Gracefully closing active positions and open orders...")
         executor.close_all_positions(symbol)
-        shutdown_cleanup_done = True
         print("Shutdown complete. All positions liquidated and orders cancelled.")
     finally:
-        if not shutdown_cleanup_done:
-            try:
-                executor.close_all_positions(symbol)
-            except Exception as e:
-                logger.warning(f"Final shutdown cleanup failed: {e}")
         # Restore terminal if we hid cursor or used alt screen
         _show_cursor_ansi()
         _exit_alt_screen_ansi()

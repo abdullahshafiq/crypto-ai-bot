@@ -1,4 +1,4 @@
-# High-Frequency Scalping Configuration (DOGE/USDC)
+# High-Frequency Scalping Configuration (DOGE/USDT)
 
 symbol: "DOGE/USDC"
 timeframe: "5m"           # Base timeframe for execution (matches 15m structure)
@@ -11,12 +11,12 @@ data:
 # Execution Settings
 execution:
   mode: "live"                # paper | demo | live
-  leverage: 5                # SAFER LIVE: cap base leverage at 5x
+  leverage: 3                # Lower base leverage for safer live scalping
   dynamic_leverage: true       
   paper_starting_balance_usdt: 100
   fee_rate: 0.0             
-  dca_enabled: false           # SAFER LIVE: no averaging down unattended
-  dca_max_steps: 0             # No extra entries
+  dca_enabled: true            # ENABLED: Averaging down to recover trades
+  dca_max_steps: 2             # Max 2 extra entries (3 total)
   dca_distance_pct: 0.006      # DCA every -0.60% drop
   fee_slippage_buffer_pct: 0.0  # Zero buffer for aggressive entry
   fee_edge_multiplier: 0.2      # AGGRESSIVE: Trade even if profit is only slightly above fees
@@ -25,52 +25,44 @@ execution:
   reversal_min_confidence: 0.08     # BALANCED: 8% min for reversal
   reversal_min_score: 0.05          # Low threshold for score
   reversal_min_net_edge_pct: 0.0002    # 0.02% edge to flip position
-  break_even_trigger_pct: 0.0005    # Move to breakeven after +0.05%
-  break_even_buffer_pct: 0.0001     # lock in small profit
-  trail_tighten_1_pct: 0.0020       # let winners breathe until +0.20%
-  trail_tighten_2_pct: 0.0040       # tighten more after +0.40%
-  min_profit_after_fees: 0.0001     
-  runner_mode: true                 # let green trades run; exit on trailing/fade
-  runner_take_profit_pct: 0.0060    # emergency hard TP only after +0.60%
-  runner_fade_trigger_pct: 0.0030   # start watching fade after +0.30%
-  runner_fade_exit_pct: 0.0012      # exit if winner gives back near +0.12%
+  break_even_trigger_pct: 0.0020    # Let winners breathe more before breakeven
+  break_even_buffer_pct: 0.0002     # small buffer above entry
+  trail_tighten_1_pct: 0.0035       # tighten trail later so trend can run
+  trail_tighten_2_pct: 0.0065       # tighten only after a stronger move
+  min_profit_after_fees: 0.0002     # small profit floor after fees
   exit_on_reversal_only_in_profit: true 
-  use_limit_orders: true            
-  maker_only: true                  
-  use_native_stop_loss: true    # Exchange-side reduce-only emergency stop after fill
-  use_native_trailing_stop: false   
-  trailing_callback_pct: 0.5        
-    
+  use_limit_orders: true            # Use maker orders to target zero fees
+  use_native_trailing_stop: true    # Show and enforce a real Binance trailing stop
+  trailing_callback_pct: 0.20       # 0.20% callback to lock profit faster
   ttl_exit_seconds: 300             # 5min candles need more time to play out
 
 # Dynamic Leverage (volatility + confidence based position sizing)
 leverage:
   enabled: true                # Enable dynamic leverage scaling
-  min_leverage: 3              # SAFER LIVE: smaller minimum leverage
-  max_leverage: 5              # SAFER LIVE: cap dynamic leverage
+  min_leverage: 1              # smallest size for weak signals
+  max_leverage: 3              # cap leverage to limit damage on bad trades
   # Confidence thresholds for leverage levels (0-1 scale)
   confidence_levels:
-    0.05: 3.0                  # Small edge -> 3x leverage
-    0.15: 4.0                  # Low confidence -> 4x leverage
-    0.30: 5.0                  # Moderate confidence -> 5x leverage
-    0.50: 5.0                  # Strong signal -> 5x leverage
-    0.75: 5.0                  # MAX -> 5x leverage
+    0.05: 1.0                  # weak signal -> 1x
+    0.15: 1.0                  # low confidence -> 1x
+    0.30: 1.5                  # moderate confidence -> 1.5x
+    0.50: 2.0                  # strong signal -> 2x
+    0.75: 3.0                  # max -> 3x
   use_score_multiplier: true   # Also factor in signal score (0-1) to adjust leverage
-  score_weight: 0.3            # Balanced score weight
-  atr_volatility_scaling: false # DISABLED: Don't scale down in high vol for ruthless mode
-  atr_reference_pct: 0.015     # Target ATR% (1.5% of price) for full leverage (DOGE moderate vol)
-  atr_min_multiplier: 0.2      # Minimum leverage multiplier when ATR is very high
+  score_weight: 0.2            # less aggressive score influence
+  atr_volatility_scaling: true  # reduce leverage when volatility spikes
+  atr_reference_pct: 0.012     # target ATR% before scaling down
+  atr_min_multiplier: 0.5      # keep at least half leverage in high vol
 
 # Multi-Timeframe Trend + S/R
 mtf:
   enabled: true
-  timeframes: ["3m", "15m", "1h", "4h"]
-  min_agree: 2
-  veto_on_missing: false
+  timeframes: ["1m", "3m", "5m", "15m", "1h", "4h"]
+  min_agree: 3                  # Require 3m/5m/15m alignment for entries
+  veto_on_missing: false        # DISABLED: Don't wait for all indicators to be perfect
   max_age_seconds: 300          # 5min stale threshold (faster updates)
   sr_buffer_pct: 0.0015         # Tighter S/R buffer (0.15%) for DOGE
   mode: "soft"                  # soft => penalize counter-trend, don't hard block
-    
 
 # Terminal UI
 ui:
@@ -103,30 +95,17 @@ auto_learning:
 # Quant Strategy Parameters
 strategy:
   max_spread: 0.0005        # TIGHT: 0.05% max spread
-  min_conf: 0.10            # SAFER LIVE: require 10%+ confidence
+  min_conf: 0.10            # Lower gate so it catches more scalp entries
   max_ret_30s: 0.0050     
   max_ret_5s: 0.0025      
   block_on_volume_spike: false  
   fixed_trade_usdt: 50   
-  tp_pct: 0.0015          # QUICK SCALP: 0.15% target
-  sl_pct: 0.0010          # TIGHT SL: 0.10%
-    
-  vol_filter_atr_pct: 0.0005  
-  vol_filter_atr_max_pct: 0.08  
-  pivot_discipline: false     # soft filter only; do not block valid scalps
-  pivot_proximity_threshold: 0.0050 # WIDER GATES: 0.50% proximity (stops missing 'close' touches)
-
-# Trend-pullback continuation entries
-# If MTF + AI agree one way but the fast quant score is a mild pullback,
-# place a resting maker order with the trend instead of doing nothing.
-trend_pullback:
-  enabled: true
-  min_mtf_agree: 3
-  max_counter_conf: 0.18
-  max_level_distance_pct: 0.015
-  entry_offset_pct: 0.0012
-  cooldown_seconds: 120
-    
+  tp_pct: 0.0025          # Trend-friendly scalp target (ride a bit longer)
+  sl_pct: 0.0015          # Slightly wider stop for trend continuation
+  max_structural_sl_pct: 0.0030  # Skip entries if strong S/R stop is too far away
+  min_reward_risk: 0.90          # TP distance must be close to the structural stop risk
+  vol_filter_atr_pct: 0.0005  # Minimum ATR% (0.05%)
+  vol_filter_atr_max_pct: 0.08  # Maximum ATR% (8%)
 
 # Risk Limits
 risk:
@@ -134,12 +113,11 @@ risk:
   max_open_positions: 1    # Strictly 1 trade at a time as requested
   min_balance_floor: 60.0  # Emergency stop at $60 (plenty of room for scalping)
 
-# Refresh Intervals (in ticks, 1 tick ≈ 0.2 seconds)
+# Refresh Intervals (in ticks, 1 tick ≈ 1 second)
 intervals:
-  indicator_refresh: 150   # Refresh MTF every 30 seconds (150 * 0.2s)
-  regime_refresh: 3000     # Refresh macro AI every 10 min
-  tick_delay_seconds: 0.2  # HIGH FREQUENCY: Poll every 200ms
-    
+  indicator_refresh: 10    # Re-fetch OHLCV & recalculate indicators every 10 ticks (ultra fast)
+  regime_refresh: 600      # Re-query AI macro regime every 600 ticks (~10 min)
+  tick_delay_seconds: 1    # Seconds between each polling loop iteration
 
 # AI Settings
 ai:
@@ -154,7 +132,7 @@ ai_overlay:
 
 # Trade-Gating AI (evaluates each BUY/SELL before execution)
 ai_trade:
-  enabled: false          # disabled so AI does not veto fast scalps
+  enabled: true           # ENABLED: Final safety check before every order
   model: "gpt-4o-mini"
   min_interval_seconds: 30     # rate-limit AI calls
   on_error: "allow"            # allow | veto
