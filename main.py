@@ -811,6 +811,7 @@ def run_hybrid_bot():
     last_ai_trade_resp = None
     last_reported_status = ""
     last_reported_signal = ""
+    last_trend_pullback_ts = 0.0
     last_learning_closed_trades = int(getattr(executor, "stats_trades", 0) or 0)
     ai_overlay_state = {
         "bias": "NEUTRAL",
@@ -1055,15 +1056,18 @@ def run_hybrid_bot():
                     signal["hold_until_ts"] = time.time() + (overlay_hold_minutes * 60)
 
             if not getattr(executor, "active_positions", []) and not getattr(executor, "pending_entry", None):
+                pullback_cfg = cfg.get("trend_pullback", {}) or {}
+                pullback_cooldown = float(pullback_cfg.get("cooldown_seconds", 120) or 120)
                 if _apply_trend_pullback_signal(
                     signal,
                     state,
                     mtf_context,
                     mtf_cfg,
                     ai_overlay_state,
-                    cfg.get("trend_pullback", {}) or {},
+                    pullback_cfg if (time.time() - last_trend_pullback_ts) >= pullback_cooldown else {"enabled": False},
                     strategy_config,
                 ):
+                    last_trend_pullback_ts = time.time()
                     status(f"Trend pullback: {signal.get('action')} @ ${float(signal.get('entry', state['price'])):.5f}")
                     logger.info(
                         "TREND_PULLBACK: action=%s entry=%s confidence=%.1f%% reason=%s",

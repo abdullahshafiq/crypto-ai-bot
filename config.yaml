@@ -118,9 +118,10 @@ strategy:
 trend_pullback:
   enabled: true
   min_mtf_agree: 3
-  max_counter_conf: 0.35
+  max_counter_conf: 0.18
   max_level_distance_pct: 0.015
-  entry_offset_pct: 0.0008
+  entry_offset_pct: 0.0012
+  cooldown_seconds: 120
     
 
 # Risk Limits
