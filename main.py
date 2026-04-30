@@ -1036,21 +1036,13 @@ def run_hybrid_bot():
                     signal["hold_reason"] = "AI overlay: no new entries"
                     signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
                 elif overlay_bias == "LONG_ONLY" and signal.get("action") == "SELL":
-                    # EXPERT OVERRIDE: Let Ruthless Wall Snipes bypass the AI bias
-                    if "[RUTHLESS SNIPE]" in signal.get("reason", ""):
-                        logger.info("EXPERT OVERRIDE: Allowing SHORT at wall despite AI LONG_ONLY bias.")
-                    else:
-                        signal["action"] = "HOLD"
-                        signal["hold_reason"] = "AI overlay long-only: sell disabled"
-                        signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
+                    signal["action"] = "HOLD"
+                    signal["hold_reason"] = "AI overlay long-only: sell disabled"
+                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
                 elif overlay_bias == "SHORT_ONLY" and signal.get("action") == "BUY":
-                    # EXPERT OVERRIDE: Let Ruthless Wall Snipes bypass the AI bias
-                    if "[RUTHLESS SNIPE]" in signal.get("reason", ""):
-                        logger.info("EXPERT OVERRIDE: Allowing LONG at wall despite AI SHORT_ONLY bias.")
-                    else:
-                        signal["action"] = "HOLD"
-                        signal["hold_reason"] = "AI overlay short-only: buy disabled"
-                        signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
+                    signal["action"] = "HOLD"
+                    signal["hold_reason"] = "AI overlay short-only: buy disabled"
+                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
 
                 if signal.get("action") in {"BUY", "SELL"} and overlay_hold_minutes > 0:
                     signal["hold_until_ts"] = time.time() + (overlay_hold_minutes * 60)
