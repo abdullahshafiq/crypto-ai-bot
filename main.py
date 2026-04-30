@@ -591,6 +591,10 @@ def run_hybrid_bot():
     trail_tighten_1_pct = float(exec_cfg.get("trail_tighten_1_pct", 0.0030))
     trail_tighten_2_pct = float(exec_cfg.get("trail_tighten_2_pct", 0.0060))
     min_profit_after_fees = float(exec_cfg.get("min_profit_after_fees", 0.0010))
+    runner_mode = bool(exec_cfg.get("runner_mode", False))
+    runner_take_profit_pct = float(exec_cfg.get("runner_take_profit_pct", 0.0060))
+    runner_fade_trigger_pct = float(exec_cfg.get("runner_fade_trigger_pct", 0.0030))
+    runner_fade_exit_pct = float(exec_cfg.get("runner_fade_exit_pct", 0.0012))
     exit_on_reversal_only_in_profit = bool(exec_cfg.get("exit_on_reversal_only_in_profit", True))
     use_limit_orders = bool(exec_cfg.get("use_limit_orders", False))
     use_native_stop_loss = bool(exec_cfg.get("use_native_stop_loss", False))
@@ -678,6 +682,10 @@ def run_hybrid_bot():
             executor.trail_tighten_1_pct = trail_tighten_1_pct
             executor.trail_tighten_2_pct = trail_tighten_2_pct
             executor.min_profit_after_fees = min_profit_after_fees
+            executor.runner_mode = runner_mode
+            executor.runner_take_profit_pct = runner_take_profit_pct
+            executor.runner_fade_trigger_pct = runner_fade_trigger_pct
+            executor.runner_fade_exit_pct = runner_fade_exit_pct
             executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
             executor.use_native_stop_loss = use_native_stop_loss
             executor.use_native_trailing_stop = bool(cfg.get('execution', {}).get('use_native_trailing_stop', False))
@@ -712,6 +720,10 @@ def run_hybrid_bot():
         executor.trail_tighten_1_pct = trail_tighten_1_pct
         executor.trail_tighten_2_pct = trail_tighten_2_pct
         executor.min_profit_after_fees = min_profit_after_fees
+        executor.runner_mode = runner_mode
+        executor.runner_take_profit_pct = runner_take_profit_pct
+        executor.runner_fade_trigger_pct = runner_fade_trigger_pct
+        executor.runner_fade_exit_pct = runner_fade_exit_pct
         executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
         executor.use_native_stop_loss = use_native_stop_loss
         executor.use_limit_orders = use_limit_orders

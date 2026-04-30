@@ -178,6 +178,10 @@ class BinanceFuturesExecution:
         self.leverage_score_weight = 0.3
         self.min_profit_after_fees = 0.0015
         self.exit_on_reversal_only_in_profit = True
+        self.runner_mode = False
+        self.runner_take_profit_pct = 0.0060
+        self.runner_fade_trigger_pct = 0.0030
+        self.runner_fade_exit_pct = 0.0012
         self.use_native_stop_loss = False
         self.use_native_trailing_stop = False
         self.trailing_stop_callback = 0.005
@@ -701,13 +705,16 @@ class BinanceFuturesExecution:
                     if not closed:
                         scalp_cfg = getattr(self, 'scalp_config', {})
                         if scalp_cfg:
-                            tp_pct = float(scalp_cfg.get('tp_pct', 0.003))
+                            runner_mode = bool(getattr(self, 'runner_mode', False))
+                            tp_pct = float(getattr(self, 'runner_take_profit_pct', scalp_cfg.get('tp_pct', 0.003)) if runner_mode else scalp_cfg.get('tp_pct', 0.003))
+                            fade_trigger = float(getattr(self, 'runner_fade_trigger_pct', scalp_cfg.get('fade_trigger_pct', 0.005)) if runner_mode else scalp_cfg.get('fade_trigger_pct', 0.005))
+                            fade_exit = float(getattr(self, 'runner_fade_exit_pct', scalp_cfg.get('fade_exit_pct', 0.002)) if runner_mode else scalp_cfg.get('fade_exit_pct', 0.002))
                             if profit_pct >= tp_pct and hold_time >= int(scalp_cfg.get('min_hold_seconds', 10)) and profit_pct >= min_net_profit:
                                 closed = True
-                                exit_type = "TAKE_PROFIT"
-                            elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
+                                exit_type = "RUNNER_TP" if runner_mode else "TAKE_PROFIT"
+                            elif float(pos.get('highest_profit_pct', 0)) >= fade_trigger and profit_pct < fade_exit and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
-                                exit_type = "SCALP_EXIT"
+                                exit_type = "RUNNER_FADE" if runner_mode else "SCALP_EXIT"
                                 
                     ttl_seconds = int(getattr(self, 'ttl_exit_seconds', 0))
                     if not closed and ttl_seconds > 0 and hold_time > ttl_seconds and profit_pct < 0.001:
@@ -798,13 +805,16 @@ class BinanceFuturesExecution:
                     if not closed:
                         scalp_cfg = getattr(self, 'scalp_config', {})
                         if scalp_cfg:
-                            tp_pct = float(scalp_cfg.get('tp_pct', 0.003))
+                            runner_mode = bool(getattr(self, 'runner_mode', False))
+                            tp_pct = float(getattr(self, 'runner_take_profit_pct', scalp_cfg.get('tp_pct', 0.003)) if runner_mode else scalp_cfg.get('tp_pct', 0.003))
+                            fade_trigger = float(getattr(self, 'runner_fade_trigger_pct', scalp_cfg.get('fade_trigger_pct', 0.005)) if runner_mode else scalp_cfg.get('fade_trigger_pct', 0.005))
+                            fade_exit = float(getattr(self, 'runner_fade_exit_pct', scalp_cfg.get('fade_exit_pct', 0.002)) if runner_mode else scalp_cfg.get('fade_exit_pct', 0.002))
                             if profit_pct >= tp_pct and hold_time >= int(scalp_cfg.get('min_hold_seconds', 10)) and profit_pct >= min_net_profit:
                                 closed = True
-                                exit_type = "TAKE_PROFIT"
-                            elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
+                                exit_type = "RUNNER_TP" if runner_mode else "TAKE_PROFIT"
+                            elif float(pos.get('highest_profit_pct', 0)) >= fade_trigger and profit_pct < fade_exit and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
-                                exit_type = "SCALP_EXIT"
+                                exit_type = "RUNNER_FADE" if runner_mode else "SCALP_EXIT"
 
                     ttl_seconds = int(getattr(self, 'ttl_exit_seconds', 0))
                     if not closed and ttl_seconds > 0 and hold_time > ttl_seconds and profit_pct < 0.001:

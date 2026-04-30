@@ -27,9 +27,13 @@ execution:
   reversal_min_net_edge_pct: 0.0002    # 0.02% edge to flip position
   break_even_trigger_pct: 0.0005    # Move to breakeven after +0.05%
   break_even_buffer_pct: 0.0001     # lock in small profit
-  trail_tighten_1_pct: 0.0010       # move SL closer after +0.10%
-  trail_tighten_2_pct: 0.0020       # move SL very tight after +0.20%
+  trail_tighten_1_pct: 0.0020       # let winners breathe until +0.20%
+  trail_tighten_2_pct: 0.0040       # tighten more after +0.40%
   min_profit_after_fees: 0.0001     
+  runner_mode: true                 # let green trades run; exit on trailing/fade
+  runner_take_profit_pct: 0.0060    # emergency hard TP only after +0.60%
+  runner_fade_trigger_pct: 0.0030   # start watching fade after +0.30%
+  runner_fade_exit_pct: 0.0012      # exit if winner gives back near +0.12%
   exit_on_reversal_only_in_profit: true 
   use_limit_orders: true            
   maker_only: true                  
