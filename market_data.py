@@ -50,7 +50,7 @@ class MarketData:
                 base, quote = symbol.split("/", 1)
                 if ":" not in quote:
                     quote = quote.split(":")[0]
-                return f"{base}/{quote}:USDT"
+                return f"{base}/{quote}:{quote}"
         return symbol
 
     def _resample_ohlcv(self, df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -76,6 +76,11 @@ class MarketData:
         })
         agg = agg.dropna(subset=["open", "high", "low", "close"])
         agg = agg.reset_index()
+        # Prevent partial last bucket from leaking into closed-candle logic.
+        if not agg.empty:
+            now_utc = pd.Timestamp.utcnow()
+            if agg["timestamp"].iloc[-1] > now_utc:
+                agg = agg.iloc[:-1].reset_index(drop=True)
         return agg
 
     def fetch_ohlcv(self, symbol: str = 'BTC/USDT', timeframe: str = '1h', limit: int = 100) -> pd.DataFrame:
@@ -93,7 +98,7 @@ class MarketData:
                 try:
                     ohlcv = self.exchange.fetch_ohlcv(symbol, tf, limit=lim)
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
                     return df
                 except ccxt.RateLimitExceeded as e:
                     logger.warning(f"Rate limited fetching OHLCV ({tf}), backing off: {e}")

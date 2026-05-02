@@ -8,6 +8,17 @@ from collections import deque
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from dotenv import load_dotenv
+import socket
+
+_SINGLETON_SOCKET = None
+def _enforce_single_instance(port=45678):
+    global _SINGLETON_SOCKET
+    try:
+        _SINGLETON_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _SINGLETON_SOCKET.bind(("127.0.0.1", port))
+    except OSError:
+        print(f"ERROR: Another instance of the bot is already running. Please close it first.")
+        sys.exit(1)
 
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -15,7 +26,10 @@ from market_data import MarketData
 from indicators import calculate_base_indicators, generate_quant_signal, build_mtf_timeframe_context, compute_advanced_pivots
 from news_data import NewsData
 from agents import HybridAIOrchestrator
-from execution import BinanceFuturesExecution, PaperFuturesExecution
+import copy
+from execution_factory import create_executor, resolve_data_market
+from performance_gate import paper_gate_passed
+from dashboard_server import DashboardRuntime, start_dashboard_server
 
 _WIN_VT_ENABLED: bool | None = None
 _ALT_SCREEN_ENTERED: bool = False
@@ -185,7 +199,26 @@ def setup_logging(logging_cfg: dict | None = None):
 
 def load_config(path: str = "config.yaml") -> dict:
     with open(path, 'r') as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+        
+    try:
+        import json
+        if os.path.exists("ui_state.json"):
+            with open("ui_state.json", 'r') as f:
+                ui_state = json.load(f)
+            
+            for path_key, val in ui_state.items():
+                parts = path_key.split(".")
+                cur = cfg
+                for part in parts[:-1]:
+                    if part not in cur:
+                        cur[part] = {}
+                    cur = cur[part]
+                cur[parts[-1]] = val
+    except Exception as e:
+        logging.getLogger("main").warning(f"Failed to load ui_state.json overrides: {e}")
+        
+    return cfg
 
 def _detect_ui_mode(cfg_mode: str) -> str:
     # 1. Non-interactive terminals (piping, IDE outputs) MUST fallback safely
@@ -296,8 +329,9 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
 
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     exec_label = getattr(executor, "label", "EXEC")
+    paused_indicator = f" {YELLOW}{BOLD}[PAUSED]{RESET}" if bool(ui_cfg.get("paused", False)) else ""
     bal_str = f"{GREEN}${val:,.2f}{RESET}" if val >= executor.initial_balance else f"{RED}${val:,.2f}{RESET}"
-    out.append(f" {BOLD}🚀 {exec_label} | {symbol} | {regime_str}{RESET} | Bal: {bal_str} | {datetime.now().strftime('%H:%M:%S')} | {pnl_str}{CL}")
+    out.append(f" {BOLD}🚀 {exec_label} | {symbol} | {regime_str}{paused_indicator}{RESET} | Bal: {bal_str} | {datetime.now().strftime('%H:%M:%S')} | {pnl_str}{CL}")
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     
     # Combined Data & Technicals
@@ -325,6 +359,15 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
         pp = pivot_data['classic']['pp']
         pp_c = GREEN if current_price > pp else RED
         out.append(f"  {YELLOW}Pivot:{RESET} {pp_c}${pp:.5f}{RESET}  {RED}R1:{RESET}${pivot_data['classic']['r1']:.5f}  {GREEN}S1:{RESET}${pivot_data['classic']['s1']:.5f}{CL}")
+
+    # --- STRIKE ZONES (ENTRY TARGETS) ---
+    m5 = mtf_context.get("5m", {}) if isinstance(mtf_context, dict) else {}
+    m5_s, m5_r = nearest_levels(current_price, m5.get('support_levels', []), m5.get('resistance_levels', []))
+    
+    out.append(f" {BLUE}{BOLD}[ STRIKE ZONES ]{RESET}{CL}")
+    bull_strike = f"{GREEN}${m5_r:.5f}{RESET}" if m5_r else f"{YELLOW}WAITING{RESET}"
+    bear_strike = f"{RED}${m5_s:.5f}{RESET}" if m5_s else f"{YELLOW}WAITING{RESET}"
+    out.append(f"  🎯 {GREEN}BULL STRIKE:{RESET} > {bull_strike}  🎯 {RED}BEAR STRIKE:{RESET} < {bear_strike}{CL}")
 
     out.append(f"{'-'*frame_width}{CL}")
     out.append(f" {BLUE}{BOLD}[ STRATEGY & AI ]{RESET}{CL}")
@@ -433,7 +476,65 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     sys.stdout.flush()
     _LAST_FRAME_LINES = frame_lines
 
+def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_start, status_lines, pivot_data, mtf_context, open_orders, latest_indicators, chart_bars, ai_overlay_state, cfg):
+    current_price = float(state.get("price", 0.0) or 0.0) if isinstance(state, dict) else 0.0
+    portfolio_value = float(getattr(executor, "initial_balance", 0.0) or 0.0)
+    try:
+        portfolio_value = float(executor.get_portfolio_value(current_price))
+    except Exception:
+        pass
+    pnl = portfolio_value - float(getattr(executor, "initial_balance", 0.0) or 0.0)
+    pnl_pct = (pnl / float(executor.initial_balance) * 100.0) if float(getattr(executor, "initial_balance", 0.0) or 0.0) > 0 else 0.0
+    positions = copy.deepcopy(getattr(executor, "active_positions", []) or [])
+    pending_entry = copy.deepcopy(getattr(executor, "pending_entry", None))
+    pending_exit = copy.deepcopy(getattr(executor, "pending_exit", None))
+    closed_trades = list(getattr(executor, "closed_trades", []) or [])[-20:]
+    # Calculate Unrealized PnL for active positions
+    unrealized_pnl = 0.0
+    total_active_cost = 0.0
+    for pos in positions:
+        pos_pnl = (current_price - float(pos['entry'])) if pos['side'] == 'LONG' else (float(pos['entry']) - current_price)
+        unrealized_pnl += pos_pnl * float(pos['amount'])
+        total_active_cost += float(pos['entry']) * float(pos['amount'])
+    
+    unrealized_pnl_pct = (unrealized_pnl / total_active_cost * 100.0) if total_active_cost > 0 else 0.0
+
+    return {
+        "ts": time.time(),
+        "symbol": symbol,
+        "regime": regime,
+        "mode": getattr(executor, "label", "BOT"),
+        "price": current_price,
+        "spread_pct": float(state.get("spread_pct", 0.0) or 0.0) if isinstance(state, dict) else 0.0,
+        "ret_30s": state.get("ret_30s") if isinstance(state, dict) else None,
+        "balance": portfolio_value,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct,
+        "unrealized_pnl": unrealized_pnl,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
+        "session_start": session_start,
+        "uptime_sec": time.time() - session_start,
+        "signal": copy.deepcopy(signal or {}),
+        "positions": positions,
+        "pending_entry": pending_entry,
+        "pending_exit": pending_exit,
+        "open_orders": copy.deepcopy(open_orders or []),
+        "closed_trades": copy.deepcopy(closed_trades),
+        "status_lines": list(status_lines or []),
+        "pivot_data": copy.deepcopy(pivot_data or {}),
+        "mtf_context": copy.deepcopy(mtf_context or {}),
+        "latest_indicators": copy.deepcopy(latest_indicators or {}),
+        "ai_overlay": copy.deepcopy(ai_overlay_state or {}),
+        "chart": list(chart_bars or []),
+        "config": {
+            "execution": copy.deepcopy(cfg.get("execution", {}) or {}),
+            "strategy": copy.deepcopy(cfg.get("strategy", {}) or {}),
+            "mtf": copy.deepcopy(cfg.get("mtf", {}) or {}),
+        }
+    }
+
 def run_hybrid_bot():
+    _enforce_single_instance()
     _enable_windows_vt_mode()
     
     load_dotenv()
@@ -455,30 +556,8 @@ def run_hybrid_bot():
     print("Booting up Hybrid Crypto AI Bot...")
 
     exec_cfg = cfg.get("execution", {}) or {}
-    exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "paper"))).strip().lower()
     leverage = int(exec_cfg.get("leverage", 5))
-    paper_starting_usdt = float(exec_cfg.get("paper_starting_balance_usdt", 1000.0))
-    fee_rate = float(exec_cfg.get("fee_rate", 0.0004))
-
-    # Try to fetch real fee rate from Binance (works even in paper mode)
-    # Keep the configured fee rate instead of overriding it from Binance.
-    # This lets the bot's PnL and fee display follow the strategy config.
-    fee_slippage_buffer_pct = float(exec_cfg.get("fee_slippage_buffer_pct", 0.0))
-    fee_edge_multiplier = float(exec_cfg.get("fee_edge_multiplier", 1.0))
-    min_seconds_between_trades = int(exec_cfg.get("min_seconds_between_trades", 0))
-    min_seconds_before_reversal = int(exec_cfg.get("min_seconds_before_reversal", 0))
-    reversal_min_confidence = float(exec_cfg.get("reversal_min_confidence", 0.0))
-    reversal_min_score = float(exec_cfg.get("reversal_min_score", 0.0))
-    reversal_min_net_edge_pct = float(exec_cfg.get("reversal_min_net_edge_pct", 0.0030))
-    break_even_trigger_pct = float(exec_cfg.get("break_even_trigger_pct", 0.0015))
-    break_even_buffer_pct = float(exec_cfg.get("break_even_buffer_pct", 0.0002))
-    trail_tighten_1_pct = float(exec_cfg.get("trail_tighten_1_pct", 0.0030))
-    trail_tighten_2_pct = float(exec_cfg.get("trail_tighten_2_pct", 0.0060))
-    min_profit_after_fees = float(exec_cfg.get("min_profit_after_fees", 0.0010))
-    exit_on_reversal_only_in_profit = bool(exec_cfg.get("exit_on_reversal_only_in_profit", True))
-    use_limit_orders = bool(exec_cfg.get("use_limit_orders", False))
-    trailing_callback_pct = float(exec_cfg.get("trailing_callback_pct", 0.5))
-    trailing_stop_callback = trailing_callback_pct / 100.0
+    requested_exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "paper"))).strip().lower()
 
     strategy_config = {
         'max_spread': cfg['strategy']['max_spread'],
@@ -488,6 +567,11 @@ def run_hybrid_bot():
         'sl_pct': cfg['strategy']['sl_pct'],
         'max_structural_sl_pct': cfg['strategy'].get('max_structural_sl_pct', 0.0030),
         'min_reward_risk': cfg['strategy'].get('min_reward_risk', 0.90),
+        'max_ret_30s': cfg['strategy'].get('max_ret_30s', 0.0050),
+        'max_ret_5s': cfg['strategy'].get('max_ret_5s', 0.0025),
+        'block_on_volume_spike': cfg['strategy'].get('block_on_volume_spike', False),
+        'vol_filter_atr_pct': cfg['strategy'].get('vol_filter_atr_pct', 0.0005),
+        'vol_filter_atr_max_pct': cfg['strategy'].get('vol_filter_atr_max_pct', 0.08),
     }
     fixed_trade_usdt = float(strategy_config.get('fixed_trade_usdt', 0.0) or 0.0)
 
@@ -497,8 +581,8 @@ def run_hybrid_bot():
     ai_enabled = cfg['ai']['enabled']
     ai_model = cfg['ai']['model']
     
-    data_cfg = cfg.get("data", {}) or {}
-    market = MarketData(market=str(data_cfg.get("market", "usdm")))
+    data_market = resolve_data_market(cfg)
+    market = MarketData(market=data_market)
     news = NewsData()
     ai_orch = HybridAIOrchestrator(model=ai_model)
     
@@ -521,81 +605,31 @@ def run_hybrid_bot():
             return
 
     df_indicators = calculate_base_indicators(hist_df)
-    latest_indicators = df_indicators.iloc[-1].to_dict()
+    latest_indicators = (df_indicators.iloc[-2] if len(df_indicators) > 1 else df_indicators.iloc[-1]).to_dict()
     bootstrap_price = float(hist_df.iloc[-1]['close'])
 
-    executor = None
-    if exec_mode in {"demo", "binance", "live"}:
-        if not api_key or not api_secret or "your_testnet" in api_key:
-            logger.warning("Binance keys missing/placeholder; falling back to PAPER execution.")
-            print(f"\n{RED}{BOLD}[!] WARNING: Missing Binance API keys. Falling back to PAPER mode.{RESET}\n")
-            exec_mode = "paper"
-        else:
-            is_demo_mode = (exec_mode != "live")
-            
-            mode_color = RED if not is_demo_mode else YELLOW
-            mode_text = "LIVE (REAL MONEY)" if not is_demo_mode else "DEMO (TESTNET)"
-            print(f"\n{mode_color}{BOLD}=== ENVIRONMENT CHECK ==={RESET}")
-            print(f"Mode: {mode_color}{BOLD}{mode_text}{RESET}")
-            print(f"Exchange: BINANCE FUTURES")
-            print(f"Connecting to API to verify keys...{RESET}")
-            executor = BinanceFuturesExecution(
-                api_key,
-                api_secret,
-                leverage=leverage,
-                max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-                is_demo=is_demo_mode
-            )
-            executor.symbol = symbol # Fix: Ensure symbol is set BEFORE balance check
-            executor.fee_rate = fee_rate
-            executor.fee_slippage_buffer_pct = fee_slippage_buffer_pct
-            executor.fee_edge_multiplier = fee_edge_multiplier
-            executor.fixed_trade_usdt = fixed_trade_usdt
-            executor.min_seconds_between_trades = min_seconds_between_trades
-            executor.min_seconds_before_reversal = min_seconds_before_reversal
-            executor.use_limit_orders = use_limit_orders
-            executor.reversal_min_confidence = reversal_min_confidence
-            executor.reversal_min_score = reversal_min_score
-            executor.reversal_min_net_edge_pct = reversal_min_net_edge_pct
-            executor.break_even_trigger_pct = break_even_trigger_pct
-            executor.break_even_buffer_pct = break_even_buffer_pct
-            executor.trail_tighten_1_pct = trail_tighten_1_pct
-            executor.trail_tighten_2_pct = trail_tighten_2_pct
-            executor.min_profit_after_fees = min_profit_after_fees
-            executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
-            executor.use_native_trailing_stop = bool(cfg.get('execution', {}).get('use_native_trailing_stop', False))
-            executor.trailing_callback_pct = trailing_callback_pct
-            executor.trailing_stop_callback = trailing_stop_callback
-
-            _ = executor.get_portfolio_value(bootstrap_price)
-            if executor.initial_balance <= 0:
-                logger.warning(f"Demo execution unavailable ({getattr(executor, 'last_status', '')}); falling back to PAPER.")
-                exec_mode = "paper"
-                executor = None
-
-    if exec_mode == "paper" or executor is None:
-        print(f"Initializing PAPER execution layer (starting ${paper_starting_usdt:,.2f})...")
-        executor = PaperFuturesExecution(
-            starting_balance_usdt=paper_starting_usdt,
-            leverage=leverage,
-            fee_rate=fee_rate,
-            max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
+    if requested_exec_mode == "live":
+        exec_market = str(exec_cfg.get("market", "usdm") or "usdm").strip().lower()
+        gate_log_file = "trade_log_spot.csv" if exec_market == "spot" else "trade_log_futures.csv"
+        passed, metrics = paper_gate_passed(
+            log_file=gate_log_file,
+            min_trades=int(exec_cfg.get("paper_gate_min_trades", 100)),
+            min_profit_factor=float(exec_cfg.get("paper_gate_min_profit_factor", 1.2)),
+            max_drawdown=float(exec_cfg.get("paper_gate_max_drawdown", 0.20)),
         )
-        executor.fee_slippage_buffer_pct = fee_slippage_buffer_pct
-        executor.fee_edge_multiplier = fee_edge_multiplier
-        executor.fixed_trade_usdt = fixed_trade_usdt
-        executor.min_seconds_between_trades = min_seconds_between_trades
-        executor.min_seconds_before_reversal = min_seconds_before_reversal
-        executor.reversal_min_confidence = reversal_min_confidence
-        executor.reversal_min_score = reversal_min_score
-        executor.reversal_min_net_edge_pct = reversal_min_net_edge_pct
-        executor.break_even_trigger_pct = break_even_trigger_pct
-        executor.break_even_buffer_pct = break_even_buffer_pct
-        executor.trail_tighten_1_pct = trail_tighten_1_pct
-        executor.trail_tighten_2_pct = trail_tighten_2_pct
-        executor.min_profit_after_fees = min_profit_after_fees
-        executor.exit_on_reversal_only_in_profit = exit_on_reversal_only_in_profit
-        executor.use_limit_orders = use_limit_orders
+        if not passed:
+            logger.warning("Live mode blocked by paper-performance gate: %s", metrics)
+            cfg.setdefault("execution", {})["mode"] = "paper"
+            print(f"{YELLOW}{BOLD}Paper safety gate active: forcing PAPER mode until metrics improve.{RESET}")
+
+    executor = create_executor(
+        cfg=cfg,
+        api_key=api_key,
+        api_secret=api_secret,
+        bootstrap_price=bootstrap_price,
+        fixed_trade_usdt=fixed_trade_usdt,
+    )
+    executor.symbol = symbol
 
     executor.max_open_positions = cfg['risk'].get('max_open_positions', 1)
     executor.daily_loss_cap_pct = cfg['risk'].get('daily_loss_cap')
@@ -708,6 +742,14 @@ def run_hybrid_bot():
     status_buf = deque(maxlen=80)
     signal_history = deque(maxlen=5) # 5-second smoothing buffer
 
+    dashboard_cfg = cfg.get("dashboard", {}) or {}
+    dashboard_runtime = None
+    if dashboard_cfg.get("enabled", True):
+        dashboard_runtime = DashboardRuntime(cfg)
+        dashboard_host = dashboard_cfg.get("host", "127.0.0.1")
+        dashboard_port = int(dashboard_cfg.get("port", 8080))
+        dashboard_runtime.ensure_running(dashboard_host, dashboard_port)
+
     def status(msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
         status_buf.append(f"{ts} {msg}")
@@ -729,6 +771,8 @@ def run_hybrid_bot():
                             status(f"MTF {tf}: fetch failed")
                             continue
                         htf_ind = calculate_base_indicators(htf_df)
+                        if len(htf_ind) > 1:
+                            htf_ind = htf_ind.iloc[:-1]
                         ctx = build_mtf_timeframe_context(htf_ind)
                         ctx["computed_at"] = time.time()
                         mtf_context[str(tf)] = ctx
@@ -736,11 +780,11 @@ def run_hybrid_bot():
                 
                 if not new_df.empty:
                     df_indicators = calculate_base_indicators(new_df)
-                    latest_indicators = df_indicators.iloc[-1].to_dict()
+                    latest_indicators = (df_indicators.iloc[-2] if len(df_indicators) > 1 else df_indicators.iloc[-1]).to_dict()
                     
                 if not macro_df.empty:
                     macro_indicators_df = calculate_base_indicators(macro_df)
-                    latest_macro = macro_indicators_df.iloc[-1].to_dict()
+                    latest_macro = (macro_indicators_df.iloc[-2] if len(macro_indicators_df) > 1 else macro_indicators_df.iloc[-1]).to_dict()
 
                 # Refresh Advanced Pivot Points from daily OHLCV (every 15 min)
                 if time.time() - last_pivot_refresh_ts >= 900 or not pivot_data:
@@ -755,7 +799,9 @@ def run_hybrid_bot():
                     except Exception as e:
                         logger.warning(f"Failed to compute pivots: {e}")
 
-            if ai_enabled and (ticks == 1 or ticks % regime_refresh_interval == 0):
+            is_ai_enabled = bool(cfg.get("ai", {}).get("enabled", False))
+            ai_orch.enabled = is_ai_enabled
+            if is_ai_enabled and (ticks == 1 or ticks % regime_refresh_interval == 0):
                 logger.info("Refreshing AI macro regime...")
                 headlines = news.fetch_latest_news(symbol)
                 funding_rate = market.fetch_funding_rate(symbol)
@@ -804,10 +850,65 @@ def run_hybrid_bot():
                 time.sleep(tick_delay)
                 continue
 
+            # Sync dynamic overrides/config
+            target_mode = str(cfg.get("execution", {}).get("mode", getattr(executor, "label", "paper"))).lower()
+            current_label = str(getattr(executor, "label", "paper") or "paper").upper()
+            is_live_executor = "LIVE" in current_label and "PAPER" not in current_label
+            is_paper_executor = "PAPER" in current_label
+            if target_mode == "live" and not is_live_executor:
+                logger.info("Switching to LIVE execution mode as requested.")
+                try:
+                    executor.close_all_positions(symbol)
+                except Exception:
+                    pass
+                cfg.setdefault("execution", {})["mode"] = "live"
+                executor = create_executor(
+                    cfg=cfg,
+                    api_key=os.getenv("BINANCE_API_KEY"),
+                    api_secret=os.getenv("BINANCE_SECRET"),
+                    bootstrap_price=float(state.get("price", 0.0) or 0.0),
+                    fixed_trade_usdt=fixed_trade_usdt,
+                )
+                executor.symbol = symbol
+                executor.label = "LIVE"
+            elif target_mode == "paper" and not is_paper_executor:
+                logger.info("Switching to PAPER execution mode as requested.")
+                try:
+                    executor.close_all_positions(symbol)
+                except Exception:
+                    pass
+                cfg.setdefault("execution", {})["mode"] = "paper"
+                executor = create_executor(
+                    cfg=cfg,
+                    api_key=os.getenv("BINANCE_API_KEY"),
+                    api_secret=os.getenv("BINANCE_SECRET"),
+                    bootstrap_price=float(state.get("price", 0.0) or 0.0),
+                    fixed_trade_usdt=fixed_trade_usdt,
+                )
+                executor.symbol = symbol
+                executor.label = "PAPER"
+
+            is_paused = bool(cfg.get("execution", {}).get("paused", False))
+            executor.paused = is_paused
+            if is_paused:
+                if getattr(executor, "active_positions", None) or getattr(executor, "pending_entry", None) or getattr(executor, "pending_exit", None):
+                    logger.info("Bot paused - immediately closing all positions and orders.")
+                    try:
+                        executor.close_all_positions(symbol)
+                    except Exception as e:
+                        logger.error(f"Error closing positions on pause: {e}")
+                time.sleep(tick_delay)
+                continue
+
             # Update executor with current ATR for volatility-based leverage
             atr_pct = latest_indicators.get('atr_pct')
             if atr_pct is not None and not (isinstance(atr_pct, float) and atr_pct != atr_pct):  # Check not NaN
                 executor._current_atr_pct = float(atr_pct)
+
+            # Pass PSAR to executor for dynamic trailing stop logic
+            psar = latest_indicators.get('psar')
+            if psar is not None and not (isinstance(psar, float) and psar != psar):
+                executor._current_psar = float(psar)
 
             executor.process_orders_and_positions(symbol, state['price'])
 
@@ -844,40 +945,43 @@ def run_hybrid_bot():
                 executor.close_all_positions(symbol)
                 break
 
-            signal = generate_quant_signal(
-                state,
-                latest_indicators,
-                strategy_config,
-                df_indicators,
-                latest_macro,
-                mtf_context=mtf_context,
-                mtf_config=mtf_cfg,
-                pivot_data=pivot_data,
-            )
+            signal_df = df_indicators.iloc[:-1] if (df_indicators is not None and len(df_indicators) > 1) else df_indicators
             
-            # SIGNAL SMOOTHING: Avoid reacting to 1s noise.
-            # We average the last 5 seconds of scores.
+            # Dashboard Pause Logic
+            is_paused = bool(cfg.get("execution", {}).get("paused", False))
+            if is_paused:
+                signal = {
+                    "action": "HOLD",
+                    "reason": "BOT PAUSED (Manual)",
+                    "confidence": 0.0,
+                    "score": 0.0,
+                    "market_bias": "NEUTRAL"
+                }
+            else:
+                signal = generate_quant_signal(
+                    state,
+                    latest_indicators,
+                    strategy_config,
+                    signal_df,
+                    latest_macro,
+                    mtf_context=mtf_context,
+                    mtf_config=mtf_cfg,
+                    pivot_data=pivot_data,
+                )
+            
+            # SIGNAL SMOOTHING: Simplified for faster scalp entry.
             raw_score = float(signal.get('score', 0.0) or 0.0)
             signal_history.append(raw_score)
             avg_score = sum(signal_history) / len(signal_history)
             
-            # If the smoothed score flips sign or is significantly weaker than the raw tick, we hold.
-            if len(signal_history) >= 3:
-                # If raw score and avg score have different signs, the move is jittery.
-                if (raw_score > 0 and avg_score < 0) or (raw_score < 0 and avg_score > 0):
-                    signal['action'] = "HOLD"
-                    signal['hold_reason'] = "Signal smoothing: jitter detected"
-                
-                # Apply the smoothed score back to the signal
-                signal['score'] = avg_score
-                # Keep confidence as a 0.0 - 1.0 decimal for consistent UI formatting
-                capped_score = max(-1.0, min(1.0, avg_score))
-                signal['confidence'] = abs(capped_score)
-                
-                # If confidence is too low after smoothing, hold.
-                if signal['confidence'] < float(strategy_config.get('min_conf', 0.05)):
-                    signal['action'] = "HOLD"
-                    signal['hold_reason'] = "Signal smoothing: weak confidence"
+            # Apply the score and confidence
+            signal['score'] = raw_score # Use raw tick for speed
+            signal['confidence'] = abs(max(-1.0, min(1.0, raw_score)))
+            
+            # Only hold if the RAW confidence is truly under the floor
+            if signal['confidence'] < float(strategy_config.get('min_conf', 0.05)):
+                signal['action'] = "HOLD"
+                signal['hold_reason'] = "Weak confidence (<5%)"
 
             sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
             if sig_str != last_reported_signal:
@@ -1012,7 +1116,7 @@ def run_hybrid_bot():
 
             if signal['action'] != "HOLD":
                 # Regime Vetoes
-                if ai_enabled:
+                if is_ai_enabled:
                     if regime == "BEARISH" and signal['action'] == "BUY":
                         signal['action'] = "HOLD"
                         signal['reason'] += " [AI Veto: Bearish regime]"
@@ -1033,6 +1137,12 @@ def run_hybrid_bot():
                     elif entry_style == "SELL_RALLIES" and signal['action'] == "SELL":
                         target_price = max(target_price, state['price'] * 1.001)
 
+                    # Structural Take Profit Interception
+                    if signal['action'] == "BUY" and signal.get("structure_resistance"):
+                        signal["tp_target"] = float(signal["structure_resistance"]) * 0.999
+                    elif signal['action'] == "SELL" and signal.get("structure_support"):
+                        signal["tp_target"] = float(signal["structure_support"]) * 1.001
+
                     executor.place_limit_order(signal, symbol, target_price)
 
             curr_status = str(getattr(executor, 'last_status', '') or "")
@@ -1043,8 +1153,8 @@ def run_hybrid_bot():
             # Render Dashboard
             if ticks % 5 == 0:
                 open_orders_cache = executor.get_open_orders(symbol)
-                
             ui_mode = _detect_ui_mode(str(ui_cfg.get("mode", "auto")))
+            ui_cfg["paused"] = is_paused # Pass pause state to UI
             print_dashboard(
                 ticks, symbol, regime, state, signal, executor, session_start,
                 mtf_context=mtf_context, mtf_cfg=mtf_cfg,
@@ -1052,6 +1162,18 @@ def run_hybrid_bot():
                 ui_cfg=ui_cfg, ai_overlay=ai_overlay_state, pivot_data=pivot_data,
                 open_orders=open_orders_cache
             )
+
+            if dashboard_runtime is not None:
+                if ticks == 1 or ticks % 20 == 0:
+                    dashboard_runtime.ensure_running(dashboard_host, dashboard_port)
+                dashboard_runtime.update_state(
+                    _build_dashboard_snapshot(
+                        symbol, regime, state, signal, executor, session_start,
+                        list(status_buf)[-int(ui_cfg.get("status_lines", 3) or 3):],
+                        pivot_data, mtf_context, open_orders_cache, latest_indicators,
+                        [], ai_overlay_state, cfg
+                    )
+                )
 
             time.sleep(tick_delay)
 

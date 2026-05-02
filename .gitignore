@@ -9,5 +9,6 @@ __pycache__/
 .venv/
 venv/
 env/
+dashboard_overrides.yaml
 .DS_Store
 Thumbs.db

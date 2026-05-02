@@ -1,9 +1,85 @@
 import os
 import logging
 import json
+import requests
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+
+def _call_gemini(system_prompt: str, user_content: str, max_tokens: int = 250) -> str:
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY not found")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": f"System Instruction: {system_prompt}\n\nUser Content: {user_content}"
+            }]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0.0
+        }
+    }
+    r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+    if r.status_code == 200:
+        data = r.json()
+        try:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception:
+            pass
+    raise RuntimeError(f"Gemini API returned status {r.status_code}: {r.text}")
+
+
+def _call_openrouter(system_prompt: str, user_content: str, max_tokens: int = 250) -> str:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY not found")
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    free_models = [
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "google/gemma-3-27b-it:free",
+        "meta-llama/llama-3.2-3b-instruct:free",
+        "liquid/lfm-2.5-1.2b-thinking:free"
+    ]
+
+    errors = []
+    for model in free_models:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.0
+        }
+        try:
+            r = requests.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "HTTP-Referer": "https://crypto-ai-bot.local",
+                    "Content-Type": "application/json"
+                },
+                timeout=10
+            )
+            if r.status_code == 200:
+                data = r.json()
+                try:
+                    return data["choices"][0]["message"]["content"]
+                except Exception:
+                    pass
+            errors.append(f"Model {model} failed with status {r.status_code}: {r.text}")
+        except Exception as e:
+            errors.append(f"Model {model} threw exception: {e}")
+
+    raise RuntimeError(f"All free OpenRouter models failed. Errors: {'; '.join(errors)}")
+
 
 
 class HybridAIOrchestrator:
@@ -12,33 +88,72 @@ class HybridAIOrchestrator:
         self.last_macro_regime = "NEUTRAL"
         self._last_trade_eval = None
         self._last_overlay = None
+        self._last_trade_time = 0.0
+        self._last_overlay_time = 0.0
+        self._last_regime_time = 0.0
 
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.enabled = bool(api_key and api_key != "your_openai_api_key_here")
+        self.gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY")
+        self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        self.openai_key = os.getenv("OPENAI_API_KEY")
+
+        self.enabled = bool(self.gemini_key or self.openrouter_key or self.openai_key)
 
         if self.enabled:
-            self.client = OpenAI(api_key=api_key)
-            logger.info(f"AI Orchestrator initialized with model: {model}")
+            if self.openai_key:
+                self.client = OpenAI(api_key=self.openai_key)
+            else:
+                self.client = None
+            logger.info(f"AI Orchestrator initialized (Gemini/OpenRouter/OpenAI enabled).")
         else:
             self.client = None
-            logger.warning("OpenAI API key not configured. AI override disabled (defaulting to NEUTRAL).")
+            logger.warning("No AI API key configured. AI override disabled (defaulting to NEUTRAL).")
+
+    def _call_llm(self, system_prompt: str, user_content: str, max_tokens: int = 250) -> str:
+        # First try Gemini direct API
+        if self.gemini_key:
+            try:
+                return _call_gemini(system_prompt, user_content, max_tokens)
+            except Exception as e:
+                logger.warning(f"Gemini Direct Call failed ({e}). Attempting OpenRouter fallback...")
+
+        # Fallback to OpenRouter
+        if self.openrouter_key:
+            try:
+                return _call_openrouter(system_prompt, user_content, max_tokens)
+            except Exception as e:
+                logger.warning(f"OpenRouter fallback failed ({e}). Trying OpenAI fallback if available...")
+
+        # Final fallback to OpenAI if client is available
+        if self.client and self.openai_key:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                )
+                return (response.choices[0].message.content or "").strip()
+            except Exception as e:
+                logger.error(f"OpenAI final fallback failed: {e}")
+                raise e
+
+        raise RuntimeError("No available AI providers succeeded.")
 
     def evaluate_trade(self, context: dict, model: str | None = None) -> dict:
-        """
-        Evaluates a proposed trade with full context (signal + MTF + S/R + fees).
-        Returns:
-          {
-            "decision": "ALLOW" | "VETO",
-            "hold_minutes": int,
-            "confidence": float (0..1),
-            "rationale": str
-          }
-        """
         fallback = {"decision": "ALLOW", "hold_minutes": 0, "confidence": 0.0, "rationale": "AI disabled"}
-        if not self.enabled or self.client is None:
+        if not self.enabled:
             return fallback
 
-        chosen_model = model or self.model
+        import time
+        now = time.time()
+        if now - getattr(self, "_last_trade_time", 0.0) < 60:
+            if getattr(self, "_last_trade_eval", None):
+                return self._last_trade_eval
+            return fallback
+        self._last_trade_time = now
 
         system_prompt = (
             "You are a 'Bias Toward Action' scalp hunter. "
@@ -52,16 +167,7 @@ class HybridAIOrchestrator:
         user_content = json.dumps(context, ensure_ascii=False)
 
         try:
-            response = self.client.chat.completions.create(
-                model=chosen_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=200,
-                temperature=0.0,
-            )
-            raw = (response.choices[0].message.content or "").strip()
+            raw = self._call_llm(system_prompt, user_content, max_tokens=200)
             # Be tolerant to accidental prose: extract the first JSON object.
             start = raw.find("{")
             end = raw.rfind("}")
@@ -77,10 +183,7 @@ class HybridAIOrchestrator:
                 hold_minutes = 0
 
             confidence = float(data.get("confidence", 0.0) or 0.0)
-            if confidence < 0.0:
-                confidence = 0.0
-            if confidence > 1.0:
-                confidence = 1.0
+            confidence = max(0.0, min(1.0, confidence))
 
             rationale = str(data.get("rationale", "") or "")[:240]
 
@@ -98,19 +201,6 @@ class HybridAIOrchestrator:
             return {"decision": "ALLOW", "hold_minutes": 0, "confidence": 0.0, "rationale": f"AI error: {e}"}
 
     def evaluate_overlay(self, context: dict, model: str | None = None) -> dict:
-        """
-        Produces a slower tactical overlay for the bot.
-        Returns:
-          {
-            "bias": "LONG_ONLY" | "SHORT_ONLY" | "NEUTRAL",
-            "risk_mode": "NORMAL" | "CAUTIOUS" | "RISK_OFF",
-            "entry_style": "BUY_PULLBACKS" | "SELL_RALLIES" | "BREAKOUTS" | "MIXED",
-            "avoid_new_entries": bool,
-            "max_hold_minutes": int,
-            "confidence": float,
-            "rationale": str
-          }
-        """
         fallback = {
             "bias": "NEUTRAL",
             "risk_mode": "NORMAL",
@@ -120,10 +210,17 @@ class HybridAIOrchestrator:
             "confidence": 0.0,
             "rationale": "AI disabled",
         }
-        if not self.enabled or self.client is None:
+        if not self.enabled:
             return fallback
 
-        chosen_model = model or self.model
+        import time
+        now = time.time()
+        if now - getattr(self, "_last_overlay_time", 0.0) < 60:
+            if getattr(self, "_last_overlay", None):
+                return self._last_overlay
+            return fallback
+        self._last_overlay_time = now
+
         system_prompt = (
             "You are a tactical scalp-trading specialist for a crypto bot. "
             "Produce a tactical bias based on 3m, 5m, and 15m charts. "
@@ -139,16 +236,7 @@ class HybridAIOrchestrator:
         )
         user_content = json.dumps(context, ensure_ascii=False)
         try:
-            response = self.client.chat.completions.create(
-                model=chosen_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=250,
-                temperature=0.0,
-            )
-            raw = (response.choices[0].message.content or "").strip()
+            raw = self._call_llm(system_prompt, user_content, max_tokens=250)
             start = raw.find("{")
             end = raw.rfind("}")
             payload = raw[start:end + 1] if start != -1 and end != -1 and end > start else raw
@@ -188,26 +276,17 @@ class HybridAIOrchestrator:
             return out
         except Exception as e:
             logger.error(f"AI overlay evaluation failed: {e}")
-            return {
-                "bias": "NEUTRAL",
-                "risk_mode": "NORMAL",
-                "entry_style": "MIXED",
-                "avoid_new_entries": False,
-                "max_hold_minutes": 0,
-                "confidence": 0.0,
-                "rationale": f"AI error: {e}",
-            }
+            return fallback
 
     def determine_macro_regime(self, news_headlines: list, quant_context: str = "") -> str:
-        """
-        Uses LLM to assess if macro conditions are safe for low-risk quant trading.
-        Returns exactly one of: BULLISH, BEARISH, NEUTRAL, VOLATILE.
-        """
-        if not self.enabled:
+        if not self.enabled or not news_headlines:
             return "NEUTRAL"
-            
-        if not news_headlines:
-            return "NEUTRAL"
+
+        import time
+        now = time.time()
+        if now - getattr(self, "_last_regime_time", 0.0) < 60:
+            return getattr(self, "last_macro_regime", "NEUTRAL")
+        self._last_regime_time = now
 
         system_prompt = (
             "You are a strict, ultra-conservative risk-management AI for a quantitative crypto trading bot. "
@@ -225,22 +304,15 @@ class HybridAIOrchestrator:
             user_content += f"\n\nQuantitative Context:\n{quant_context}"
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                max_tokens=10,
-                temperature=0.0
-            )
-            raw = response.choices[0].message.content.strip().upper()
-
-            # Validate the response is one of the expected regimes
+            raw = self._call_llm(system_prompt, user_content, max_tokens=10).strip().upper()
             valid_regimes = {"BULLISH", "BEARISH", "VOLATILE", "NEUTRAL"}
             if raw in valid_regimes:
                 self.last_macro_regime = raw
             else:
+                for reg in valid_regimes:
+                    if reg in raw:
+                        self.last_macro_regime = reg
+                        return self.last_macro_regime
                 logger.warning(f"AI returned unexpected regime '{raw}', defaulting to NEUTRAL.")
                 self.last_macro_regime = "NEUTRAL"
 
@@ -248,4 +320,4 @@ class HybridAIOrchestrator:
 
         except Exception as e:
             logger.error(f"AI regime determination failed: {e}")
-            return self.last_macro_regime  # Return last known regime on error
+            return self.last_macro_regime

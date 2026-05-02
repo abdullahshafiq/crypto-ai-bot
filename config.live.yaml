@@ -1,0 +1,166 @@
+# High-Frequency Scalping Configuration (LIVE DEPLOYMENT)
+# This file is optimized for Oracle Cloud deployment.
+
+symbol: "SOL/USDC:USDC"
+timeframe: "1m"           # Ultrafast execution
+macro_timeframe: "15m"     # Faster macro alignment for 1m scalps
+
+# Market data source (spot vs futures)
+data:
+  market: "auto"          # auto follows execution.market; or set usdm | spot
+
+# Execution Settings
+execution:
+  mode: "live"              # paper | demo | live
+  market: "usdm"              # spot | usdm (Futures)
+  leverage: 3                # Conservative starting leverage for live mode
+  spot_balance_pct: 0.35      
+  spot_reserve_pct: 0.30      
+  spot_max_layers: 3          
+  dynamic_leverage: true       
+  paper_starting_balance_usdt: 50
+  fee_rate: 0.0005           # Standard live taker fee (0.05%)
+  dca_enabled: false           
+  dca_max_steps: 0             
+  dca_distance_pct: 0.006      
+  fee_slippage_buffer_pct: 0.0002
+  fee_edge_multiplier: 1.2
+  min_seconds_between_trades: 30
+  min_seconds_before_reversal: 30
+  reversal_min_confidence: 0.20
+  reversal_min_score: 0.15
+  reversal_min_net_edge_pct: 0.0015
+  break_even_trigger_pct: 0.0030    
+  break_even_buffer_pct: 0.0004     
+  trail_tighten_1_pct: 0.0090       
+  trail_tighten_2_pct: 0.0150       
+  min_profit_after_fees: 0.0012
+  exit_on_reversal_only_in_profit: true 
+  use_limit_orders: true            
+  use_native_trailing_stop: false    
+  trailing_callback_pct: 0.65       
+  ttl_exit_seconds: 300             
+
+# Dynamic Leverage (volatility + confidence based position sizing)
+leverage:
+  enabled: true                
+  min_leverage: 1              
+  max_leverage: 8              
+  confidence_levels:
+    0.05: 2.0                  
+    0.15: 3.0                  
+    0.30: 5.0                  
+    0.50: 6.0                  
+    0.75: 8.0                  
+  use_score_multiplier: true   
+  score_weight: 0.2            
+  atr_volatility_scaling: true  
+  atr_reference_pct: 0.012     
+  atr_min_multiplier: 0.5      
+
+# Multi-Timeframe Trend + S/R
+mtf:
+  enabled: true
+  timeframes: ["1m", "3m", "5m", "10m", "15m", "1h", "4h"]
+  min_agree: 2                  
+  veto_on_missing: false        
+  max_age_seconds: 300          
+  sr_buffer_pct: 0.0015         
+  mode: "hard"                  
+
+# Terminal UI
+ui:
+  mode: "ansi"
+  compact: true
+  status_lines: 3
+  alt_screen: true
+
+# Memory/Log limits
+memory:
+  max_closed_trades: 5000
+
+logging:
+  max_mb: 5
+  backups: 3
+
+# Auto-learning from closed trades
+auto_learning:
+  enabled: true
+  min_completed_trades: 30
+  refresh_closed_trades: 10
+  max_recent_trades: 300
+  shrinkage: 0.35
+  ai_advisor:
+    enabled: true
+    model: "gpt-4o-mini"
+    max_weight_shift: 0.12
+
+# Quant Strategy Parameters
+strategy:
+  max_spread: 0.0005        
+  min_conf: 0.05            # Sniper Aggression (5%)
+  max_ret_30s: 0.0040
+  max_ret_5s: 0.0018
+  block_on_volume_spike: true
+  fixed_trade_usdt: 50
+  tp_pct: 0.0035          
+  sl_pct: 0.0080          
+  max_structural_sl_pct: 0.0150  
+  min_reward_risk: 0.50          
+  vol_filter_atr_pct: 0.0001  # Ultra-sensitive (0.01%)
+  vol_filter_atr_max_pct: 0.08  
+  wick_sweep_enabled: true      
+  wick_sweep_buffer_pct: 0.0008 
+  wick_sweep_reclaim_pct: 0.0002 
+  wick_sweep_wick_ratio: 1.6    
+
+spot:
+  mode: "grid"                 
+  max_layers: 3
+  layer_quote_pct: 0.20        
+  reserve_quote_pct: 0.30      
+  buy_near_support_pct: 0.0150 
+  sell_near_resistance_pct: 0.0020
+  layer_spacing_pct: 0.0030    
+  emergency_break_pct: 0.0040  
+  min_take_profit_pct: 0.0035  
+  min_trail_profit_quote: 0.10 
+
+# Risk Limits
+risk:
+  daily_loss_cap: 0.10     
+  disable_loss_cap: false
+  max_open_positions: 1    
+  min_balance_floor: 0.0   
+
+# Refresh Intervals
+intervals:
+  indicator_refresh: 10    
+  regime_refresh: 600      
+  tick_delay_seconds: 1    
+
+# AI Settings
+ai:
+  model: "gpt-4o-mini"
+  enabled: true           
+
+# AI Overlay
+ai_overlay:
+  enabled: true          
+  model: "gpt-4o-mini"
+  refresh_seconds: 300    
+
+# Trade-Gating AI
+ai_trade:
+  enabled: true           
+  model: "gpt-4o-mini"
+  min_interval_seconds: 30     
+  on_error: "allow"            
+  max_hold_minutes: 60
+
+# Local web dashboard
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  candle_limit: 240
