@@ -547,6 +547,12 @@ def run_hybrid_bot():
     mtf_cfg = cfg.get("mtf", {}) or {}
     ai_trade_cfg = cfg.get("ai_trade", {}) or {}
     ai_overlay_cfg = cfg.get("ai_overlay", {}) or cfg.get("ai", {}) or {}
+    if "enabled" not in ai_overlay_cfg and "overlay_enabled" in ai_overlay_cfg:
+        ai_overlay_cfg = dict(ai_overlay_cfg)
+        ai_overlay_cfg["enabled"] = ai_overlay_cfg.get("overlay_enabled")
+    if "refresh_seconds" not in ai_overlay_cfg and "overlay_refresh_seconds" in ai_overlay_cfg:
+        ai_overlay_cfg = dict(ai_overlay_cfg)
+        ai_overlay_cfg["refresh_seconds"] = ai_overlay_cfg.get("overlay_refresh_seconds")
     ui_cfg = cfg.setdefault("ui", {})
     mem_cfg = cfg.get("memory", {}) or {}
     auto_learning_cfg = cfg.get("auto_learning", {}) or {}
