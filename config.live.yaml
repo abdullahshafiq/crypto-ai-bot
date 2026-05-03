@@ -130,7 +130,8 @@ strategy:
   resistance_veto_pct: 0.0010
   support_break_pct: 0.0010
   resistance_break_pct: 0.0010
-  max_chase_pct: 0.0018
+  max_chase_pct: 0.0030
+  mtf_neutral_allow_score: 0.35
   entry_min_confidence_hard: 0.20
   entry_near_resistance_block_pct: 0.0030
   entry_near_support_block_pct: 0.0030

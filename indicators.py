@@ -1615,9 +1615,15 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["action"] = "HOLD"
         signal["hold_reason"] = "MTF trend veto: fast timeframes bearish"
     elif mtf_fast_bias == "NEUTRAL" and signal["action"] in {"BUY", "SELL"}:
-        signal["action"] = "HOLD"
-        signal["hold_reason"] = "MTF trend veto: fast timeframes not aligned"
-        signal["reason"] = f"{signal['reason']} MTFPartialBlocked"
+        # Neutral fast TFs should warn, not auto-freeze. Keep holding only when the
+        # base score is still too weak; otherwise allow the trade and note the partial MTF.
+        mtf_neutral_allow_score = float(strategy_config.get("mtf_neutral_allow_score", 0.35) or 0.35)
+        if abs(total_score) < mtf_neutral_allow_score:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = "MTF trend veto: fast timeframes not aligned"
+            signal["reason"] = f"{signal['reason']} MTFPartialBlocked"
+        else:
+            signal["reason"] = f"{signal['reason']} MTFPartial"
     elif mtf_fast_bias != "NEUTRAL":
         signal["reason"] = f"{signal['reason']} MTFConfirm:{mtf_fast_bias}"
     
