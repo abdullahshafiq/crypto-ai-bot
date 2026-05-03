@@ -81,8 +81,8 @@ mtf:
   enabled: true
   timeframes: ["1m", "3m", "5m", "10m", "15m", "1h", "4h"]
   min_agree: 2                    # 2-of-5 fast TFs (1m/3m/5m/10m/15m)
-  require_full_confirmation: true  # block entries on MTFPartial; require broader confirmation
-  strict_veto_on_missing: true     # if confirmation TF data is missing, hold instead of guessing
+  require_full_confirmation: false # keep MTF as confirmation, not a hard entry gate
+  strict_veto_on_missing: false    # missing higher-TF data falls back to base signal
   veto_on_missing: false
   max_age_seconds: 300
   sr_buffer_pct: 0.0015

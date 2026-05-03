@@ -81,8 +81,8 @@ mtf:
   enabled: true
   timeframes: ["1m", "3m", "5m", "10m", "15m", "1h", "4h"]
   min_agree: 2
-  require_full_confirmation: true
-  strict_veto_on_missing: true
+  require_full_confirmation: false
+  strict_veto_on_missing: false
   veto_on_missing: false
   max_age_seconds: 300
   sr_buffer_pct: 0.0015
