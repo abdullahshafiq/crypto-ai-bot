@@ -25,11 +25,14 @@
     body { background-color: #020617; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em; margin: 0; padding: 0; min-height: 100vh; overflow-x: hidden; }
     .terminal-card { background: linear-gradient(145deg, #0b1120 0%, #080d1a 100%); border: 1px solid rgba(71, 85, 105, 0.5); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.6); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; }
     .card-collapsed { min-height: 0 !important; height: auto !important; }
-    .card-content { max-height: 2000px; transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; opacity: 1; padding: 0 1.5rem 1.5rem 1.5rem; }
+    .card-content { max-height: 2000px; transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; opacity: 1; padding: 0 1rem 1rem 1rem; }
+    @media (min-width: 768px) { .card-content { padding: 0 1.5rem 1.5rem 1.5rem; } }
     .card-collapsed .card-content { max-height: 0 !important; min-height: 0 !important; height: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; opacity: 0; pointer-events: none; }
-    .chart-height { min-height: 450px !important; }
+    .chart-height { min-height: 300px !important; }
+    @media (min-width: 768px) { .chart-height { min-height: 450px !important; } }
     .card-collapsed .chart-height { min-height: 0 !important; height: 0 !important; }
-    .card-header { padding: 1.5rem; display: flex; align-items: center; justify-content: space-between; width: 100%; }
+    .card-header { padding: 1rem; display: flex; align-items: center; justify-content: space-between; width: 100%; }
+    @media (min-width: 768px) { .card-header { padding: 1.5rem; } }
     .card-collapsed .card-header { padding-bottom: 1.5rem; }
     .collapse-icon { transition: transform 0.3s ease; }
     .card-collapsed .collapse-icon { transform: rotate(180deg); }
@@ -49,24 +52,28 @@
 </head>
 <body class="text-slate-300 font-sans selection:bg-emerald-500/30">
   <div class="app-container">
-    <header class="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-obsidian shrink-0">
-      <div class="flex items-center gap-3">
-        <div class="w-10 h-10 bg-emerald-500/10 border border-emerald-500/40 rounded-xl flex items-center justify-center inner-glow"><i data-lucide="zap" class="w-6 h-6 text-emerald-400"></i></div>
-        <div>
-          <h1 class="text-xl font-black text-white tracking-tight uppercase leading-none">Quantum Command <span class="text-[8px] text-slate-500 font-mono">v4.0.2</span></h1>
-          <div class="flex items-center gap-2 mt-1">
-            <span id="apiStatus" class="text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 border border-slate-600 text-slate-400 uppercase">OFFLINE</span>
-            <div class="h-1 w-1 rounded-full bg-slate-600" id="connDot"></div>
-            <span id="uptime" class="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-tighter">00:00:00</span>
+    <header class="flex items-center justify-between px-3 md:px-6 py-2 md:py-4 border-b border-slate-800 bg-obsidian shrink-0 gap-2">
+      <div class="flex items-center gap-2 md:gap-3 overflow-hidden">
+        <div class="w-8 h-8 md:w-10 md:h-10 bg-emerald-500/10 border border-emerald-500/40 rounded-xl flex items-center justify-center inner-glow shrink-0">
+          <i data-lucide="zap" class="w-5 h-5 md:w-6 md:h-6 text-emerald-400"></i>
+        </div>
+        <div class="truncate">
+          <h1 class="text-sm md:text-xl font-black text-white tracking-tight uppercase leading-none truncate">Quantum Command <span class="hidden sm:inline text-[8px] text-slate-500 font-mono">v4.0.2</span></h1>
+          <div class="flex items-center gap-1.5 md:gap-2 mt-0.5 md:mt-1">
+            <span id="apiStatus" class="text-[8px] md:text-[9px] font-black px-1 md:px-1.5 py-0.5 rounded bg-slate-800 border border-slate-600 text-slate-400 uppercase">OFFLINE</span>
+            <div class="h-1 w-1 rounded-full bg-slate-600 shrink-0" id="connDot"></div>
+            <span id="uptime" class="text-[8px] md:text-[9px] font-mono font-bold text-slate-500 uppercase tracking-tighter truncate">00:00:00</span>
           </div>
         </div>
       </div>
-      <div class="flex items-center gap-4">
-         <button id="pauseToggleBtn" class="h-10 px-4 rounded-xl bg-slate-900 border border-slate-700 flex items-center gap-2 hover:bg-slate-800 transition-all">
-           <div id="pauseIcon" class="w-2.5 h-2.5 rounded-full bg-slate-600"></div>
-           <span id="pauseText" class="text-xs font-black text-slate-200 uppercase tracking-widest">BOT ON</span>
+      <div class="flex items-center gap-1.5 md:gap-4 shrink-0">
+         <button id="pauseToggleBtn" class="h-8 md:h-10 px-2 md:px-4 rounded-lg md:rounded-xl bg-slate-900 border border-slate-700 flex items-center gap-1.5 md:gap-2 hover:bg-slate-800 transition-all shrink-0">
+           <div id="pauseIcon" class="w-2 h-2 md:w-2.5 md:h-2.5 rounded-full bg-slate-600"></div>
+           <span id="pauseText" class="text-[10px] md:text-xs font-black text-slate-200 uppercase tracking-widest whitespace-nowrap">BOT ON</span>
          </button>
-         <button id="openSettings" class="w-10 h-10 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center hover:bg-slate-800 transition-all"><i data-lucide="sliders-vertical" class="w-5 h-5 text-slate-300"></i></button>
+         <button id="openSettings" class="w-8 h-8 md:w-10 md:h-10 rounded-lg md:rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center hover:bg-slate-800 transition-all shrink-0">
+           <i data-lucide="sliders-vertical" class="w-4 h-4 md:w-5 md:h-5 text-slate-300"></i>
+         </button>
       </div>
     </header>
 
