@@ -43,20 +43,24 @@ TUNING = {
 
 # MASTER SIGNAL WEIGHTS (Institutional Tuning - Scalp Optimized)
 SIGNAL_WEIGHTS = {
-    'mr': 0.05,    # Mean Reversion (EMA 21/50) - Lowered for scalping
-    'ob': 0.08,    # Order Block / SMC
+    'mr': 0.05,    # Mean Reversion (EMA 21/50)
     'vwap': 0.08,  # Volume Weighted Average Price
     'adx': 0.08,   # Trend Strength
     'vol': 0.08,   # Volume Delta
     'obv': 0.05,   # Accumulation / distribution flow
     'bb': 0.03,    # Bollinger Band Exhaustion
-    'macd': 0.30,  # Momentum Authority (Major Boost)
-    'pa': 0.30,    # Price Action / SAR Authority (Major Boost)
-    'smc': 0.05,   # Market Structure (Reduced influence)
-    'sr': 0.02,    # Support/Resistance Walls (Reduced influence)
+    'macd': 0.30,  # Momentum Authority
+    'pa': 0.30,    # Price Action / SAR Authority
+    'smc': 0.05,   # Market Structure
+    'sr': 0.02,    # Support/Resistance Walls
+    'loc': 0.08,   # Market location / session context
     'kdj': 0.03,   # Stochastic Momentum
-    'st': 0.25     # EMA Trend Authority (Major Boost)
+    'st': 0.25,    # EMA Trend Authority
 }
+# Normalize to 1.0 (sum was 1.40 — inflating all scores by 40%)
+_weight_total = sum(SIGNAL_WEIGHTS.values())
+for _k in SIGNAL_WEIGHTS:
+    SIGNAL_WEIGHTS[_k] /= _weight_total
 
 _WEIGHTS_CACHE = None
 _WEIGHTS_MTIME = None
@@ -65,9 +69,20 @@ _WEIGHTS_LAST_CHECK = 0.0
 
 def get_signal_weights() -> dict:
     """
-    Rollback branch behavior: use the static strategy weights and ignore
-    learned weights.json.
+    Load learned weights from weights.json if available, otherwise use static defaults.
     """
+    try:
+        if os.path.exists(WEIGHTS_FILE):
+            with open(WEIGHTS_FILE, "r") as f:
+                learned = json.load(f)
+            if isinstance(learned, dict) and learned:
+                merged = dict(SIGNAL_WEIGHTS)
+                merged.update({k: float(v) for k, v in learned.items() if k in merged})
+                total = sum(merged.values())
+                if total > 0:
+                    return {k: v / total for k, v in merged.items()}
+    except Exception:
+        pass
     return dict(SIGNAL_WEIGHTS)
 
 def calculate_base_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -102,16 +117,6 @@ def calculate_base_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['macd'] = macd.macd()
     df['macd_signal'] = macd.macd_signal()
     df['macd_diff'] = macd.macd_diff()
-    
-    # 5. Parabolic SAR (The Trailing Gate)
-    psar = ta.trend.PSARIndicator(df['high'], df['low'], df['close'])
-    df['psar'] = psar.psar()
-    
-    # Calculate PSAR Streak (How many dots in the current direction)
-    # 1 if PSAR is below price (Bullish), -1 if above (Bearish)
-    psar_dir = (df['psar'] < df['close']).astype(int).map({True: 1, False: -1})
-    df['psar_streak'] = psar_dir.groupby((psar_dir != psar_dir.shift()).cumsum()).cumcount() + 1
-    df['psar_streak'] = df['psar_streak'] * psar_dir # + for bull, - for bear
     
     # 5. KDJ (Fast Stochastic Momentum)
     # KDJ is a standard institutional tool for scalpers
@@ -161,6 +166,14 @@ def calculate_base_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['psar_down'] = psar_ind.psar_down_indicator()
     df['psar_up'] = psar_ind.psar_up_indicator()
 
+    # PSAR Streak (How many dots in the current direction)
+    # 1 if PSAR is below price (Bullish), -1 if above (Bearish)
+    psar_dir = np.where(df['psar'] < df['close'], 1, -1)
+    psar_series = pd.Series(psar_dir, index=df.index)
+    groups = (psar_series != psar_series.shift()).cumsum()
+    df['psar_streak'] = psar_series.groupby(groups).cumcount() + 1
+    df['psar_streak'] = df['psar_streak'] * psar_series
+
     return df
 
 def compute_volatility_context(df: pd.DataFrame) -> dict:
@@ -175,7 +188,8 @@ def compute_volatility_context(df: pd.DataFrame) -> dict:
     # 1. Bollinger Band Squeeze (Width < 20-period Low)
     # This identifies periods of extreme low volatility preceding a breakout.
     bb_width = df['bb_width']
-    is_squeeze = bb_width.iloc[-1] < bb_width.rolling(window=20).min().iloc[-1] * 1.1
+    squeeze_buffer = float(TUNING.get("squeeze_buffer", 1.1) or 1.1)
+    is_squeeze = bb_width.iloc[-1] < bb_width.rolling(window=20).min().iloc[-1] * squeeze_buffer
     
     # 2. ATR Ranking (Normalized 0.0 to 1.0)
     # We rank the current ATR against its 100-candle history to determine if 
@@ -226,7 +240,7 @@ def calculate_funding_impact(latest_macro: dict) -> float:
     Adjusts signal confidence based on the cost of holding a position.
     In Futures trading, high funding rates can eat into scalping profits quickly.
     """
-    if not latest_macro: return 0.0
+    if not isinstance(latest_macro, dict): return 0.0
     
     funding_rate = latest_macro.get('funding_rate', 0.0)
     
@@ -234,9 +248,9 @@ def calculate_funding_impact(latest_macro: dict) -> float:
     # High positive funding penalizes long entries.
     # High negative funding penalizes short entries.
     impact = 0.0
-    if funding_rate > 0.01:
+    if funding_rate > 0.0001:
         impact = -1.0 # Longs are expensive
-    elif funding_rate < -0.01:
+    elif funding_rate < -0.0001:
         impact = 1.0  # Shorts are expensive
         
     return impact
@@ -260,7 +274,8 @@ def generate_alpha_overlay(df: pd.DataFrame, smc_score: float, macro_bias: str) 
     # Confirms if the move is backed by real money.
     avg_vol = df['volume'].rolling(window=20).mean().iloc[-1]
     current_vol = df['volume'].iloc[-1]
-    vol_spike = current_vol > (avg_vol * 1.5)
+    vol_spike_mult = float(TUNING.get("vol_spike_mult", 1.5) or 1.5)
+    vol_spike = current_vol > (avg_vol * vol_spike_mult)
     
     # 3. Triple Alignment Strategy
     # When SMC, Momentum, and Macro Bias all point in the same direction.
@@ -378,18 +393,19 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     # Detecting gaps where price moved too fast, creating an imbalance.
     # Price often 'revisits' these gaps to fill liquidity.
     fvg_detected = False
+    fvg_sensitivity = float(TUNING.get("fvg_sensitivity", 0.0001) or 0.0001)
     for i in range(-5, -1):
         # Bullish FVG (Gap between Candle 1 High and Candle 3 Low)
         if df['high'].iloc[i-1] < df['low'].iloc[i+1]:
             gap_size = df['low'].iloc[i+1] - df['high'].iloc[i-1]
-            if current_price > df['high'].iloc[i-1] and current_price < df['low'].iloc[i+1]:
+            if gap_size / max(current_price, 1e-9) >= fvg_sensitivity and current_price > df['high'].iloc[i-1] and current_price < df['low'].iloc[i+1]:
                 smc_score += 0.2
                 smc_label = "FVG Bullish Entry"
                 fvg_detected = True
         # Bearish FVG (Gap between Candle 1 Low and Candle 3 High)
         elif df['low'].iloc[i-1] > df['high'].iloc[i+1]:
             gap_size = df['low'].iloc[i-1] - df['high'].iloc[i+1]
-            if current_price < df['low'].iloc[i-1] and current_price > df['high'].iloc[i+1]:
+            if gap_size / max(current_price, 1e-9) >= fvg_sensitivity and current_price < df['low'].iloc[i-1] and current_price > df['high'].iloc[i+1]:
                 smc_score -= 0.2
                 smc_label = "FVG Bearish Entry"
                 fvg_detected = True
@@ -422,7 +438,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     dist_from_high = (last_high - current_price) / last_high
     
     # 0.2% threshold for 'Bounces'
-    bounce_threshold = 0.002 
+    bounce_threshold = float(TUNING.get("bounce_threshold", 0.002) or 0.002)
     is_recovering = df['close'].iloc[-1] > df['close'].iloc[-2]
     is_falling = df['close'].iloc[-1] < df['close'].iloc[-2]
     
@@ -450,7 +466,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     # Calculate proximity to walls
     dist_to_sup = (current_price - nearest_sup) / nearest_sup if nearest_sup else 1.0
     dist_to_res = (nearest_res - current_price) / nearest_res if nearest_res else 1.0
-    wall_veto_threshold = 0.0015 # 0.15% (~12 cents on SOL)
+    wall_veto_threshold = float(TUNING.get("wall_proximity", 0.001) or 0.001)
     
     if dist_to_sup < wall_veto_threshold:
         sr_score = 1.5   # Massive support. Good for longs, Veto for shorts.
@@ -474,45 +490,22 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
     ema_21 = ta.trend.ema_indicator(df['close'], window=21).iloc[-1]
     current_price = df['close'].iloc[-1]
     
-    # --- Swing Detection: find local lows (support) and highs (resistance) ---
-    # A swing low is a candle whose low is lower than the N candles on each side.
-    # A swing high is a candle whose high is higher than N candles on each side.
-    swing_lookback = 10  # 10 candles on each side = meaningful pivot (50 min on 5m chart)
-    lookback_range = min(100, len(df) - swing_lookback)  # how far back to scan
+    # --- Swing Detection: vectorized rolling window (was O(n²) nested loop) ---
+    swing_lookback = 10
+    window = swing_lookback * 2 + 1  # 21-candle window
     
-    swing_lows = []
-    swing_highs = []
+    # Swing low: candle whose low is the minimum in the window
+    rolling_low_min = df['low'].rolling(window=window, center=False).min()
+    # Align: the low at index i must be the min of window starting i-swing_lookback
+    is_swing_low = df['low'].shift(-swing_lookback) == rolling_low_min.shift(-swing_lookback)
+    all_swing_lows = [float(v) for v in df.loc[is_swing_low.fillna(False), 'low'].values]
+    swing_lows = [v for v in all_swing_lows if v < current_price]
     
-    for i in range(swing_lookback, lookback_range):
-        idx = len(df) - 1 - i
-        if idx < swing_lookback:
-            break
-        
-        # Check if this candle's low is lower than surrounding candles
-        low_val = df['low'].iloc[idx]
-        is_swing_low = True
-        for j in range(1, swing_lookback + 1):
-            if idx - j >= 0 and df['low'].iloc[idx - j] <= low_val:
-                is_swing_low = False
-                break
-            if idx + j < len(df) and df['low'].iloc[idx + j] <= low_val:
-                is_swing_low = False
-                break
-        if is_swing_low:
-            swing_lows.append(low_val)
-        
-        # Check if this candle's high is higher than surrounding candles
-        high_val = df['high'].iloc[idx]
-        is_swing_high = True
-        for j in range(1, swing_lookback + 1):
-            if idx - j >= 0 and df['high'].iloc[idx - j] >= high_val:
-                is_swing_high = False
-                break
-            if idx + j < len(df) and df['high'].iloc[idx + j] >= high_val:
-                is_swing_high = False
-                break
-        if is_swing_high:
-            swing_highs.append(high_val)
+    # Swing high: candle whose high is the maximum in the window  
+    rolling_high_max = df['high'].rolling(window=window, center=False).max()
+    is_swing_high = df['high'].shift(-swing_lookback) == rolling_high_max.shift(-swing_lookback)
+    all_swing_highs = [float(v) for v in df.loc[is_swing_high.fillna(False), 'high'].values]
+    swing_highs = [v for v in all_swing_highs if v > current_price]
     
     # Pick the NEAREST swing low below price (support) and swing high above (resistance)
     supports_below = sorted([s for s in swing_lows if s < current_price], reverse=True)
@@ -531,10 +524,14 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
     
     # Define macro MTF trend based on EMA momentum and MACD alignment
     macd_obj = ta.trend.MACD(df['close'])
-    macd_val = macd_obj.macd().iloc[-1]
-    macd_sig = macd_obj.macd_signal().iloc[-1]
-    macd_hist = macd_obj.macd_diff().iloc[-1]
-    macd_hist_prev = macd_obj.macd_diff().iloc[-2]
+    macd_series = macd_obj.macd()
+    macd_signal_series = macd_obj.macd_signal()
+    macd_hist_series = macd_obj.macd_diff()
+    macd_val = macd_series.iloc[-1]
+    macd_prev = macd_series.iloc[-2]
+    macd_sig = macd_signal_series.iloc[-1]
+    macd_hist = macd_hist_series.iloc[-1]
+    macd_hist_prev = macd_hist_series.iloc[-2]
     
     ema_bull = ema_9 > ema_21
     # Trend is only BULL if EMA is up AND MACD is up AND momentum is rising
@@ -558,12 +555,38 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
         # If price is below EMA 9 on 15m, we are NEUTRAL even if EMAs are stacked (High Sensitivity)
         trend = "NEUTRAL"
     
+    structure_state = "NEUTRAL"
+    if len(all_swing_highs) >= 2 and len(all_swing_lows) >= 2:
+        last_swing_high = all_swing_highs[-1]
+        prev_swing_high = all_swing_highs[-2]
+        last_swing_low = all_swing_lows[-1]
+        prev_swing_low = all_swing_lows[-2]
+        if last_swing_high > prev_swing_high and last_swing_low > prev_swing_low:
+            structure_state = "HH_HL"
+        elif last_swing_high < prev_swing_high and last_swing_low < prev_swing_low:
+            structure_state = "LH_LL"
+        elif last_swing_high < prev_swing_high:
+            structure_state = "LOWER_HIGH"
+        elif last_swing_low > prev_swing_low:
+            structure_state = "HIGHER_LOW"
+
     return {
         "trend": trend,
         "support_levels": all_supports,
         "resistance_levels": all_resistances,
         "s_dist": f"{s_dist:+.1f}%",
-        "r_dist": f"{r_dist:+.1f}%"
+        "r_dist": f"{r_dist:+.1f}%",
+        "macd": float(macd_val),
+        "macd_prev": float(macd_prev),
+        "macd_signal": float(macd_sig),
+        "macd_diff": float(macd_hist),
+        "macd_diff_prev": float(macd_hist_prev),
+        "ema_9": float(ema_9),
+        "ema_21": float(ema_21),
+        "ema_21_prev": float(ta.trend.ema_indicator(df['close'], window=21).iloc[-2]),
+        "high": float(df['high'].iloc[-1]),
+        "low": float(df['low'].iloc[-1]),
+        "structure": structure_state,
     }
 
 def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivot_data: dict = None) -> tuple:
@@ -657,6 +680,183 @@ def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivo
 
     return support, resistance
 
+
+def _compute_market_location_score(
+    current_price: float,
+    support: float = None,
+    resistance: float = None,
+    state: dict = None,
+    latest_indicators: dict = None,
+    strategy_config: dict = None,
+) -> tuple[float, str, dict]:
+    """Score market location relative to simple session and range anchors.
+
+    This is a soft bias layer only. It prefers price above session anchors for longs,
+    below them for shorts, and rewards being near support while penalizing being
+    too close to resistance.
+    """
+    state = state or {}
+    latest_indicators = latest_indicators or {}
+    strategy_config = strategy_config or {}
+
+    def _clean(value) -> float:
+        try:
+            fv = float(value or 0.0)
+            return fv if math.isfinite(fv) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    session_open = _clean(state.get("session_open", 0.0) or latest_indicators.get("session_open", 0.0) or 0.0)
+    previous_close = _clean(state.get("previous_close", 0.0) or latest_indicators.get("previous_close", 0.0) or 0.0)
+    previous_high = _clean(state.get("previous_high", 0.0) or latest_indicators.get("previous_high", 0.0) or 0.0)
+    previous_low = _clean(state.get("previous_low", 0.0) or latest_indicators.get("previous_low", 0.0) or 0.0)
+    control_zone = _clean(state.get("control_zone", 0.0) or latest_indicators.get("control_zone", 0.0) or 0.0)
+    average_zone = _clean(
+        state.get("average_zone", 0.0)
+        or latest_indicators.get("average_zone", 0.0)
+        or latest_indicators.get("vwap", 0.0)
+        or latest_indicators.get("bb_mid", 0.0)
+        or 0.0
+    )
+
+    loc_score = 0.0
+    notes = []
+    levels = {
+        "session_open": session_open,
+        "previous_close": previous_close,
+        "previous_high": previous_high,
+        "previous_low": previous_low,
+        "control_zone": control_zone,
+        "average_zone": average_zone,
+        "support": _clean(support),
+        "resistance": _clean(resistance),
+    }
+
+    def _apply_binary(label: str, level: float, weight: float) -> None:
+        nonlocal loc_score
+        if level <= 0 or current_price <= 0:
+            return
+        if current_price > level:
+            loc_score += weight
+            notes.append(f"Above {label}")
+        elif current_price < level:
+            loc_score -= weight
+            notes.append(f"Below {label}")
+
+    # Core location anchors
+    _apply_binary("Session Open", session_open, 0.08)
+    _apply_binary("Previous Close", previous_close, 0.08)
+    _apply_binary("Previous High", previous_high, 0.12)
+    _apply_binary("Previous Low", previous_low, 0.08)
+    _apply_binary("Control Zone", control_zone, 0.10)
+    _apply_binary("Average Zone", average_zone, 0.10)
+
+    support_near_pct = float(strategy_config.get("location_support_near_pct", 0.0075) or 0.0075)
+    support_far_pct = float(strategy_config.get("location_support_far_pct", 0.0200) or 0.0200)
+    resistance_near_pct = float(strategy_config.get("location_resistance_near_pct", 0.0025) or 0.0025)
+    resistance_far_pct = float(strategy_config.get("location_resistance_far_pct", 0.0200) or 0.0200)
+
+    if support and support > 0 and current_price > 0:
+        dist_to_support = (current_price - support) / support
+        if dist_to_support <= support_near_pct:
+            loc_score += 0.12
+            notes.append("Near Support")
+        elif dist_to_support >= support_far_pct:
+            loc_score -= 0.05
+            notes.append("Far From Support")
+
+    if resistance and resistance > 0 and current_price > 0:
+        dist_to_resistance = (resistance - current_price) / resistance
+        if dist_to_resistance <= resistance_near_pct:
+            loc_score -= 0.14
+            notes.append("Near Resistance")
+        elif dist_to_resistance >= resistance_far_pct:
+            loc_score += 0.04
+            notes.append("Far From Resistance")
+
+    loc_score = float(np.clip(loc_score, -0.6, 0.6))
+    return loc_score, " | ".join(notes) if notes else "Neutral", levels
+
+
+def _compute_wall_state(
+    current_price: float,
+    last_close: float,
+    support: float = None,
+    resistance: float = None,
+    strategy_config: dict = None,
+) -> dict:
+    """Classify whether support/resistance is intact, being tested, or broken."""
+    strategy_config = strategy_config or {}
+
+    def _clean(value) -> float:
+        try:
+            fv = float(value or 0.0)
+            return fv if math.isfinite(fv) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    support = _clean(support)
+    resistance = _clean(resistance)
+    current_price = _clean(current_price)
+    last_close = _clean(last_close)
+
+    support_veto_pct = float(strategy_config.get("support_veto_pct", 0.0015) or 0.0015)
+    resistance_veto_pct = float(strategy_config.get("resistance_veto_pct", 0.0015) or 0.0015)
+    support_break_pct = float(strategy_config.get("support_break_pct", 0.0010) or 0.0010)
+    resistance_break_pct = float(strategy_config.get("resistance_break_pct", 0.0010) or 0.0010)
+
+    support_zone_top = support * (1 + support_veto_pct) if support > 0 else 0.0
+    support_break_level = support * (1 - support_break_pct) if support > 0 else 0.0
+    resistance_zone_bottom = resistance * (1 - resistance_veto_pct) if resistance > 0 else 0.0
+    resistance_break_level = resistance * (1 + resistance_break_pct) if resistance > 0 else 0.0
+
+    support_broken = bool(
+        support > 0
+        and support_break_level > 0
+        and current_price < support_break_level
+        and last_close < support_break_level
+    )
+    resistance_broken = bool(
+        resistance > 0
+        and resistance_break_level > 0
+        and current_price > resistance_break_level
+        and last_close > resistance_break_level
+    )
+
+    support_touching = bool(support > 0 and current_price <= support_zone_top)
+    resistance_touching = bool(resistance > 0 and current_price >= resistance_zone_bottom)
+
+    if support_broken:
+        support_state = "broken"
+    elif support_touching:
+        support_state = "touching"
+    else:
+        support_state = "above"
+
+    if resistance_broken:
+        resistance_state = "broken"
+    elif resistance_touching:
+        resistance_state = "touching"
+    else:
+        resistance_state = "below"
+
+    return {
+        "support": support,
+        "resistance": resistance,
+        "current_price": current_price,
+        "last_close": last_close,
+        "support_zone_top": support_zone_top,
+        "support_break_level": support_break_level,
+        "resistance_zone_bottom": resistance_zone_bottom,
+        "resistance_break_level": resistance_break_level,
+        "support_touching": support_touching,
+        "support_broken": support_broken,
+        "support_state": support_state,
+        "resistance_touching": resistance_touching,
+        "resistance_broken": resistance_broken,
+        "resistance_state": resistance_state,
+    }
+
 def generate_quant_signal(state, latest_indicators, strategy_config, df_indicators, latest_macro, mtf_context=None, mtf_config=None, pivot_data=None) -> dict:
     """
     MASTER RECONSTRUCTION: The 725-Line Institutional Sniper Signal Engine.
@@ -671,6 +871,12 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
 
     # --- 1. CORE PARAMETERS & CONTEXT ---
     current_price = state['price']
+    range_action_zone_pct = float(strategy_config.get("range_action_zone_pct", 0.20) or 0.20)
+    range_action_zone_pct = max(0.05, min(0.45, range_action_zone_pct))
+    wall_veto_zone_pct = float(strategy_config.get("wall_veto_zone_pct", 0.20) or 0.20)
+    wall_veto_zone_pct = max(0.05, min(0.35, wall_veto_zone_pct))
+    support_veto_pct = float(strategy_config.get("support_veto_pct", 0.0015) or 0.0015)
+    resistance_veto_pct = float(strategy_config.get("resistance_veto_pct", 0.0015) or 0.0015)
     spread_pct = float(state.get("spread_pct", 0.0) or 0.0)
     max_spread = float(strategy_config.get("max_spread", 0.0007) or 0.0007)
     if spread_pct > max_spread:
@@ -686,7 +892,27 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     if bool(strategy_config.get("block_on_volume_spike", False)) and str(state.get("volume_state", "normal")) == "spike":
         return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": "Volume spike guard", "weights": {}}
     weights = get_signal_weights()
-    macro_bias = str(latest_macro or "NEUTRAL").upper()
+    if isinstance(latest_macro, dict):
+        macro_bias = str(latest_macro.get("regime") or latest_macro.get("bias") or "NEUTRAL").upper()
+    else:
+        macro_bias = str(latest_macro or "NEUTRAL").upper()
+    support, resistance = _pick_structural_levels(current_price, mtf_context=mtf_context, pivot_data=pivot_data)
+    last_close = float(df_indicators['close'].iloc[-1]) if len(df_indicators) else float(current_price)
+    wall_state = _compute_wall_state(
+        current_price=current_price,
+        last_close=last_close,
+        support=support,
+        resistance=resistance,
+        strategy_config=strategy_config,
+    )
+    location_score, location_notes, location_levels = _compute_market_location_score(
+        current_price,
+        support=support,
+        resistance=resistance,
+        state=state,
+        latest_indicators=latest_indicators,
+        strategy_config=strategy_config,
+    )
     
     # --- 2. ADVANCED CONTEXTUAL MODULES ---
     # We call our institutional modules to understand the 'Regime'
@@ -695,17 +921,17 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     funding_impact = calculate_funding_impact(latest_macro)
 
     # --- 2b. FAST MTF BIAS ---
-    # For scalping, the 3m/5m/15m cluster must agree before we take a trade.
-    # Higher timeframes remain background context only.
+    # For scalping, fast timeframes lead; higher timeframes remain background context only.
     mtf_fast_score = 0.0
     mtf_fast_bias = "NEUTRAL"
     if mtf_config and mtf_config.get("enabled", False) and isinstance(mtf_context, dict):
         min_agree = int(mtf_config.get("min_agree", 2) or 2)
-        min_agree = max(2, min(3, min_agree))
+        min_agree = max(2, min(4, min_agree))
         tf_weights = [
-            ("3m", 0.45),
-            ("5m", 0.35),
-            ("15m", 0.20),
+            ("3m", 0.35),
+            ("5m", 0.30),
+            ("10m", 0.20),
+            ("15m", 0.15),
         ]
         bull_votes = 0
         bear_votes = 0
@@ -735,9 +961,13 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     ema_9 = latest_indicators.get('ema_9', current_price)
     ema_21 = latest_indicators.get('ema_21', current_price)
     
-    # ANTI-CHASING GUARD: Ensure we aren't entering too far from the EMA cross point
+    # Compute ATR early — needed by chase guard below
+    atr_pct_now = float(latest_indicators.get("atr_pct", 0.5) or 0.5) / 100.0
+    
+    # ANTI-CHASING GUARD: Prevent entering when EMAs already diverged (move already started)
     ema_dist_pct = abs(ema_9 - ema_21) / ema_21
-    max_chase_pct = float(strategy_config.get("max_chase_pct", 0.0010) or 0.0010) # 0.1% or ~8 cents
+    configured_max_chase_pct = float(strategy_config.get("max_chase_pct", 0.0) or 0.0)
+    max_chase_pct = configured_max_chase_pct if configured_max_chase_pct > 0 else max(0.0015, min(0.004, atr_pct_now * 0.5))
     if ema_dist_pct > max_chase_pct:
         # If EMAs are already wide apart, the move has already started. Don't chase.
         return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chasing Guard ({ema_dist_pct:.3%}>{max_chase_pct:.3%})", "weights": {}}
@@ -820,36 +1050,39 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     slope_15m_up = curr_ema_15m > prev_ema_15m if prev_ema_15m > 0 else False
     if slope_15m_up: power_bonus += 0.10
     
-    # 3. Bollinger Squeeze (Spring Loading)
-    vol_ctx = compute_volatility_context(df_indicators)
-    is_squeezed = vol_ctx.get("squeeze", False)
-    if is_squeezed: power_bonus += 0.20
+    # 3. Bollinger Squeeze — reduce confidence, don't boost chop
+    is_squeezed = vol_context.get("squeeze", False)
+    if is_squeezed:
+        power_bonus -= 0.15  # squeeze = no direction yet, wait for breakout
+    else:
+        # Check if squeeze just broke (width expanding)
+        bb_width_now = df_indicators['bb_width'].iloc[-1]
+        bb_width_prev = df_indicators['bb_width'].iloc[-2]
+        if bb_width_now > bb_width_prev * 1.05:
+            power_bonus += 0.20  # breakout confirmed
 
     # --- DIVERGENCE DETECTION (Early - needed by div_bonus) ---
-    try:
-        # Look back 15 periods to see if Price and MACD are disagreeing
-        recent_closes = df_indicators['close'].tail(15).values
-        recent_macds = df_indicators['macd'].tail(15).values
-        bear_div = (recent_closes[-1] > recent_closes[0]) and (recent_macds[-1] < recent_macds[0])
-        bull_div = (recent_closes[-1] < recent_closes[0]) and (recent_macds[-1] > recent_macds[0])
-    except Exception:
-        bear_div = False
-        bull_div = False
+    divergence_state = _detect_macd_divergence(df_indicators)
+    bear_div = divergence_state == "BEARISH"
+    bull_div = divergence_state == "BULLISH"
 
     # --- DIVERGENCE BONUS (ALPHA) ---
     div_bonus = 0.0
     if bull_div: div_bonus += 0.25
     if bear_div: div_bonus -= 0.25
 
-    # --- HIGH TIMEFRAME SOFT BIAS (1H / 4H) ---
-    # Low weight (0.15) for macro context as requested
+    # --- HIGH TIMEFRAME STRICT BIAS (1H / 4H) ---
+    # Keep this as low-weight background context.
+    # Use the latest closed candle from the trimmed HTF frame.
     htf_1h = mtf_context.get('1h', {}) if mtf_context else {}
     htf_4h = mtf_context.get('4h', {}) if mtf_context else {}
+    
     macd_1h = float(htf_1h.get('macd', 0) or 0)
     macd_4h = float(htf_4h.get('macd', 0) or 0)
+    
     htf_score = 0.0
-    htf_score += 0.15 if macd_1h > 0 else (-0.15 if macd_1h < 0 else 0.0)
-    htf_score += 0.15 if macd_4h > 0 else (-0.15 if macd_4h < 0 else 0.0)
+    htf_score += 0.10 if macd_1h > 0 else (-0.10 if macd_1h < 0 else 0.0)
+    htf_score += 0.10 if macd_4h > 0 else (-0.10 if macd_4h < 0 else 0.0)
 
     # Price Action (PA) + SAR Alignment
     psar_val = latest_indicators.get('psar', current_price)
@@ -909,6 +1142,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         (pa_score * weights['pa']) +
         (smc_score * weights['smc']) +
         (sr_score * weights['sr']) +
+        (location_score * weights['loc']) +
         (kdj_score * weights['kdj']) +
         (st_score * weights['st']) +
         alpha + # Add the Alpha Overlay contribution
@@ -936,6 +1170,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if current_price <= ema_21 and pa_score <= 0:
             total_score = min(total_score, -0.12)
 
+    # Cap score to [-1, 1] — prevents unbounded additive bonuses inflating confidence
+    total_score = float(np.clip(total_score, -1.0, 1.0))
+
     # --- 7. SIGNAL INTEGRITY (Indicators Only) ---
     action = "HOLD"
     if total_score > 0.05: action = "BUY"
@@ -959,9 +1196,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     signal_reason_suffix = ""
     hold_reason = ""
     
-    # --- 1. PICK STRUCTURAL BOUNDARIES (Used for Gates & Reporting) ---
-    support, resistance = _pick_structural_levels(current_price, mtf_context=mtf_context, pivot_data=pivot_data)
-
     if action in {"BUY", "SELL"}:
         ema_bull = ema_9_val > ema_21_val
         psar_bull = True  # default if PSAR unavailable
@@ -978,8 +1212,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         # Rule 4: Divergence (Price HH + MACD LH = Bearish Divergence)
         macd_pos_bull = macd_val > 0
         macd_cross_bull = macd_diff_val > 0
-        macd_outside_channel = abs(macd_val) > macd_noise_threshold
-        
+
         # --- MTF MACD & PRICE ACTION HIERARCHY ---
         # 1. 15m Bias: Above/Below Zero
         # 2. 10m Confirmation: Same direction + Outside Noise Channel
@@ -993,6 +1226,10 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         # Trend Bias & Confirmation Layers
         bias_bull = macd_15m > 0
         conf_bull = macd_10m > 0 and abs(macd_10m) > macd_noise_threshold
+        mtf_macd_bull = bias_bull and conf_bull
+        mtf_macd_bear = (macd_15m < 0) and (macd_10m < 0) and abs(macd_10m) > macd_noise_threshold
+        mtf_structure_bull = str(mtf_15m.get("structure", "")).upper() in {"HH_HL", "HIGHER_LOW"}
+        mtf_structure_bear = str(mtf_15m.get("structure", "")).upper() in {"LH_LL", "LOWER_HIGH"}
         
         # Price Action (PA) Rule: Candle must match direction
         pa_bull = current_price > float(df_indicators['open'].iloc[-1])
@@ -1010,11 +1247,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         # 3. PSAR (Direction + 3-Dot Streak)
         
         # --- INSTITUTIONAL MACD GATE ---
-        # Rule 1: Zero Line Bias (No longs below 0, no shorts above 0)
-        # Rule 2: Noise Channel (Lowered to 0.00002 for extreme scalp sensitivity)
-        # Rule 3: Zero Cross (3-candle window for entry)
-        macd_noise_threshold = 0.00002
-        macd_outside_noise = abs(macd_val) > macd_noise_threshold
+        # Use the configured threshold directly.
+        macd_scalp_threshold = macd_noise_threshold
+        macd_outside_noise = abs(macd_val) > macd_scalp_threshold
         
         # *** Zero Line Cross Detection (3-Candle Window) ***
         # We look back 3 candles; if any of them crossed zero, we are in the "Impact Zone"
@@ -1028,20 +1263,10 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         macd_bounce_bear = macd_diff_val < 0 and latest_indicators.get('macd_score', 0) <= -1.0
         
         # Combined Institutional MACD Signal (Pure Side-of-Zero logic)
-        macd_inst_bull = macd_pos_bull or macd_zero_cross_bull
-        macd_inst_bear = (not macd_pos_bull) or macd_zero_cross_bear
+        macd_inst_bull = (macd_pos_bull or macd_zero_cross_bull) and macd_outside_noise
+        macd_inst_bear = ((not macd_pos_bull) or macd_zero_cross_bear) and macd_outside_noise
         
-        # --- DIVERGENCE DETECTION (Engine Dying) ---
-        try:
-            # Look back 15 periods to see if Price and MACD are disagreeing
-            recent_closes = df_indicators['close'].tail(15).values
-            recent_macds = df_indicators['macd'].tail(15).values
-            bear_div = (recent_closes[-1] > recent_closes[0]) and (recent_macds[-1] < recent_macds[0])
-            bull_div = (recent_closes[-1] < recent_closes[0]) and (recent_macds[-1] > recent_macds[0])
-        except Exception:
-            bear_div = False
-            bull_div = False
-        
+        # Divergence already computed above — skip duplicate re-detection
         # Momentum Only Gate (No Divergence Veto)
         macd_final_bull = macd_inst_bull
         macd_final_bear = macd_inst_bear
@@ -1051,39 +1276,112 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         psar_streak = int(psar_val_raw) if pd.notnull(psar_val_raw) else 0
         psar_1_dot_bull = abs(psar_streak) >= 1
 
-        # --- STRUCTURAL BIAS VETO (ANTI-LAG) ---
-        # We prevent the bot from following lagging indicators into a wall.
+        # --- STRUCTURAL BIAS VETO + REJECTION FLIP ASSIST ---
+        # Block BUY at resistance / SELL at support, but optionally allow an early
+        # opposite-side flip when rejection evidence is present (to avoid lag loops).
+        wall_reversal_assist = bool(strategy_config.get("wall_reversal_assist", True))
+        wall_reversal_score_gate = float(strategy_config.get("wall_reversal_score_gate", 0.12) or 0.12)
         if support and resistance:
-            range_w = float(resistance) - float(support)
-            zone_size = range_w * 0.15
-            
-            # VETO: Don't SELL if we are at the Support Floor (Bear Strike)
-            if action == "SELL" and current_price <= float(support) + zone_size:
-                action = "HOLD"
-                hold_reason = "Wall Veto: Indicators Bearish but at SUPPORT. Waiting for bounce to LONG."
-                
-            # VETO: Don't BUY if we are at the Resistance Ceiling (Bull Strike)
-            elif action == "BUY" and current_price >= float(resistance) - zone_size:
-                action = "HOLD"
-                hold_reason = "Wall Veto: Indicators Bullish but at RESISTANCE. Waiting for rejection to SHORT."
+            if action == "BUY" and wall_state.get("resistance_touching") and not wall_state.get("resistance_broken"):
+                reject_bear = (current_price < ema_9_val) and (macd_diff_val < 0)
+                if wall_reversal_assist and reject_bear and total_score <= wall_reversal_score_gate:
+                    if total_score < -0.05 and mtf_fast_bias != "LONG_ONLY":
+                        action = "SELL"
+                        signal_reason_suffix += " [Rejection Flip: resistance]"
+                    else:
+                        action = "HOLD"
+                        hold_reason = "Wall Veto: weak BUY at resistance, no short confirmation"
+                else:
+                    action = "HOLD"
+                    hold_reason = (
+                        f"Wall Veto: BUY blocked at resistance ({current_price:.2f} vs {float(resistance):.2f}, "
+                        f"break>{float(wall_state.get('resistance_break_level', resistance)):.2f})."
+                    )
+            elif action == "SELL" and wall_state.get("support_touching") and not wall_state.get("support_broken"):
+                reject_bull = (current_price > ema_9_val) and (macd_diff_val > 0)
+                if wall_reversal_assist and reject_bull and total_score >= -wall_reversal_score_gate:
+                    if total_score > 0.05 and mtf_fast_bias != "SHORT_ONLY":
+                        action = "BUY"
+                        signal_reason_suffix += " [Rejection Flip: support]"
+                    else:
+                        action = "HOLD"
+                        hold_reason = "Wall Veto: weak SELL at support, no long confirmation"
+                else:
+                    action = "HOLD"
+                    hold_reason = (
+                        f"Wall Veto: SELL blocked at support ({current_price:.2f} vs {float(support):.2f}, "
+                        f"break<{float(wall_state.get('support_break_level', support)):.2f})."
+                    )
 
         # --- STRIKE ZONE OVERRIDE ---
-        # If we are in the "Action Zone" (Outer 15% of range), we relax the rules.
-        # We don't wait for MACD/SAR to align because they are too slow for reversals.
+        # Only use the fast strike gate at the actual edge of the range. Buying the
+        # middle of the lower half caused late longs before a real support reclaim.
         in_action_zone = False
         if support and resistance:
             range_w = float(resistance) - float(support)
-            zone_size = range_w * 0.15
-            if (action == "BUY" and current_price <= float(support) + zone_size) or \
-               (action == "SELL" and current_price >= float(resistance) - zone_size):
-                in_action_zone = True
+            zone_size = range_w * range_action_zone_pct
+            support_edge = current_price <= float(support) + zone_size
+            resistance_edge = current_price >= float(resistance) - zone_size
+            support_zone_top = float(wall_state.get("support_zone_top") or (float(support) * 1.0015))
+            resistance_zone_bottom = float(wall_state.get("resistance_zone_bottom") or (float(resistance) * 0.9985))
+            support_reclaim = bool(wall_state.get("support_touching")) or current_price <= support_zone_top
+            resistance_reclaim = bool(wall_state.get("resistance_touching")) or current_price >= resistance_zone_bottom
+            in_action_zone = (action == "BUY" and support_edge and support_reclaim) or \
+                             (action == "SELL" and resistance_edge and resistance_reclaim)
 
         # Final indicators-only gate (Relaxed if in Action Zone)
-        if not in_action_zone:
-            if action == "BUY" and not (ema_bull and psar_bull and macd_final_bull):
+        if in_action_zone:
+            # AGGRESSIVE SCALP MODE: In the Strike Zone, we use the EMA 9 line as a dynamic barrier.
+            # We also check for Volume Surge and RSI overextension for high-conviction reversals.
+            price_above_ema9 = current_price > ema_9_val
+            macd_fast_bull = macd_diff_val > 0
+            macd_fast_bear = macd_diff_val < 0
+            
+            # Fast Volume Confirmation
+            current_vol = float(df_indicators['volume'].iloc[-1])
+            avg_vol_fast = df_indicators['volume'].rolling(window=10).mean().iloc[-1]
+            volume_surge = current_vol > avg_vol_fast * 1.1  # 10% volume surge
+            
+            # RSI Overextension (Oversold for Long, Overbought for Short)
+            rsi_val = float(latest_indicators.get('rsi', 50) or 50)
+            rsi_ob = rsi_val > 65
+            rsi_os = rsi_val < 35
+            
+            if action == "BUY":
+                # Primary: Price > EMA9
+                # Secondary (Need 1/3): PSAR Bull, Hist Bull, or RSI OS + Vol Surge
+                bull_momentum = psar_bull or macd_fast_bull or (rsi_os and volume_surge)
+                if mtf_macd_bear and mtf_structure_bear and not bull_div:
+                    action = "HOLD"
+                    hold_reason = "MTF Gate: 15m/10m MACD bearish with lower-high structure"
+                if not (price_above_ema9 and bull_momentum):
+                    action = "HOLD"
+                    hold_reason = "Strike Zone: Waiting for Price>EMA9 + Bull Momentum (SAR/Hist/RSI)"
+            elif action == "SELL":
+                # Primary: Price < EMA9
+                # Secondary (Need 1/3): PSAR Bear, Hist Bear, or RSI OB + Vol Surge
+                bear_momentum = (not psar_bull) or macd_fast_bear or (rsi_ob and volume_surge)
+                if mtf_macd_bull and mtf_structure_bull and not bear_div:
+                    action = "HOLD"
+                    hold_reason = "MTF Gate: 15m/10m MACD bullish with higher-low structure"
+                if not (not price_above_ema9 and bear_momentum):
+                    action = "HOLD"
+                    hold_reason = "Strike Zone: Waiting for Price<EMA9 + Bear Momentum (SAR/Hist/RSI)"
+        else:
+            # CONSERVATIVE TREND MODE: Outside Strike Zone, require full triple confirmation (EMA Cross + SAR + MACD Zero)
+            ema_cross_bull = ema_9_val > ema_21_val
+            if action == "BUY" and not (ema_cross_bull and psar_bull and macd_final_bull):
                 action = "HOLD"
-            elif action == "SELL" and not (not ema_bull and not psar_bull and macd_final_bear):
+                hold_reason = "Trend Gate: Waiting for full EMA-Cross/SAR/MACD(0) alignment"
+            elif action == "BUY" and mtf_macd_bear and mtf_structure_bear:
                 action = "HOLD"
+                hold_reason = "MTF Gate: 15m/10m MACD bearish with lower-high structure"
+            elif action == "SELL" and not (not ema_cross_bull and not psar_bull and macd_final_bear):
+                action = "HOLD"
+                hold_reason = "Trend Gate: Waiting for full EMA-Cross/SAR/MACD(0) alignment"
+            elif action == "SELL" and mtf_macd_bull and mtf_structure_bull:
+                action = "HOLD"
+                hold_reason = "MTF Gate: 15m/10m MACD bullish with higher-low structure"
         
         signal_reason_suffix = " [Strike Override]" if in_action_zone and action != "HOLD" else (" [Indicators OK]" if action != "HOLD" else " [Waiting for alignment]")
         
@@ -1115,8 +1413,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     reason = (
         f"{signal_reason_suffix} | Score:{total_score:.3f} SMC:{smc_label} Pivot:{pivot_msg} MTF:{mtf_fast_bias} "
         f"(MR:{mr_score:.1f} OB:{smc_score:.1f} SR:{sr_score:.1f} VWAP:{vwap_score:.1f} ADX:{adx_score:.1f} "
-        f"VOL:{volume_delta:.1f} OBV:{obv_score:.1f} BB:{bb_score:.1f} MACD:{macd_score:.1f} PA:{pa_score:.1f} "
-        f"KDJ:{kdj_score:.1f} ST:{st_score:.1f})"
+        f"LOC:{location_score:.1f} VOL:{volume_delta:.1f} OBV:{obv_score:.1f} BB:{bb_score:.1f} MACD:{macd_score:.1f} PA:{pa_score:.1f} "
+        f"KDJ:{kdj_score:.1f} ST:{st_score:.1f} DIV:{divergence_state})"
     )
 
     # Exit Rule: Trigger closure if SAR flips
@@ -1138,6 +1436,12 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["structure_support"] = float(support)
     if resistance is not None:
         signal["structure_resistance"] = float(resistance)
+    signal["wall_state"] = wall_state
+    signal["market_location"] = {
+        "score": float(location_score),
+        "notes": location_notes,
+        "levels": location_levels,
+    }
 
     mr_setup = _detect_mean_reversion_setup(df_indicators, strategy_config)
     if mr_setup.get("triggered"):
@@ -1176,14 +1480,17 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         elif wick_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
             signal["action"] = "SELL" if signal["action"] == "HOLD" or float(signal["score"]) < 0 else signal["action"]
 
+    signal["score"] = float(np.clip(float(signal["score"]), -1.0, 1.0))
+    signal["confidence"] = min(abs(float(signal["score"])), 1.0)
+
     # --- STRUCTURAL STOP LOSS ---
-    # We still need a place to put the Stop Loss, even if we don't veto the trade.
-    stop_buffer = 0.0005  # 0.05% beyond the level
+    # Place SL at structural level, but cap at max_structural_sl_pct
+    stop_buffer = 0.0005
     final_action = signal["action"]
     if final_action == "BUY" and support is not None:
-        signal["sl"] = float(support) * (1 - stop_buffer)
+        signal["sl"] = float(support) * (1 - stop_buffer)  # just below support
     elif final_action == "SELL" and resistance is not None:
-        signal["sl"] = float(resistance) * (1 + stop_buffer)
+        signal["sl"] = float(resistance) * (1 + stop_buffer)  # just above resistance
 
     # Recalculate final_action
     final_action = signal["action"]
@@ -1231,46 +1538,112 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             signal["hold_reason"] = f"Structural SL too far ({sl_dist_pct:.2%} > {max_sl_pct:.2%})"
             signal["reason"] = f"{signal['reason']} SLTooFar:{sl_dist_pct:.2%}"
 
-    if mtf_fast_bias == "LONG_ONLY" and signal["action"] == "SELL":
+    def _mtf_strict_entry_fail(action: str) -> str:
+        if not (mtf_config and mtf_config.get("enabled", False) and isinstance(mtf_context, dict)):
+            return ""
+
+        require_full = bool(mtf_config.get("require_full_confirmation", False))
+        if not require_full or action not in {"BUY", "SELL"}:
+            return ""
+
+        veto_missing = bool(mtf_config.get("strict_veto_on_missing", True))
+
+        def _ctx(tf: str) -> dict:
+            value = mtf_context.get(tf)
+            return value if isinstance(value, dict) else {}
+
+        def _trend(tf: str) -> str:
+            return str(_ctx(tf).get("trend", "MISSING" if not _ctx(tf) else "NEUTRAL") or "NEUTRAL").upper()
+
+        def _macd_bull(tf: str) -> bool:
+            ctx = _ctx(tf)
+            if not ctx:
+                return False
+            macd = float(ctx.get("macd", 0.0) or 0.0)
+            sig = float(ctx.get("macd_signal", 0.0) or 0.0)
+            diff = float(ctx.get("macd_diff", 0.0) or 0.0)
+            prev = float(ctx.get("macd_diff_prev", 0.0) or 0.0)
+            return macd >= sig and diff >= prev
+
+        def _macd_bear(tf: str) -> bool:
+            ctx = _ctx(tf)
+            if not ctx:
+                return False
+            macd = float(ctx.get("macd", 0.0) or 0.0)
+            sig = float(ctx.get("macd_signal", 0.0) or 0.0)
+            diff = float(ctx.get("macd_diff", 0.0) or 0.0)
+            prev = float(ctx.get("macd_diff_prev", 0.0) or 0.0)
+            return macd <= sig and diff <= prev
+
+        required_tfs = ("3m", "5m", "10m", "15m")
+        missing = [tf for tf in required_tfs if not _ctx(tf)]
+        if missing and veto_missing:
+            return f"missing {'/'.join(missing)}"
+
+        if action == "BUY":
+            if _trend("3m") != "BULL" or _trend("5m") != "BULL":
+                return "3m/5m not bullish"
+            if _trend("10m") == "BEAR" or _trend("15m") == "BEAR":
+                return "10m/15m bearish"
+            if _macd_bear("10m") and _macd_bear("15m"):
+                return "10m/15m MACD bearish"
+            bearish_structure = {"LH_LL", "LOWER_HIGH"}
+            if str(_ctx("5m").get("structure", "")).upper() in bearish_structure or str(_ctx("10m").get("structure", "")).upper() in bearish_structure:
+                return "5m/10m lower-high structure"
+        else:
+            if _trend("3m") != "BEAR" or _trend("5m") != "BEAR":
+                return "3m/5m not bearish"
+            if _trend("10m") == "BULL" or _trend("15m") == "BULL":
+                return "10m/15m bullish"
+            if _macd_bull("10m") and _macd_bull("15m"):
+                return "10m/15m MACD bullish"
+            bullish_structure = {"HH_HL", "HIGHER_LOW"}
+            if str(_ctx("5m").get("structure", "")).upper() in bullish_structure or str(_ctx("10m").get("structure", "")).upper() in bullish_structure:
+                return "5m/10m higher-low structure"
+
+        return ""
+
+    strict_mtf_fail = _mtf_strict_entry_fail(signal["action"])
+    if strict_mtf_fail:
         signal["action"] = "HOLD"
-        signal["hold_reason"] = "MTF trend veto: 3m/5m/15m bullish"
+        signal["hold_reason"] = f"MTF strict gate: {strict_mtf_fail}"
+        signal["reason"] = f"{signal['reason']} MTFStrictBlocked:{strict_mtf_fail}"
+    elif mtf_fast_bias == "LONG_ONLY" and signal["action"] == "SELL":
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "MTF trend veto: fast timeframes bullish"
     elif mtf_fast_bias == "SHORT_ONLY" and signal["action"] == "BUY":
         signal["action"] = "HOLD"
-        signal["hold_reason"] = "MTF trend veto: 3m/5m/15m bearish"
+        signal["hold_reason"] = "MTF trend veto: fast timeframes bearish"
     elif mtf_fast_bias == "NEUTRAL" and signal["action"] in {"BUY", "SELL"}:
-        if abs(total_score) < 0.05:
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = "MTF trend veto: 3m/5m/15m not aligned"
-        else:
-            signal["reason"] = f"{signal['reason']} MTFPartial"
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "MTF trend veto: fast timeframes not aligned"
+        signal["reason"] = f"{signal['reason']} MTFPartialBlocked"
     elif mtf_fast_bias != "NEUTRAL":
         signal["reason"] = f"{signal['reason']} MTFConfirm:{mtf_fast_bias}"
     
     # --- RANGE REVERSAL SNIPER MODE (DYNAMIC OUTER EDGE) ---
-    # We measure the total range width and only allow entries in the outer 15%
+    # We measure the total range width and only allow entries in the configured outer zone.
     m5_s = signal.get("structure_support")
     m5_r = signal.get("structure_resistance")
     
     if m5_s and m5_r:
         range_width = m5_r - m5_s
-        # Only allow trades in the outer 15% of the total range
-        # (The middle 70% is a strictly forbidden "No-Trade Zone")
-        action_zone_size = range_width * 0.15 
+        action_zone_size = range_width * range_action_zone_pct
         
         top_action_zone = m5_r - action_zone_size
         bottom_action_zone = m5_s + action_zone_size
+        signal["action_support"] = float(bottom_action_zone)
+        signal["action_resistance"] = float(top_action_zone)
         
-        if signal["action"] == "BUY":
-            # Must be in the BOTTOM 15% to BUY
-            if current_price > bottom_action_zone:
-                signal["action"] = "HOLD"
-                signal["hold_reason"] = f"Outer Edge Gate: Too high in range (${current_price:.2f} > ${bottom_action_zone:.2f}). Waiting for floor."
-                
-        elif signal["action"] == "SELL":
-            # Must be in the TOP 15% to SELL
-            if current_price < top_action_zone:
-                signal["action"] = "HOLD"
-                signal["hold_reason"] = f"Outer Edge Gate: Too low in range (${current_price:.2f} < ${top_action_zone:.2f}). Waiting for ceiling."
+        at_top = current_price >= top_action_zone
+        at_bottom = current_price <= bottom_action_zone
+        
+        if signal["action"] == "BUY" and not at_bottom:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"Gate: BUY only at support (${current_price:.2f} > ${bottom_action_zone:.2f})."
+        elif signal["action"] == "SELL" and not at_top:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"Gate: SELL only at resistance (${current_price:.2f} < ${top_action_zone:.2f})."
     else:
         # If we can't find a clear range, we stay safe and HOLD
         signal["action"] = "HOLD"
@@ -1575,6 +1948,31 @@ def _detect_wick_sweep_setup(
         }
 
     return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False}
+
+def _confirm_breakout_momentum(df: pd.DataFrame, action: str, current_price: float, level: float) -> bool:
+    """
+    Confirms price has directional momentum at the level.
+    BUY: tick above open + PSAR bull + near level
+    SELL: tick below open + PSAR bear + near level
+    """
+    if df is None or len(df) < 3:
+        return False
+
+    last_open = float(df["open"].iloc[-1])
+
+    tick_bull = current_price > last_open
+    tick_bear = current_price < last_open
+
+    psar = float(df["psar"].iloc[-1])
+    psar_bull = current_price > psar
+    psar_bear = current_price < psar
+
+    near = abs(current_price - level) / level <= 0.0015
+
+    if action == "BUY":
+        return tick_bull and psar_bull and near
+    return tick_bear and psar_bear and near
+
 
 def _calculate_volume_delta(df: pd.DataFrame) -> float:
     """

@@ -1,81 +1,99 @@
-# High-Frequency Scalping Configuration (LIVE DEPLOYMENT)
-# This file is optimized for Oracle Cloud deployment.
+# =============================================================================
+# LIVE PRODUCTION CONFIG
+# =============================================================================
+# Purpose: Production deployment (Oracle Cloud / VPS).
+# Key differences from config.yaml:
+#   - AI overlay enabled; per-trade gate disabled for faster scalps
+#   - Slower loop (1s ticks) for reliability
+#   - Conservative leverage (3x default)
+#   - Larger trade sizing (50 USDT per trade)
+#   - Standard live taker fee (0.05%)
+# =============================================================================
 
-symbol: "SOL/USDC:USDC"
-timeframe: "1m"           # Ultrafast execution
-macro_timeframe: "15m"     # Faster macro alignment for 1m scalps
+symbol: "AVAX/USDC:USDC"
+timeframe: "1m"
+macro_timeframe: "5m"
 
-# Market data source (spot vs futures)
 data:
-  market: "auto"          # auto follows execution.market; or set usdm | spot
+  market: "auto"
 
-# Execution Settings
 execution:
-  mode: "live"              # paper | demo | live
-  market: "usdm"              # spot | usdm (Futures)
-  leverage: 3                # Conservative starting leverage for live mode
-  spot_balance_pct: 0.35      
-  spot_reserve_pct: 0.30      
-  spot_max_layers: 3          
-  dynamic_leverage: true       
+  mode: "live"
+  market: "usdm"
+  leverage: 3
+  spot_balance_pct: 0.35
+  spot_reserve_pct: 0.30
+  spot_max_layers: 3
+  dynamic_leverage: true
   paper_starting_balance_usdt: 50
-  fee_rate: 0.0005           # Standard live taker fee (0.05%)
-  dca_enabled: false           
-  dca_max_steps: 0             
-  dca_distance_pct: 0.006      
+  fee_rate: 0.0005
   fee_slippage_buffer_pct: 0.0002
   fee_edge_multiplier: 1.2
-  min_seconds_between_trades: 30
-  min_seconds_before_reversal: 30
-  reversal_min_confidence: 0.20
-  reversal_min_score: 0.15
-  reversal_min_net_edge_pct: 0.0015
-  break_even_trigger_pct: 0.0030    
-  break_even_buffer_pct: 0.0004     
-  trail_tighten_1_pct: 0.0090       
-  trail_tighten_2_pct: 0.0150       
-  min_profit_after_fees: 0.0012
-  exit_on_reversal_only_in_profit: true 
-  use_limit_orders: true            
-  use_native_trailing_stop: false    
-  trailing_callback_pct: 0.65       
-  ttl_exit_seconds: 300             
+  min_seconds_between_trades: 12
+  min_seconds_before_reversal: 15
+  reversal_min_confidence: 0.45
+  reversal_min_score: 0.25
+  reversal_min_net_edge_pct: 0.0020
+  break_even_trigger_pct: 0.0015
+  break_even_buffer_pct: 0.0004
+  trail_tighten_1_pct: 0.0020
+  trail_tighten_2_pct: 0.0024
+  min_profit_after_fees: 0.0007
+  exit_on_reversal_only_in_profit: true
+  use_limit_orders: true
+  use_native_trailing_stop: true
+  use_exchange_stop_loss: true
+  use_exchange_take_profit: true
+  market_fallback_on_timeout: false
+  pending_entry_ttl_seconds: 10
+  use_resting_support_orders: true
+  resting_entry_ttl_seconds: 120
+  resting_entry_min_conf: 0.50
+  resting_entry_offset_pct: 0.0002
+  resting_entry_max_distance_pct: 0.0125
+  trailing_callback_pct: 0.65
+  same_side_reentry_cooldown_seconds: 180
+  same_side_reentry_strong_confidence: 0.85
+  scalp_min_hold_seconds: 10
+  scalp_runner_enabled: true
+  scalp_runner_pullback_pct: 0.0012
+  scalp_runner_min_lock_pct: 0.0018
+  scalp_runner_exchange_tp_multiplier: 3.0
+  ttl_exit_seconds: 600
 
-# Dynamic Leverage (volatility + confidence based position sizing)
 leverage:
-  enabled: true                
-  min_leverage: 1              
-  max_leverage: 8              
+  enabled: true
+  min_leverage: 1
+  max_leverage: 8
   confidence_levels:
-    0.05: 2.0                  
-    0.15: 3.0                  
-    0.30: 5.0                  
-    0.50: 6.0                  
-    0.75: 8.0                  
-  use_score_multiplier: true   
-  score_weight: 0.2            
-  atr_volatility_scaling: true  
-  atr_reference_pct: 0.012     
-  atr_min_multiplier: 0.5      
+    0.10: 1.0
+    0.20: 2.0
+    0.35: 4.0
+    0.50: 6.0
+    0.75: 8.0
+  use_score_multiplier: true
+  score_weight: 0.2
+  atr_volatility_scaling: true
+  atr_reference_pct: 0.5
+  atr_min_multiplier: 0.5
 
-# Multi-Timeframe Trend + S/R
 mtf:
   enabled: true
   timeframes: ["1m", "3m", "5m", "10m", "15m", "1h", "4h"]
-  min_agree: 2                  
-  veto_on_missing: false        
-  max_age_seconds: 300          
-  sr_buffer_pct: 0.0015         
-  mode: "hard"                  
+  min_agree: 2
+  require_full_confirmation: true
+  strict_veto_on_missing: true
+  veto_on_missing: false
+  max_age_seconds: 300
+  sr_buffer_pct: 0.0015
+  mode: "hard"
 
-# Terminal UI
 ui:
   mode: "ansi"
   compact: true
   status_lines: 3
   alt_screen: true
 
-# Memory/Log limits
 memory:
   max_closed_trades: 5000
 
@@ -83,7 +101,6 @@ logging:
   max_mb: 5
   backups: 3
 
-# Auto-learning from closed trades
 auto_learning:
   enabled: true
   min_completed_trades: 30
@@ -95,70 +112,71 @@ auto_learning:
     model: "gpt-4o-mini"
     max_weight_shift: 0.12
 
-# Quant Strategy Parameters
 strategy:
-  max_spread: 0.0005        
-  min_conf: 0.05            # Sniper Aggression (5%)
+  max_spread: 0.0005
+  min_conf: 0.24
+  signal_smoothing_ticks: 3
   max_ret_30s: 0.0040
   max_ret_5s: 0.0018
-  block_on_volume_spike: true
+  block_on_volume_spike: false
   fixed_trade_usdt: 50
-  tp_pct: 0.0035          
-  sl_pct: 0.0080          
-  max_structural_sl_pct: 0.0150  
-  min_reward_risk: 0.50          
-  vol_filter_atr_pct: 0.0001  # Ultra-sensitive (0.01%)
-  vol_filter_atr_max_pct: 0.08  
-  wick_sweep_enabled: true      
-  wick_sweep_buffer_pct: 0.0008 
-  wick_sweep_reclaim_pct: 0.0002 
-  wick_sweep_wick_ratio: 1.6    
+  tp_pct: 0.0025
+  sl_pct: 0.0035
+  max_structural_sl_pct: 0.0100
+  min_reward_risk: 0.65
+  range_action_zone_pct: 0.20
+  wall_veto_zone_pct: 0.20
+  support_veto_pct: 0.0015
+  resistance_veto_pct: 0.0015
+  support_break_pct: 0.0010
+  resistance_break_pct: 0.0010
+  max_chase_pct: 0.0018
+  entry_min_confidence_hard: 0.30
+  entry_near_resistance_block_pct: 0.0030
+  entry_near_support_block_pct: 0.0030
+  macd_noise_threshold: 0.00005
+  vol_filter_atr_pct: 0.0001
+  vol_filter_atr_max_pct: 0.08
+  wick_sweep_enabled: true
+  wick_sweep_buffer_pct: 0.0008
+  wick_sweep_reclaim_pct: 0.0002
+  wick_sweep_wick_ratio: 1.6
+  wall_reversal_assist: true
+  wall_reversal_score_gate: 0.10
 
 spot:
-  mode: "grid"                 
+  mode: "grid"
   max_layers: 3
-  layer_quote_pct: 0.20        
-  reserve_quote_pct: 0.30      
-  buy_near_support_pct: 0.0150 
+  layer_quote_pct: 0.20
+  reserve_quote_pct: 0.30
+  buy_near_support_pct: 0.0150
   sell_near_resistance_pct: 0.0020
-  layer_spacing_pct: 0.0030    
-  emergency_break_pct: 0.0040  
-  min_take_profit_pct: 0.0035  
-  min_trail_profit_quote: 0.10 
+  layer_spacing_pct: 0.0030
+  emergency_break_pct: 0.0040
+  min_take_profit_pct: 0.0035
+  min_trail_profit_quote: 0.10
 
-# Risk Limits
 risk:
-  daily_loss_cap: 0.10     
+  daily_loss_cap: 0.10
   disable_loss_cap: false
-  max_open_positions: 1    
-  min_balance_floor: 0.0   
+  max_open_positions: 1
+  min_balance_floor: 0.0
 
-# Refresh Intervals
 intervals:
-  indicator_refresh: 10    
-  regime_refresh: 600      
-  tick_delay_seconds: 1    
+  indicator_refresh: 10
+  regime_refresh: 600
+  tick_delay_seconds: 1
 
-# AI Settings
 ai:
+  enabled: true
   model: "gpt-4o-mini"
-  enabled: true           
+  overlay_enabled: true
+  overlay_refresh_seconds: 60
+  trade_gate_enabled: false
+  trade_gate_min_interval: 30
+  trade_gate_on_error: "allow"
+  trade_gate_max_hold_minutes: 60
 
-# AI Overlay
-ai_overlay:
-  enabled: true          
-  model: "gpt-4o-mini"
-  refresh_seconds: 300    
-
-# Trade-Gating AI
-ai_trade:
-  enabled: true           
-  model: "gpt-4o-mini"
-  min_interval_seconds: 30     
-  on_error: "allow"            
-  max_hold_minutes: 60
-
-# Local web dashboard
 dashboard:
   enabled: true
   host: "0.0.0.0"

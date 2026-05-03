@@ -346,6 +346,19 @@ def optimize_weights(
 
     learned = _normalize_weights(raw_weights)
     shrinkage = max(0.0, min(1.0, float(shrinkage)))
+
+    # Holdout gate: if model can't predict on unseen data, discard learned weights
+    if holdout_accuracy is not None and holdout_accuracy < 0.50:
+        if not quiet:
+            print(f"Holdout accuracy {holdout_accuracy:.1%} < 50% — discarding learned weights (overfitting).")
+            print("Keeping default weights only.")
+        learned = DEFAULT_WEIGHTS.copy()
+        shrinkage = 0.0  # 100% defaults
+    elif holdout_accuracy is not None and holdout_accuracy < 0.55:
+        if not quiet:
+            print(f"Holdout accuracy {holdout_accuracy:.1%} weak — reducing learned weight influence.")
+        shrinkage = min(shrinkage + 0.15, 0.35)
+
     blended = _normalize_weights({
         key: (DEFAULT_WEIGHTS[key] * (1.0 - shrinkage)) + (learned[key] * shrinkage)
         for key in ACTIVE_FEATURES

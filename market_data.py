@@ -20,6 +20,7 @@ class MarketData:
         if market in {"usdm", "futures", "future"}:
             self.exchange = ccxt.binanceusdm({
                 'enableRateLimit': True,
+                'timeout': 10000,
                 'options': {
                     'adjustForTimeDifference': True,
                 }
@@ -28,6 +29,7 @@ class MarketData:
         else:
             self.exchange = ccxt.binance({
                 'enableRateLimit': True,
+                'timeout': 10000,
                 'options': {
                     'adjustForTimeDifference': True,
                 }

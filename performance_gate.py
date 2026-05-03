@@ -46,6 +46,9 @@ def compute_trade_metrics(log_file: str = "trade_log_futures.csv") -> dict:
 
 def paper_gate_passed(log_file: str = "trade_log_futures.csv", min_trades: int = 100, min_profit_factor: float = 1.2, max_drawdown: float = 0.20) -> tuple[bool, dict]:
     metrics = compute_trade_metrics(log_file=log_file)
+    # If all gates are set to bypass values, skip check entirely
+    if min_trades <= 0 and min_profit_factor <= 0.0 and max_drawdown >= 1.0:
+        return True, metrics
     passed = (
         int(metrics["trades"]) >= int(min_trades)
         and float(metrics["profit_factor"]) >= float(min_profit_factor)

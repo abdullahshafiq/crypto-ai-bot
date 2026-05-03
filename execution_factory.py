@@ -1,6 +1,6 @@
 import os
 
-from futures_execution import BinanceFuturesExecution, PaperFuturesExecution
+from futures_execution import BinanceFuturesExecution
 from spot_execution import BinanceSpotExecution
 from execution_shared import FUTURES_TRADE_LOG_FILE, SPOT_TRADE_LOG_FILE
 
@@ -16,10 +16,37 @@ def resolve_data_market(cfg: dict) -> str:
 
 def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float, fee_rate: float):
     exec_cfg = cfg.get("execution", {}) or {}
+    strategy_cfg = cfg.get("strategy", {}) or {}
+    spot_cfg = cfg.get("spot", {}) or {}
     executor.fee_rate = float(fee_rate)
     executor.fee_slippage_buffer_pct = float(exec_cfg.get("fee_slippage_buffer_pct", 0.0002))
     executor.fee_edge_multiplier = float(exec_cfg.get("fee_edge_multiplier", 1.2))
     executor.fixed_trade_usdt = float(fixed_trade_usdt)
+    executor.tp_pct = float(strategy_cfg.get("tp_pct", getattr(executor, "tp_pct", 0.0025)))
+    if hasattr(executor, "same_side_reentry_cooldown_seconds"):
+        executor.same_side_reentry_cooldown_seconds = int(
+            exec_cfg.get(
+                "same_side_reentry_cooldown_seconds",
+                getattr(executor, "same_side_reentry_cooldown_seconds", 180),
+            )
+        )
+    if hasattr(executor, "same_side_reentry_strong_confidence"):
+        executor.same_side_reentry_strong_confidence = float(
+            exec_cfg.get(
+                "same_side_reentry_strong_confidence",
+                getattr(executor, "same_side_reentry_strong_confidence", 0.85),
+            )
+        )
+    if hasattr(executor, "scalp_config"):
+        scalp_cfg = dict(getattr(executor, "scalp_config", {}) or {})
+        scalp_cfg["runner_enabled"] = bool(exec_cfg.get("scalp_runner_enabled", scalp_cfg.get("runner_enabled", True)))
+        scalp_cfg["tp_pct"] = float(strategy_cfg.get("tp_pct", scalp_cfg.get("tp_pct", 0.0025)))
+        scalp_cfg["min_hold_seconds"] = int(exec_cfg.get("scalp_min_hold_seconds", scalp_cfg.get("min_hold_seconds", 10)))
+        scalp_cfg["runner_pullback_pct"] = float(exec_cfg.get("scalp_runner_pullback_pct", scalp_cfg.get("runner_pullback_pct", 0.0012)))
+        scalp_cfg["runner_min_lock_pct"] = float(exec_cfg.get("scalp_runner_min_lock_pct", scalp_cfg.get("runner_min_lock_pct", 0.0018)))
+        scalp_cfg["runner_exchange_tp_multiplier"] = float(exec_cfg.get("scalp_runner_exchange_tp_multiplier", scalp_cfg.get("runner_exchange_tp_multiplier", 3.0)))
+        executor.scalp_config = scalp_cfg
+    executor.default_sl_pct = float(strategy_cfg.get("sl_pct", getattr(executor, "default_sl_pct", 0.0030)))
     executor.min_seconds_between_trades = int(exec_cfg.get("min_seconds_between_trades", 30))
     executor.min_seconds_before_reversal = int(exec_cfg.get("min_seconds_before_reversal", 30))
     executor.reversal_min_confidence = float(exec_cfg.get("reversal_min_confidence", 0.20))
@@ -29,68 +56,69 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
     executor.break_even_buffer_pct = float(exec_cfg.get("break_even_buffer_pct", 0.0004))
     executor.trail_tighten_1_pct = float(exec_cfg.get("trail_tighten_1_pct", 0.0050))
     executor.trail_tighten_2_pct = float(exec_cfg.get("trail_tighten_2_pct", 0.0100))
+    executor.trail_t1_gap_pct = float(exec_cfg.get("trail_t1_gap_pct", getattr(executor, "trail_t1_gap_pct", 0.0025)))
+    executor.trail_t2_gap_pct = float(exec_cfg.get("trail_t2_gap_pct", getattr(executor, "trail_t2_gap_pct", 0.0020)))
     executor.min_profit_after_fees = float(exec_cfg.get("min_profit_after_fees", 0.0012))
     executor.exit_on_reversal_only_in_profit = bool(exec_cfg.get("exit_on_reversal_only_in_profit", True))
     executor.use_limit_orders = bool(exec_cfg.get("use_limit_orders", True))
     executor.use_native_trailing_stop = bool(exec_cfg.get("use_native_trailing_stop", False))
+    executor.use_exchange_stop_loss = bool(exec_cfg.get("use_exchange_stop_loss", True))
+    executor.use_exchange_take_profit = bool(exec_cfg.get("use_exchange_take_profit", True))
+    executor.market_fallback_on_timeout = bool(exec_cfg.get("market_fallback_on_timeout", False))
+    executor.pending_entry_ttl_seconds = int(exec_cfg.get("pending_entry_ttl_seconds", getattr(executor, "pending_entry_ttl_seconds", 20)))
+    executor.resting_entry_ttl_seconds = int(exec_cfg.get("resting_entry_ttl_seconds", getattr(executor, "resting_entry_ttl_seconds", 120)))
+    executor.ttl_exit_seconds = int(exec_cfg.get("ttl_exit_seconds", getattr(executor, "ttl_exit_seconds", 0)))
     trailing_callback_pct = float(exec_cfg.get("trailing_callback_pct", 0.6))
     executor.trailing_callback_pct = trailing_callback_pct
     executor.trailing_stop_callback = trailing_callback_pct / 100.0
     executor.trade_log_file = SPOT_TRADE_LOG_FILE if str(exec_cfg.get("market", "usdm")).lower() == "spot" else FUTURES_TRADE_LOG_FILE
+    executor.spot_balance_pct = float(exec_cfg.get("spot_balance_pct", getattr(executor, "spot_balance_pct", 0.20)))
+    executor.spot_reserve_pct = float(exec_cfg.get("spot_reserve_pct", spot_cfg.get("reserve_quote_pct", getattr(executor, "spot_reserve_pct", 0.30))))
+    executor.spot_max_layers = int(exec_cfg.get("spot_max_layers", spot_cfg.get("max_layers", getattr(executor, "spot_max_layers", 3))))
+    executor.spot_mode = str(spot_cfg.get("mode", getattr(executor, "spot_mode", "grid")) or "grid")
+    executor.layer_quote_pct = float(spot_cfg.get("layer_quote_pct", getattr(executor, "layer_quote_pct", 0.20)))
+    executor.reserve_quote_pct = float(spot_cfg.get("reserve_quote_pct", getattr(executor, "reserve_quote_pct", 0.30)))
+    executor.buy_near_support_pct = float(spot_cfg.get("buy_near_support_pct", getattr(executor, "buy_near_support_pct", 0.0020)))
+    executor.sell_near_resistance_pct = float(spot_cfg.get("sell_near_resistance_pct", getattr(executor, "sell_near_resistance_pct", 0.0020)))
+    executor.layer_spacing_pct = float(spot_cfg.get("layer_spacing_pct", getattr(executor, "layer_spacing_pct", 0.0030)))
+    executor.emergency_break_pct = float(spot_cfg.get("emergency_break_pct", getattr(executor, "emergency_break_pct", 0.0040)))
+    executor.min_take_profit_pct = float(spot_cfg.get("min_take_profit_pct", getattr(executor, "min_take_profit_pct", 0.0035)))
+    executor.max_spot_layers = executor.spot_max_layers
 
 
 def create_executor(cfg: dict, api_key: str | None, api_secret: str | None, bootstrap_price: float, fixed_trade_usdt: float):
     exec_cfg = cfg.get("execution", {}) or {}
-    exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "paper"))).strip().lower()
+    exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "live"))).strip().lower()
     exec_market = str(exec_cfg.get("market", "usdm") or "usdm").strip().lower()
     leverage = int(exec_cfg.get("leverage", 5))
     mem_cfg = cfg.get("memory", {}) or {}
     fee_rate_cfg = float(exec_cfg.get("fee_rate", 0.0006))
-    # Paper mode safety: never allow zero-cost assumptions.
-    fee_rate = max(fee_rate_cfg, 0.0006 if exec_mode == "paper" else 0.0)
+    fee_rate = max(fee_rate_cfg, 0.0)
+
+    if exec_mode != "live":
+        raise RuntimeError(f"Live-only runtime requires execution.mode=live, got {exec_mode!r}.")
+    if not api_key or not api_secret or "your_testnet" in str(api_key):
+        raise RuntimeError("Live-only runtime requires real BINANCE_API_KEY and BINANCE_SECRET.")
 
     if exec_market == "spot":
-        if exec_mode in {"demo", "binance", "live"} and api_key and api_secret and "your_testnet" not in str(api_key):
-            executor = BinanceSpotExecution(
-                api_key,
-                api_secret,
-                max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-                is_demo=(exec_mode != "live"),
-            )
-        else:
-            # Spot fallback keeps paper futures model for safety/compatibility.
-            executor = PaperFuturesExecution(
-                starting_balance_usdt=float(exec_cfg.get("paper_starting_balance_usdt", 1000.0)),
-                leverage=1,
-                fee_rate=fee_rate,
-                max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-            )
-            executor.label = "PAPER SPOT-SAFE"
+        executor = BinanceSpotExecution(
+            api_key,
+            api_secret,
+            max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
+            is_demo=False,
+        )
     else:
-        if exec_mode in {"demo", "binance", "live"} and api_key and api_secret and "your_testnet" not in str(api_key):
-            executor = BinanceFuturesExecution(
-                api_key,
-                api_secret,
-                symbol=cfg.get("symbol", "SOL/USDC:USDC"),
-                leverage=leverage,
-                max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-                is_demo=(exec_mode != "live"),
-            )
-            _ = executor.get_portfolio_value(bootstrap_price)
-            if float(getattr(executor, "initial_balance", 0.0) or 0.0) <= 0:
-                executor = PaperFuturesExecution(
-                    starting_balance_usdt=float(exec_cfg.get("paper_starting_balance_usdt", 1000.0)),
-                    leverage=leverage,
-                    fee_rate=fee_rate,
-                    max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-                )
-        else:
-            executor = PaperFuturesExecution(
-                starting_balance_usdt=float(exec_cfg.get("paper_starting_balance_usdt", 1000.0)),
-                leverage=leverage,
-                fee_rate=fee_rate,
-                max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-            )
+        executor = BinanceFuturesExecution(
+            api_key,
+            api_secret,
+            symbol=cfg.get("symbol", "SOL/USDC:USDC"),
+            leverage=leverage,
+            max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
+            is_demo=False,
+        )
+        _ = executor.get_portfolio_value(bootstrap_price)
+        if float(getattr(executor, "initial_balance", 0.0) or 0.0) <= 0:
+            raise RuntimeError("Live futures executor could not confirm account equity; refusing to trade.")
 
     apply_common_executor_settings(executor, cfg, fixed_trade_usdt=fixed_trade_usdt, fee_rate=fee_rate)
     return executor

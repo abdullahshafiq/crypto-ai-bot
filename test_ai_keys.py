@@ -4,6 +4,39 @@ import requests
 
 load_dotenv()
 
+print("Checking DeepSeek API...")
+deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+if deepseek_key:
+    url = "https://api.deepseek.com/chat/completions"
+    payload = {
+        "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        "messages": [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": "Return exactly {\"status\":\"success\"}"},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_tokens": 40,
+        "temperature": 0.0,
+    }
+    try:
+        r = requests.post(
+            url,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {deepseek_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        print("  -> Raw status:", r.status_code)
+        print("  -> Raw content:", r.text)
+    except Exception as e:
+        print(f"  -> DeepSeek API threw exception: {e}")
+else:
+    print("  -> DEEPSEEK_API_KEY is not set.")
+
+print()
+
 print("Checking Gemini API...")
 gemini_key = os.getenv("GEMINI_API_KEY")
 if gemini_key:
