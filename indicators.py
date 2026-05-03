@@ -1281,10 +1281,18 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         # opposite-side flip when rejection evidence is present (to avoid lag loops).
         wall_reversal_assist = bool(strategy_config.get("wall_reversal_assist", True))
         wall_reversal_score_gate = float(strategy_config.get("wall_reversal_score_gate", 0.12) or 0.12)
+        wall_breakout_score_gate = float(strategy_config.get("wall_breakout_score_gate", 0.15) or 0.15)
         if support and resistance:
             if action == "BUY" and wall_state.get("resistance_touching") and not wall_state.get("resistance_broken"):
                 reject_bear = (current_price < ema_9_val) and (macd_diff_val < 0)
-                if wall_reversal_assist and reject_bear and total_score <= wall_reversal_score_gate:
+                bullish_breakout = (
+                    total_score >= wall_breakout_score_gate
+                    and (psar_bull or macd_diff_val > 0)
+                    and mtf_fast_bias != "SHORT_ONLY"
+                )
+                if bullish_breakout:
+                    signal_reason_suffix += " [Breakout Through Resistance]"
+                elif wall_reversal_assist and reject_bear and total_score <= wall_reversal_score_gate:
                     if total_score < -0.05 and mtf_fast_bias != "LONG_ONLY":
                         action = "SELL"
                         signal_reason_suffix += " [Rejection Flip: resistance]"
@@ -1299,7 +1307,14 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     )
             elif action == "SELL" and wall_state.get("support_touching") and not wall_state.get("support_broken"):
                 reject_bull = (current_price > ema_9_val) and (macd_diff_val > 0)
-                if wall_reversal_assist and reject_bull and total_score >= -wall_reversal_score_gate:
+                bearish_breakout = (
+                    total_score <= -wall_breakout_score_gate
+                    and ((not psar_bull) or macd_diff_val < 0)
+                    and mtf_fast_bias != "LONG_ONLY"
+                )
+                if bearish_breakout:
+                    signal_reason_suffix += " [Breakdown Through Support]"
+                elif wall_reversal_assist and reject_bull and total_score >= -wall_reversal_score_gate:
                     if total_score > 0.05 and mtf_fast_bias != "SHORT_ONLY":
                         action = "BUY"
                         signal_reason_suffix += " [Rejection Flip: support]"

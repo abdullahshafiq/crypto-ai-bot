@@ -148,6 +148,7 @@ strategy:
   wick_sweep_wick_ratio: 1.6
   wall_reversal_assist: true
   wall_reversal_score_gate: 0.12
+  wall_breakout_score_gate: 0.15
 
 # Spot settings
 spot:
