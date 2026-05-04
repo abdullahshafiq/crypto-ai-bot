@@ -117,11 +117,11 @@ auto_learning:
 
 # Quant Strategy Parameters
 strategy:
-  max_spread: 0.0005
+  max_spread: 0.0008
   min_conf: 0.15              # keep some selectivity, but allow more live entries
   signal_smoothing_ticks: 3
   max_ret_30s: 0.0040
-  max_ret_5s: 0.0018
+  max_ret_5s: 0.0035
   block_on_volume_spike: false
   fixed_trade_usdt: 25
   tp_pct: 0.0025              # 0.25% scalp TP
@@ -134,7 +134,7 @@ strategy:
   resistance_veto_pct: 0.0010
   support_break_pct: 0.0010
   resistance_break_pct: 0.0010
-  max_chase_pct: 0.0030       # allow modest moves; still blocks obvious late chase entries
+  max_chase_pct: 0.0050       # looser chase guard for AVAX intraday swings
   mtf_neutral_allow_score: 0.35
   entry_min_confidence_hard: 0.20
   midrange_min_score: 0.28
