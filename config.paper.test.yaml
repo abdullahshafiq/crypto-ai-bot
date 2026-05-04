@@ -1,13 +1,11 @@
 # =============================================================================
-# LIVE PRODUCTION CONFIG
+# PAPER CLONE CONFIG
 # =============================================================================
-# Purpose: Production deployment (Oracle Cloud / VPS).
-# Key differences from config.yaml:
-#   - AI overlay enabled; per-trade gate disabled for faster scalps
-#   - Slower loop (1s ticks) for reliability
-#   - Conservative leverage (3x default)
-#   - Larger trade sizing (50 USDT per trade)
-#   - Standard live taker fee (0.05%)
+# Purpose: local paper trading with the same logic and settings as live.
+# Differences from live:
+#   - execution.mode is paper
+#   - dashboard stays on localhost / alternate port
+#   - paused is false so paper mode can actually trade
 # =============================================================================
 
 symbol: "AVAX/USDC:USDC"
@@ -18,13 +16,10 @@ data:
   market: "auto"
 
 execution:
-  mode: "live"
+  mode: "paper"
   market: "usdm"
   leverage: 3
-  spot_balance_pct: 0.35
-  spot_reserve_pct: 0.30
-  spot_max_layers: 3
-  dynamic_leverage: true
+  paused: false
   paper_starting_balance_usdt: 50
   fee_rate: 0.0005
   fee_slippage_buffer_pct: 0.0002
@@ -34,7 +29,7 @@ execution:
   reversal_min_confidence: 0.45
   reversal_min_score: 0.25
   reversal_min_net_edge_pct: 0.0020
-  break_even_trigger_pct: 0.0015
+  break_even_trigger_pct: 0.0010
   break_even_buffer_pct: 0.0004
   trail_tighten_1_pct: 0.0020
   trail_tighten_2_pct: 0.0024
@@ -197,6 +192,6 @@ ai:
 
 dashboard:
   enabled: true
-  host: "0.0.0.0"
-  port: 8080
+  host: "127.0.0.1"
+  port: 8765
   candle_limit: 240
