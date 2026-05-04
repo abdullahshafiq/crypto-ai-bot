@@ -138,11 +138,20 @@ strategy:
   mtf_neutral_allow_score: 0.35
   entry_min_confidence_hard: 0.20
   midrange_min_score: 0.28
+  mtf_rsi_bull_level: 55
+  mtf_rsi_bear_level: 45
+  mtf_rsi_min_agree: 2
+  vpoc_near_pct: 0.0010
+  vpoc_break_pct: 0.0015
+  session_filter_enabled: true
+  session_block_hours_utc: [3, 4, 5, 6]
+  session_block_min_score: 0.35
   entry_near_resistance_block_pct: 0.0030
   entry_near_support_block_pct: 0.0030
   macd_noise_threshold: 0.00005  # MACD noise floor (code caps at 0.00002 for scalp)
   vol_filter_atr_pct: 0.0001
   vol_filter_atr_max_pct: 0.08
+  low_vol_min_score: 0.45
   wick_sweep_enabled: true
   wick_sweep_buffer_pct: 0.0008
   wick_sweep_reclaim_pct: 0.0002
@@ -150,6 +159,12 @@ strategy:
   wall_reversal_assist: true
   wall_reversal_score_gate: 0.12
   wall_breakout_score_gate: 0.15
+  spread_atr_ratio_max: 0.15
+  ob_midpoint_tolerance_pct: 0.0015
+  anchored_vwap_near_pct: 0.0010
+  loss_tilt_min_losses: 3
+  loss_tilt_pause_losses: 5
+  loss_tilt_pause_minutes: 15
 
 # Spot settings
 spot:

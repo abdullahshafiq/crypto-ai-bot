@@ -21,6 +21,20 @@ def _enforce_single_instance(port=45678):
         print(f"ERROR: Another instance of the bot is already running. Please close it first.")
         sys.exit(1)
 
+
+def _count_consecutive_losses(closed_trades) -> int:
+    losses = 0
+    for trade in reversed(list(closed_trades or [])):
+        try:
+            pnl = float(trade.get("pnl", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        if pnl < 0:
+            losses += 1
+        else:
+            break
+    return losses
+
 if sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8')
 from market_data import MarketData
@@ -650,8 +664,8 @@ def run_hybrid_bot():
     executor.daily_loss_cap_pct = cfg['risk'].get('daily_loss_cap')
     executor.min_balance_floor = float(cfg['risk'].get('min_balance_floor', 90.0))
 
-    auto_learning_enabled = False  # rollback-old-behavior branch: keep auto-learning inactive
-    auto_learning_min_trades = int(auto_learning_cfg.get("min_completed_trades", 30))
+    auto_learning_enabled = bool(auto_learning_cfg.get("enabled", False))
+    auto_learning_min_trades = max(50, int(auto_learning_cfg.get("min_completed_trades", 50)))
     auto_learning_refresh_trades = max(1, int(auto_learning_cfg.get("refresh_closed_trades", 10)))
     auto_learning_max_recent = int(auto_learning_cfg.get("max_recent_trades", 300))
     auto_learning_shrinkage = float(auto_learning_cfg.get("shrinkage", 0.35))
@@ -742,6 +756,8 @@ def run_hybrid_bot():
     last_reported_status = ""
     last_reported_signal = ""
     last_learning_closed_trades = int(getattr(executor, "stats_trades", 0) or 0)
+    loss_tilt_pause_until = 0.0
+    loss_tilt_last_count = 0
     ai_overlay_state = {
         "bias": "NEUTRAL",
         "risk_mode": "NORMAL",
@@ -1003,6 +1019,30 @@ def run_hybrid_bot():
                 executor.close_all_positions(symbol)
                 break
 
+            runtime_strategy_config = dict(strategy_config)
+            closed_snapshot = list(getattr(executor, "closed_trades", []) or [])[-10:]
+            consec_losses = _count_consecutive_losses(closed_snapshot)
+            tilt_min_losses = max(1, int(strategy_config.get("loss_tilt_min_losses", 3) or 3))
+            tilt_pause_losses = max(tilt_min_losses + 1, int(strategy_config.get("loss_tilt_pause_losses", 5) or 5))
+            tilt_pause_minutes = max(1, int(strategy_config.get("loss_tilt_pause_minutes", 15) or 15))
+            if consec_losses >= tilt_min_losses:
+                runtime_strategy_config["min_conf"] = max(float(runtime_strategy_config.get("min_conf", 0.15) or 0.15), 0.50)
+                runtime_strategy_config["entry_min_confidence_hard"] = max(
+                    float(runtime_strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
+                    0.50,
+                )
+                runtime_strategy_config["midrange_min_score"] = max(
+                    float(runtime_strategy_config.get("midrange_min_score", 0.28) or 0.28),
+                    0.50,
+                )
+                runtime_strategy_config["session_block_min_score"] = max(
+                    float(runtime_strategy_config.get("session_block_min_score", 0.35) or 0.35),
+                    0.50,
+                )
+            if consec_losses >= tilt_pause_losses and consec_losses > loss_tilt_last_count:
+                loss_tilt_pause_until = max(loss_tilt_pause_until, time.time() + float(tilt_pause_minutes * 60))
+            loss_tilt_last_count = consec_losses
+
             signal_df = df_indicators.iloc[:-1] if (df_indicators is not None and len(df_indicators) > 1) else df_indicators
             
             # Dashboard Pause Logic
@@ -1019,13 +1059,18 @@ def run_hybrid_bot():
                 signal = generate_quant_signal(
                     state,
                     latest_indicators,
-                    strategy_config,
+                    runtime_strategy_config,
                     signal_df,
                     latest_macro,
                     mtf_context=mtf_context,
                     mtf_config=mtf_cfg,
                     pivot_data=pivot_data,
                 )
+            
+            if time.time() < loss_tilt_pause_until and signal.get("action") in {"BUY", "SELL"}:
+                signal["action"] = "HOLD"
+                signal["hold_reason"] = f"Consecutive loss tilt: {tilt_pause_minutes}m entry pause"
+                signal["reason"] = f"{signal.get('reason','')} LOSS_TILT_PAUSE"
             
             # SIGNAL SMOOTHING: Simplified for faster scalp entry.
             raw_score = float(signal.get('score', 0.0) or 0.0)
@@ -1037,7 +1082,7 @@ def run_hybrid_bot():
             signal['confidence'] = abs(max(-1.0, min(1.0, raw_score)))
             
             # Only hold if the RAW confidence is truly under the floor
-            if signal['confidence'] < float(strategy_config.get('min_conf', 0.05)):
+            if signal['confidence'] < float(runtime_strategy_config.get('min_conf', 0.05)):
                 signal['action'] = "HOLD"
                 signal['hold_reason'] = "Weak confidence (<5%)"
 
@@ -1148,7 +1193,7 @@ def run_hybrid_bot():
                     hold_minutes = max_hold_minutes
                 scalp_friendly = (
                     signal.get("action") in {"BUY", "SELL"}
-                    and float(signal.get("confidence", 0.0) or 0.0) >= float(strategy_config.get("min_conf", 0.05))
+                    and float(signal.get("confidence", 0.0) or 0.0) >= float(runtime_strategy_config.get("min_conf", 0.05))
                     and not bool(ai_overlay_state.get("avoid_new_entries", False))
                     and str(ai_overlay_state.get("risk_mode", "NORMAL") or "NORMAL").upper() not in {"HIGH", "EXTREME"}
                 )
