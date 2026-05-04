@@ -46,7 +46,6 @@
     .ticker { display: inline-block; white-space: nowrap; animation: ticker 60s linear infinite; }
     .ticker__item { display: inline-block; padding: 0 2rem; font-size: 11px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; }
     @keyframes ticker { 0% { transform: translate3d(0, 0, 0); } 100% { transform: translate3d(-100%, 0, 0); } }
-    
     .app-container { min-height: 100vh; display: flex; flex-direction: column; }
   </style>
 </head>
@@ -224,9 +223,16 @@
   <script>
     let STATE = {}, SCHEMA = [], CONFIG = {}, chart, candleSeries, volumeSeries;
     let isSyncingPause = false, expectedPauseState = null;
+    let _pauseSyncTimeout = null;
+    let _chartFirstRender = true;
+    let _refreshIntervalId = null;
+    let _chartResizeObserver = null;
+    let _emergencyExiting = false;
+    let _lastChartKey = null;
     const q = (id) => document.getElementById(id);
     const fmt = (n, d=2) => { const v = Number(n); return Number.isFinite(v) ? v.toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d}) : '-'; };
     const safeSet = (id, val, cls) => { const el = q(id); if (!el) return; if (val !== undefined) el.textContent = val; if (cls !== undefined) el.className = cls; };
+    const escHtml = (s) => { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
 
     function initChart() {
       const container = q('chartContainer'); if (!container || chart) return;
@@ -241,10 +247,11 @@
         upColor: '#10b981', downColor: '#f43f5e', borderVisible: false, wickUpColor: '#10b981', wickDownColor: '#f43f5e' 
       });
       volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, { 
-        color: '#334155', priceFormat: { type: 'volume' }, priceScaleId: '', 
+        color: '#334155', priceFormat: { type: 'volume' }, priceScaleId: '' 
       });
       volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-      new ResizeObserver(entries => { if (entries.length) chart.applyOptions({ width: entries[0].contentRect.width, height: entries[0].contentRect.height }); }).observe(container);
+      _chartResizeObserver = new ResizeObserver(entries => { if (entries.length && chart) chart.applyOptions({ width: entries[0].contentRect.width, height: entries[0].contentRect.height }); });
+      _chartResizeObserver.observe(container);
     }
 
     function setConnection(ok) {
@@ -266,8 +273,7 @@
         const actualPaused = !!(s.config?.execution?.paused);
         if (isSyncingPause) {
           if (actualPaused === expectedPauseState) {
-            isSyncingPause = false; 
-            q('pauseToggleBtn').classList.remove('opacity-80', 'pointer-events-none');
+            _resetPauseSync();
           }
         }
 
@@ -284,6 +290,8 @@
         const pnlV = s.pnl_pct || 0; safeSet('pnl', `${fmt(pnlV, 2)}%`, `text-base font-black tracking-tight ${pnlV>=0?'text-emerald-400':'text-rose-400'}`);
         const uptime = s.uptime_sec || 0, h = Math.floor(uptime/3600).toString().padStart(2,'0'), m = Math.floor((uptime%3600)/60).toString().padStart(2,'0'), sec = Math.floor(uptime%60).toString().padStart(2,'0');
         safeSet('uptime', `UP: ${h}:${m}:${sec}`);
+
+        const pos = (s.positions && s.positions[0]) || null;
         
         const sig = s.signal || {}, sColor = sig.action === 'BUY' ? 'text-emerald-400' : sig.action === 'SELL' ? 'text-rose-400' : 'text-white';
         safeSet('signalText', sig.action || 'HOLD', `text-xl font-black uppercase tracking-tighter ${sColor}`);
@@ -311,14 +319,13 @@
           q('signalConf').style.width = `${conf}%`; 
           q('signalConf').className = `h-full transition-all duration-700 ${sig.action==='BUY'?'bg-emerald-500':sig.action==='SELL'?'bg-rose-500':'bg-slate-600'}`; 
         }
-        const pos = (s.positions && s.positions[0]) || null;
         if (q('posSide')) { q('posSide').textContent = pos?pos.side:'FLAT'; q('posSide').className = `text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${pos?(pos.side==='LONG'?'bg-emerald-500/20 text-emerald-400 border-emerald-500/30':'bg-rose-500/20 text-rose-400 border-rose-500/30'):'bg-slate-800 text-slate-500 border-slate-700'}`; }
         safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-'); safeSet('posSl', pos ? fmt(pos.sl, 5) : '-'); safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
         const mCtx = s.mtf_context || {}, m5 = mCtx['5m'] || {}, allLvls = [...(m5.support_levels || []), ...(m5.resistance_levels || [])].map(l => parseFloat(l)).filter(l => !isNaN(l)).sort((a,b)=>a-b);
         safeSet('bullStrike', (allLvls.filter(l => l > curP)[0]) ? fmt(allLvls.filter(l => l > curP)[0], 5) : 'WAITING');
         safeSet('bearStrike', (allLvls.filter(l => l < curP).reverse()[0]) ? fmt(allLvls.filter(l => l < curP).reverse()[0], 5) : 'WAITING');
-        if (q('mtfContainer')) { q('mtfContainer').innerHTML = Object.entries(mCtx).map(([tf, data]) => `<div class="flex items-center justify-between border-b border-white/5 pb-1"><span class="text-xs text-slate-500 font-black uppercase">${tf}</span><span class="text-xs font-black uppercase ${String(data.trend).includes('BULL')?'text-emerald-400':'text-rose-400'}">${data.trend}</span></div>`).join(''); }
-        if (q('statusLines')) { q('statusLines').innerHTML = (s.status_lines || []).map(line => `<div class="mb-1 text-slate-300 border-l border-white/5 pl-2">${line}</div>`).join(''); }
+        if (q('mtfContainer')) { q('mtfContainer').innerHTML = Object.entries(mCtx).map(([tf, data]) => `<div class="flex items-center justify-between border-b border-white/5 pb-1"><span class="text-xs text-slate-500 font-black uppercase">${escHtml(tf)}</span><span class="text-xs font-black uppercase ${String(data.trend).includes('BULL')?'text-emerald-400':'text-rose-400'}">${escHtml(data.trend)}</span></div>`).join(''); }
+        if (q('statusLines')) { q('statusLines').innerHTML = (s.status_lines || []).map(line => `<div class="mb-1 text-slate-300 border-l border-white/5 pl-2">${escHtml(line)}</div>`).join(''); }
         if (q('indicatorsHUD')) { const ind = s.latest_indicators || {}; q('indicatorsHUD').innerHTML = `<span class="text-slate-500">RSI: <span class="text-white font-bold">${fmt(ind.rsi_14,1)}</span></span> <span class="text-slate-500 ml-2">ADX: <span class="text-white font-bold">${fmt(ind.adx,1)}</span></span>`; }
         
         if (candleSeries && s.chart && s.chart.length > 0) { 
@@ -331,7 +338,8 @@
             close: parseFloat(c.close) 
           }));
           
-          if (JSON.stringify(chartData) !== JSON.stringify(window._lastChartData)) {
+          const chartKey = sorted.length > 0 ? (sorted[sorted.length-1].time + '|' + sorted[sorted.length-1].close) : null;
+          if (chartKey !== _lastChartKey) {
             candleSeries.setData(chartData);
             if (volumeSeries) {
               volumeSeries.setData(sorted.map(c => ({
@@ -340,17 +348,17 @@
                 color: parseFloat(c.close) >= parseFloat(c.open) ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)'
               })));
             }
-            window._lastChartData = chartData;
-            chart.timeScale().fitContent();
+            _lastChartKey = chartKey;
+            if (_chartFirstRender) {
+              chart.timeScale().fitContent();
+              _chartFirstRender = false;
+            }
           }
 
-          // TACTICAL OVERLAYS: Entry, SL, TP
-          const pos = (s.positions || [])[0];
           if (pos && pos.entry_price > 0) {
             const entry = parseFloat(pos.entry_price);
             const side = String(pos.side).toUpperCase();
             const pnl = parseFloat(pos.unrealized_pnl || 0);
-            const pnlColor = pnl >= 0 ? '#10b981' : '#f43f5e';
             
             if (!window.entryLine) window.entryLine = candleSeries.createPriceLine({ price: entry, color: '#06b6d4', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: `ENTRY (${side}) PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}` });
             else window.entryLine.applyOptions({ price: entry, title: `ENTRY (${side}) PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`, color: '#06b6d4' });
@@ -371,14 +379,20 @@
             if (window.tpLine) { candleSeries.removePriceLine(window.tpLine); window.tpLine = null; }
           }
         }
-        if (q('newsTicker') && s.ai_overlay?.headlines) { q('newsTicker').innerHTML = s.ai_overlay.headlines.map(h => `<div class="ticker__item">${h}</div>`).join(''); }
-        if (window.lucide) lucide.createIcons();
+        if (q('newsTicker') && s.ai_overlay?.headlines) { q('newsTicker').innerHTML = s.ai_overlay.headlines.map(h => `<div class="ticker__item">${escHtml(h)}</div>`).join(''); }
       } catch (err) { console.error('RenderState Error:', err); }
     }
 
     async function fetchJson(p) { const r = await fetch(p, {cache:'no-store'}); if (!r.ok) throw new Error('Fetch failed'); const t = await r.text(); return JSON.parse(t.replace(/:\s*(NaN|Infinity|-Infinity)/g, ':null')); }
     async function refresh() { try { STATE = await fetchJson('/api/state'); renderState(STATE); setConnection(true); } catch (e) { setConnection(false); } }
-    async function load() { try { const [sch, cfg] = await Promise.all([fetchJson('/api/schema'), fetchJson('/api/config')]); SCHEMA.splice(0, SCHEMA.length, ...sch); CONFIG = cfg; buildSettingsForm(cfg); } catch (e) { console.warn('Load failed', e); } refresh(); }
+    async function load() { try { const [sch, cfg] = await Promise.all([fetchJson('/api/schema'), fetchJson('/api/config')]); SCHEMA.splice(0, SCHEMA.length, ...sch); CONFIG = cfg; buildSettingsForm(cfg); lucide.createIcons(); } catch (e) { console.warn('Load failed', e); } refresh(); }
+
+    function _resetPauseSync() {
+      isSyncingPause = false;
+      if (_pauseSyncTimeout) { clearTimeout(_pauseSyncTimeout); _pauseSyncTimeout = null; }
+      const btn = q('pauseToggleBtn');
+      if (btn) btn.classList.remove('opacity-80', 'pointer-events-none');
+    }
 
     function buildSettingsForm(cfg) {
       const container = q('settingsForm'); if (!container) return;
@@ -390,79 +404,122 @@
         categories[cat].push(f);
       });
 
-      container.innerHTML = Object.entries(categories).map(([cat, fields]) => {
-        const fieldHtml = fields.map(f => {
-          const val = f.key.split('.').reduce((o,i)=>o[i], cfg);
-          let input = '';
+      container.innerHTML = '';
+      Object.entries(categories).forEach(([cat, fields]) => {
+        const section = document.createElement('div');
+        section.className = 'mb-8';
+        
+        const hdr = document.createElement('h3');
+        hdr.className = 'text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4 pb-2 border-b border-white/10 flex items-center gap-2';
+        hdr.innerHTML = `<span class="w-1 h-1 rounded-full bg-emerald-500/50"></span> ${escHtml(cat)}`;
+        section.appendChild(hdr);
+        
+        fields.forEach(f => {
+          const val = (cfg && f.key) ? f.key.split('.').reduce((o,i) => (o && typeof o === 'object') ? o[i] : undefined, cfg) : undefined;
+          const row = document.createElement('div');
+          row.className = 'mb-4 flex items-center justify-between gap-4 p-3 bg-white/5 rounded-2xl border border-white/5';
+          
+          const label = document.createElement('label');
+          label.className = 'block text-[11px] font-bold text-slate-400 uppercase tracking-tight';
+          label.textContent = f.label;
+          row.appendChild(label);
+          
+          const wrap = document.createElement('div');
+          wrap.className = 'min-w-[100px] flex justify-end';
+          
+          let input;
           if (f.type === 'bool') {
-            input = `
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" name="${f.key}" ${val?'checked':''} class="sr-only peer">
-                <div class="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500"></div>
-              </label>`;
+            const lbl = document.createElement('label');
+            lbl.className = 'relative inline-flex items-center cursor-pointer';
+            input = document.createElement('input');
+            input.type = 'checkbox';
+            input.name = f.key;
+            input.className = 'sr-only peer';
+            if (val) input.checked = true;
+            const div = document.createElement('div');
+            div.className = 'w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[""] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500';
+            lbl.appendChild(input);
+            lbl.appendChild(div);
+            wrap.appendChild(lbl);
           } else if (f.type === 'select') {
-            input = `
-              <select name="${f.key}" class="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white outline-none focus:border-emerald-500/50">
-                ${f.options.map(o=>`<option value="${o}" ${o===val?'selected':''}>${o.toUpperCase()}</option>`).join('')}
-              </select>`;
+            input = document.createElement('select');
+            input.name = f.key;
+            input.className = 'w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white outline-none focus:border-emerald-500/50';
+            (f.options || []).forEach(o => {
+              const opt = document.createElement('option');
+              opt.value = o;
+              opt.textContent = o.toUpperCase();
+              if (o === val) opt.selected = true;
+              input.appendChild(opt);
+            });
+            wrap.appendChild(input);
           } else {
-            input = `
-              <input type="number" name="${f.key}" value="${val}" step="${f.step||'any'}" class="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white outline-none focus:border-emerald-500/50">`;
+            input = document.createElement('input');
+            input.type = 'number';
+            input.name = f.key;
+            input.step = f.step || 'any';
+            input.className = 'w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white outline-none focus:border-emerald-500/50';
+            input.value = (val !== undefined && val !== null) ? val : '';
+            if (f.min !== undefined) input.min = f.min;
+            if (f.max !== undefined) input.max = f.max;
+            wrap.appendChild(input);
           }
-          return `
-            <div class="mb-4 flex items-center justify-between gap-4 p-3 bg-white/5 rounded-2xl border border-white/5">
-              <label class="block text-[11px] font-bold text-slate-400 uppercase tracking-tight">${f.label}</label>
-              <div class="min-w-[100px] flex justify-end">${input}</div>
-            </div>`;
-        }).join('');
-
-        return `
-          <div class="mb-8">
-            <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4 pb-2 border-b border-white/10 flex items-center gap-2">
-              <span class="w-1 h-1 rounded-full bg-emerald-500/50"></span>
-              ${cat}
-            </h3>
-            ${fieldHtml}
-          </div>`;
-      }).join('');
+          row.appendChild(wrap);
+          section.appendChild(row);
+        });
+        
+        container.appendChild(section);
+      });
     }
 
     q('saveSettings').onclick = async () => {
       const data = {}; q('settingsForm').querySelectorAll('input, select').forEach(el => data[el.name] = el.type === 'checkbox' ? el.checked : el.value);
-      const r = await fetch('/api/settings', { method: 'POST', body: JSON.stringify({ values: data }) });
-      if ((await r.json()).ok) { q('settingsDrawer').classList.add('translate-x-full'); q('drawerOverlay').classList.add('hidden'); load(); }
+      try {
+        const r = await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ values: data }) });
+        if ((await r.json()).ok) { q('settingsDrawer').classList.add('translate-x-full'); q('drawerOverlay').classList.add('hidden'); load(); }
+      } catch (err) { console.error('Save failed', err); }
     };
 
     q('openSettings').onclick = () => { q('settingsDrawer').classList.remove('translate-x-full'); q('drawerOverlay').classList.remove('hidden'); };
     q('closeSettings').onclick = () => { q('settingsDrawer').classList.add('translate-x-full'); q('drawerOverlay').classList.add('hidden'); };
     
     q('pauseToggleBtn').onclick = () => {
-      const btn = q('pauseToggleBtn'), text = q('pauseText'), icon = q('pauseIcon');
-      if (!btn || !text || !icon || isSyncingPause) return;
+      const btn = q('pauseToggleBtn'), textEl = q('pauseText'), iconEl = q('pauseIcon');
+      if (!btn || !textEl || !iconEl || isSyncingPause) return;
       
       const isPaused = !!(STATE.config?.execution?.paused);
       expectedPauseState = !isPaused;
       isSyncingPause = true;
 
-      text.textContent = 'SYNCING...';
-      icon.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
+      textEl.textContent = 'SYNCING...';
+      iconEl.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
       btn.classList.add('opacity-80', 'pointer-events-none');
 
-      fetch('/api/toggle-pause', { method: 'POST' })
+      _pauseSyncTimeout = setTimeout(() => {
+        _resetPauseSync();
+        if (STATE) renderState(STATE);
+      }, 8000);
+
+      fetch('/api/toggle-pause', { method: 'POST', headers: {'Content-Type': 'application/json'} })
         .then(r => r.json())
         .then(() => setTimeout(refresh, 200))
         .catch(() => {
-          isSyncingPause = false;
-          btn.classList.remove('opacity-80', 'pointer-events-none');
-          renderState(STATE); 
+          _resetPauseSync();
+          if (STATE) renderState(STATE);
         });
     };
 
-    q('emergencyExit').onclick = async () => { 
-      if (confirm('EMERGENCY: FLATTEN ALL POSITIONS?')) { 
-        const r = await fetch('/api/emergency-exit', { method: 'POST' });
-        if ((await r.json()).ok) { alert('Emergency signal sent.'); refresh(); }
-      } 
+    q('emergencyExit').onclick = async () => {
+      if (_emergencyExiting) return;
+      if (confirm('EMERGENCY: FLATTEN ALL POSITIONS?')) {
+        _emergencyExiting = true;
+        q('emergencyExit').disabled = true;
+        try {
+          const r = await fetch('/api/emergency-exit', { method: 'POST', headers: {'Content-Type': 'application/json'} });
+          if ((await r.json()).ok) { refresh(); }
+        } catch (err) { console.error('Emergency exit failed', err); }
+        setTimeout(() => { _emergencyExiting = false; q('emergencyExit').disabled = false; }, 5000);
+      }
     };
 
     async function setChartTF(tf) {
@@ -476,16 +533,22 @@
         }
       });
       try {
-        await fetch('/api/command', {
+        const r = await fetch('/api/command', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cmd: 'set_tf', tf: tf })
         });
-        setTimeout(refresh, 500);
+        if (r.ok) {
+          setTimeout(refresh, 500);
+        }
       } catch (err) { console.error('Command Error:', err); }
     }
 
-    document.addEventListener('DOMContentLoaded', () => { load(); setInterval(refresh, 2000); });
+    document.addEventListener('DOMContentLoaded', async () => { 
+      await load(); 
+      lucide.createIcons();
+      _refreshIntervalId = setInterval(refresh, 2000); 
+    });
   </script>
 </body>
 </html>

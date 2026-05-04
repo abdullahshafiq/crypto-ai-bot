@@ -5,7 +5,7 @@
 # =============================================================================
 
 symbol: "AVAX/USDC:USDC"
-timeframe: "1m"
+timeframe: "3m"
 macro_timeframe: "5m"
 
 # Market data source (spot vs futures)
@@ -55,7 +55,7 @@ execution:
   scalp_min_hold_seconds: 10
   scalp_runner_enabled: true
   scalp_runner_pullback_pct: 0.0012
-  scalp_runner_min_lock_pct: 0.0018
+  scalp_runner_min_lock_pct: 0.0025
   scalp_runner_exchange_tp_multiplier: 3.0
   ttl_exit_seconds: 600             # 2 candles minimum (was 300 = 1 candle)
 
@@ -117,16 +117,16 @@ auto_learning:
 
 # Quant Strategy Parameters
 strategy:
-  max_spread: 0.0008
+  max_spread: 0.0005
   min_conf: 0.15              # keep some selectivity, but allow more live entries
   signal_smoothing_ticks: 3
   max_ret_30s: 0.0040
-  max_ret_5s: 0.0035
+  max_ret_5s: 0.0018
   block_on_volume_spike: false
   fixed_trade_usdt: 25
-  tp_pct: 0.0025              # 0.25% scalp TP
-  sl_pct: 0.0035              # 0.35% default SL
-  max_structural_sl_pct: 0.0100  # allow SL at real structural level (up to 1%)
+  tp_pct: 0.0035              # wider TP so runner can arm on this pair
+  sl_pct: 0.0025              # tighter default SL to cut failed calls sooner
+  max_structural_sl_pct: 0.0060  # cap structural SL at 0.6%
   min_reward_risk: 0.65
   range_action_zone_pct: 0.20
   wall_veto_zone_pct: 0.12
@@ -134,7 +134,7 @@ strategy:
   resistance_veto_pct: 0.0010
   support_break_pct: 0.0010
   resistance_break_pct: 0.0010
-  max_chase_pct: 0.0050       # looser chase guard for AVAX intraday swings
+  max_chase_pct: 0.0030       # tighter chase guard
   mtf_neutral_allow_score: 0.35
   entry_min_confidence_hard: 0.20
   midrange_min_score: 0.28

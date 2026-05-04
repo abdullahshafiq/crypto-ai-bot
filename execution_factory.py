@@ -54,6 +54,12 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
     executor.reversal_min_net_edge_pct = float(exec_cfg.get("reversal_min_net_edge_pct", 0.0015))
     executor.break_even_trigger_pct = float(exec_cfg.get("break_even_trigger_pct", 0.0030))
     executor.break_even_buffer_pct = float(exec_cfg.get("break_even_buffer_pct", 0.0004))
+    executor.ttl_exit_only_if_unprofitable = bool(
+        exec_cfg.get("ttl_exit_only_if_unprofitable", getattr(executor, "ttl_exit_only_if_unprofitable", True))
+    )
+    executor.ttl_exit_profit_cap_pct = float(
+        exec_cfg.get("ttl_exit_profit_cap_pct", getattr(executor, "ttl_exit_profit_cap_pct", 0.0))
+    )
     executor.trail_tighten_1_pct = float(exec_cfg.get("trail_tighten_1_pct", 0.0050))
     executor.trail_tighten_2_pct = float(exec_cfg.get("trail_tighten_2_pct", 0.0100))
     executor.trail_t1_gap_pct = float(exec_cfg.get("trail_t1_gap_pct", getattr(executor, "trail_t1_gap_pct", 0.0025)))
@@ -95,19 +101,31 @@ def create_executor(cfg: dict, api_key: str | None, api_secret: str | None, boot
     fee_rate_cfg = float(exec_cfg.get("fee_rate", 0.0006))
     fee_rate = max(fee_rate_cfg, 0.0)
 
-    if exec_mode != "live":
-        raise RuntimeError(f"Live-only runtime requires execution.mode=live, got {exec_mode!r}.")
-    if not api_key or not api_secret or "your_testnet" in str(api_key):
-        raise RuntimeError("Live-only runtime requires real BINANCE_API_KEY and BINANCE_SECRET.")
+    is_paper = (exec_mode == "paper")
+    if not is_paper and exec_mode != "live":
+        raise RuntimeError(f"Unknown execution.mode={exec_mode!r}. Use 'live' or 'paper'.")
 
     if exec_market == "spot":
         executor = BinanceSpotExecution(
             api_key,
             api_secret,
             max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
-            is_demo=False,
+            is_demo=is_paper,
         )
+    elif is_paper:
+        # Use internal simulator for paper mode instead of forcing Binance Testnet
+        from execution import PaperFuturesExecution
+        executor = PaperFuturesExecution(
+            starting_balance_usdt=float(exec_cfg.get("paper_starting_balance_usdt", 1000)),
+            leverage=leverage,
+            fee_rate=fee_rate,
+            max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
+        )
+        executor.symbol = cfg.get("symbol", "SOL/USDC:USDC")
     else:
+        if not api_key or not api_secret:
+            raise RuntimeError("Live mode requires real BINANCE_API_KEY and BINANCE_SECRET.")
+            
         executor = BinanceFuturesExecution(
             api_key,
             api_secret,
@@ -116,9 +134,10 @@ def create_executor(cfg: dict, api_key: str | None, api_secret: str | None, boot
             max_closed_trades=int(mem_cfg.get("max_closed_trades", 5000)),
             is_demo=False,
         )
+        # Live balance check
         _ = executor.get_portfolio_value(bootstrap_price)
         if float(getattr(executor, "initial_balance", 0.0) or 0.0) <= 0:
-            raise RuntimeError("Live futures executor could not confirm account equity; refusing to trade.")
+            raise RuntimeError("Futures executor could not confirm account equity; refusing to trade.")
 
     apply_common_executor_settings(executor, cfg, fixed_trade_usdt=fixed_trade_usdt, fee_rate=fee_rate)
     return executor

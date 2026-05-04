@@ -557,16 +557,22 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     
     # We look back at the last 5 swings to see if current price is 'mitigating' an old block
     for i in range(len(swings)-1, max(0, len(swings)-5), -1):
-        block_high = swings['high'].iloc[i]
-        block_low = swings['low'].iloc[i]
+        swing_row = swings.iloc[i]
+        block_open = float(swing_row.get('open', swing_row.get('high', current_price)))
+        block_close = float(swing_row.get('close', swing_row.get('low', current_price)))
+        block_high = max(block_open, block_close)
+        block_low = min(block_open, block_close)
         if current_price >= block_low and current_price <= block_high:
             smc_score -= 0.3
             smc_label = "Inside Bearish OB"
             break
             
     for i in range(len(valleys)-1, max(0, len(valleys)-5), -1):
-        block_high = valleys['high'].iloc[i]
-        block_low = valleys['low'].iloc[i]
+        valley_row = valleys.iloc[i]
+        block_open = float(valley_row.get('open', valley_row.get('high', current_price)))
+        block_close = float(valley_row.get('close', valley_row.get('low', current_price)))
+        block_high = max(block_open, block_close)
+        block_low = min(block_open, block_close)
         if current_price >= block_low and current_price <= block_high:
             smc_score += 0.3
             smc_label = "Inside Bullish OB"
@@ -592,8 +598,11 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     # --- 5b. ORDER BLOCK MIDPOINT CONTEXT ---
     # Track the most recent block zone so the caller can demand a midpoint retest.
     for i in range(len(swings)-1, max(0, len(swings)-5), -1):
-        ob_high = float(swings['high'].iloc[i])
-        ob_low = float(swings['low'].iloc[i])
+        swing_row = swings.iloc[i]
+        ob_open = float(swing_row.get('open', swing_row.get('high', current_price)))
+        ob_close = float(swing_row.get('close', swing_row.get('low', current_price)))
+        ob_high = max(ob_open, ob_close)
+        ob_low = min(ob_open, ob_close)
         if ob_low <= current_price <= ob_high:
             ob_mid = (ob_high + ob_low) / 2.0
             ob_context = {
@@ -607,8 +616,11 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
             smc_label = "Inside Bearish OB"
             break
     for i in range(len(valleys)-1, max(0, len(valleys)-5), -1):
-        ob_high = float(valleys['high'].iloc[i])
-        ob_low = float(valleys['low'].iloc[i])
+        valley_row = valleys.iloc[i]
+        ob_open = float(valley_row.get('open', valley_row.get('high', current_price)))
+        ob_close = float(valley_row.get('close', valley_row.get('low', current_price)))
+        ob_high = max(ob_open, ob_close)
+        ob_low = min(ob_open, ob_close)
         if ob_low <= current_price <= ob_high:
             ob_mid = (ob_high + ob_low) / 2.0
             ob_context = {
@@ -1414,8 +1426,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     pivot_msg = "Gated:IndicatorsOnly"
             
     # --- 6. FINAL WEIGHTED SYNTHESIS ---
-    # Support walls should help longs and hurt shorts; resistance walls should do the opposite.
-    # Use the non-wall score to infer the current direction, then sign the wall contribution accordingly.
+    # Support walls are bullish context and resistance walls are bearish context.
+    # Keep that sign intact so a short near support is penalized, not amplified.
     score_without_sr = (
         (mr_score * weights['mr']) +
         (vwap_score * weights['vwap']) +
@@ -1435,8 +1447,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         div_bonus + # Add the Divergence Bonus Priority
         power_bonus # Add the Institutional Power Suite
     )
-    sr_directional = sr_score if score_without_sr >= 0 else -sr_score
-    total_score = score_without_sr + (sr_directional * weights['sr'])
+    total_score = score_without_sr + (sr_score * weights['sr'])
     
     # Apply context-based multipliers
     total_score *= penalty
@@ -1836,6 +1847,18 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         elif not gate_locked and wick_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
             signal["action"] = "SELL" if signal["action"] == "HOLD" or float(signal["score"]) < 0 else signal["action"]
 
+    smc_label_text = str(smc_label or "")
+    if signal["action"] == "SELL" and "Support Bounce" in smc_label_text:
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "Support bounce veto: no short at support"
+        signal["reason"] = f"{signal['reason']} | {signal['hold_reason']}"
+        gate_locked = True
+    elif signal["action"] == "BUY" and "Resist Rejection" in smc_label_text:
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "Resistance rejection veto: no long at resistance"
+        signal["reason"] = f"{signal['reason']} | {signal['hold_reason']}"
+        gate_locked = True
+
     # --- STRUCTURAL STOP LOSS ---
     # Place SL at structural level, but cap at max_structural_sl_pct
     stop_buffer = 0.0005
@@ -1919,6 +1942,15 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             signal["reason"] = f"{signal['reason']} MTFPartial"
     elif mtf_fast_bias != "NEUTRAL":
         signal["reason"] = f"{signal['reason']} MTFConfirm:{mtf_fast_bias}"
+
+    htf_4h = mtf_context.get("4h", {}) if isinstance(mtf_context, dict) else {}
+    htf_4h_trend = str(htf_4h.get("trend", "NEUT") or "NEUT").upper()
+    if signal["action"] == "SELL" and htf_4h_trend == "BULL":
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "4h BULL veto: no SHORT entries against HTF trend"
+    elif signal["action"] == "BUY" and htf_4h_trend == "BEAR":
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "4h BEAR veto: no LONG entries against HTF trend"
     
     # --- RANGE REVERSAL SNIPER MODE (DYNAMIC OUTER EDGE) ---
     # We measure the total range width and only allow entries in the configured outer zone.
@@ -1984,6 +2016,16 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             signal["action"]      = "HOLD"
             signal["hold_reason"] = "Range Gate: No S/R boundaries — reversal entry skipped."
         # TREND and BREAKOUT entries proceed freely when S/R is unavailable.
+
+    # --- ORDER BLOCK DIRECTION VETO ---
+    if signal["action"] in {"BUY", "SELL"} and isinstance(ob_context, dict):
+        ob_reason = str(ob_context.get("reason") or smc_label or "").lower()
+        if signal["action"] == "SELL" and "bullish ob" in ob_reason:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = "OB Veto: price inside Bullish OB — no short"
+        elif signal["action"] == "BUY" and "bearish ob" in ob_reason:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = "OB Veto: price inside Bearish OB — no long"
 
     return signal
 

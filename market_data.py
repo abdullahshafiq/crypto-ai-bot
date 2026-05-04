@@ -168,7 +168,12 @@ class MarketData:
         """Fetches the funding rate from binance futures."""
         try:
             symbol = self.normalize_symbol(symbol)
-            fapi = ccxt.binanceusdm()
+            if self.market == "usdm":
+                fapi = self.exchange
+            else:
+                if getattr(self, "_funding_exchange", None) is None:
+                    self._funding_exchange = ccxt.binanceusdm({'enableRateLimit': True, 'timeout': 10000})
+                fapi = self._funding_exchange
             fr = fapi.fetch_funding_rate(symbol)
             return float(fr.get('fundingRate', 0.0))
         except Exception as e:

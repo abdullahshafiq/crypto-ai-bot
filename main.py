@@ -218,8 +218,12 @@ def load_config(path: str = "config.yaml") -> dict:
         
     try:
         import json
-        if os.path.exists("ui_state.json"):
-            with open("ui_state.json", 'r') as f:
+        overrides_path = "ui_state.json"
+        if path != "config.yaml":
+            base = os.path.splitext(os.path.basename(path))[0]
+            overrides_path = f"{base}_state.json"
+        if os.path.exists(overrides_path):
+            with open(overrides_path, 'r') as f:
                 ui_state = json.load(f)
             
             for path_key, val in ui_state.items():
@@ -231,7 +235,7 @@ def load_config(path: str = "config.yaml") -> dict:
                     cur = cur[part]
                 cur[parts[-1]] = val
     except Exception as e:
-        logging.getLogger("main").warning(f"Failed to load ui_state.json overrides: {e}")
+        logging.getLogger("main").warning(f"Failed to load overrides from {overrides_path}: {e}")
         
     return cfg
 
@@ -270,7 +274,10 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
         os.system('cls' if os.name == 'nt' else 'clear')
     
     current_price = state['price']
-    val = executor.get_portfolio_value(current_price)
+    if getattr(executor, "is_paper", False):
+        val = executor.initial_balance
+    else:
+        val = executor.get_portfolio_value(current_price)
     usdt = executor._fetch_free_usdt()
     btc = executor._fetch_free_btc()
     
@@ -494,9 +501,11 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
 def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_start, status_lines, pivot_data, mtf_context, open_orders, latest_indicators, chart_bars, ai_overlay_state, cfg):
     current_price = float(state.get("price", 0.0) or 0.0) if isinstance(state, dict) else 0.0
     portfolio_value = float(getattr(executor, "initial_balance", 0.0) or 0.0)
-    try:
-        portfolio_value = float(executor.get_portfolio_value(current_price))
-    except Exception:
+    if not getattr(executor, "is_paper", False):
+        try:
+            portfolio_value = float(executor.get_portfolio_value(current_price))
+        except Exception:
+            pass
         pass
     pnl = portfolio_value - float(getattr(executor, "initial_balance", 0.0) or 0.0)
     pnl_pct = (pnl / float(executor.initial_balance) * 100.0) if float(getattr(executor, "initial_balance", 0.0) or 0.0) > 0 else 0.0
@@ -504,6 +513,20 @@ def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_s
     pending_entry = copy.deepcopy(getattr(executor, "pending_entry", None))
     pending_exit = copy.deepcopy(getattr(executor, "pending_exit", None))
     closed_trades = list(getattr(executor, "closed_trades", []) or [])[-20:]
+    realized_profit = 0.0
+    realized_loss = 0.0
+    realized_net = 0.0
+    for trade in list(getattr(executor, "closed_trades", []) or []):
+        pnl = float(trade.get("pnl", 0.0) or 0.0)
+        realized_net += pnl
+        if pnl >= 0:
+            realized_profit += pnl
+        else:
+            realized_loss += abs(pnl)
+    stats_trades = int(getattr(executor, "stats_trades", len(getattr(executor, "closed_trades", []) or [])) or 0)
+    stats_wins = int(getattr(executor, "stats_wins", 0) or 0)
+    stats_losses = int(getattr(executor, "stats_losses", 0) or 0)
+    win_rate = (stats_wins / stats_trades * 100.0) if stats_trades > 0 else 0.0
     # Calculate Unrealized PnL for active positions
     unrealized_pnl = 0.0
     total_active_cost = 0.0
@@ -525,6 +548,16 @@ def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_s
         "balance": portfolio_value,
         "pnl": pnl,
         "pnl_pct": pnl_pct,
+        "pnl_stats": {
+            "total_profit": realized_profit,
+            "total_loss": realized_loss,
+            "net_profit": realized_net,
+            "wins": stats_wins,
+            "losses": stats_losses,
+            "trades": stats_trades,
+            "win_rate": win_rate,
+            "fees": float(getattr(executor, "stats_fees", 0.0) or 0.0),
+        },
         "unrealized_pnl": unrealized_pnl,
         "unrealized_pnl_pct": unrealized_pnl_pct,
         "session_start": session_start,
@@ -548,13 +581,107 @@ def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_s
         }
     }
 
+def _fallback_bootstrap_ohlcv(symbol: str, timeframe: str, limit: int = 100) -> pd.DataFrame:
+    """
+    Offline demo fallback used only when Binance market data is unreachable.
+    Generates a minimal synthetic OHLCV history around a stable anchor so the
+    paper executor can warm up and run locally.
+    """
+    limit = max(20, int(limit or 100))
+    anchor = 9.10 if "AVAX" in str(symbol).upper() else 100.0
+    if "BTC" in str(symbol).upper():
+        anchor = 65000.0
+    now = pd.Timestamp.utcnow().floor("min")
+    try:
+        if str(timeframe).endswith("m"):
+            delta = pd.Timedelta(minutes=int(str(timeframe)[:-1] or 1))
+        elif str(timeframe).endswith("h"):
+            delta = pd.Timedelta(hours=int(str(timeframe)[:-1] or 1))
+        else:
+            delta = pd.Timedelta(minutes=1)
+    except Exception:
+        delta = pd.Timedelta(minutes=1)
+    rows = []
+    price = float(anchor)
+    for i in range(limit):
+        ts = now - delta * (limit - i)
+        drift = ((i % 7) - 3) * (anchor * 0.0002)
+        open_p = price
+        close_p = max(0.0001, price + drift)
+        high_p = max(open_p, close_p) * 1.0008
+        low_p = min(open_p, close_p) * 0.9992
+        vol = 1000.0 + (i % 10) * 25.0
+        rows.append({
+            "timestamp": ts,
+            "open": float(open_p),
+            "high": float(high_p),
+            "low": float(low_p),
+            "close": float(close_p),
+            "volume": float(vol),
+        })
+        price = close_p
+    return pd.DataFrame(rows)
+
+
+_NETWORK_FAIL_UNTIL = 0.0
+_NETWORK_COOLDOWN_SECONDS = 60.0
+
+def _runtime_fetch_ohlcv(market, symbol: str, timeframe: str, limit: int, *, paper_mode: bool, logger=None) -> pd.DataFrame:
+    """
+    Fetch OHLCV for runtime use. In paper mode, fall back to a synthetic bootstrap
+    when Binance market data is unreachable so the demo can still run locally.
+    """
+    global _NETWORK_FAIL_UNTIL
+    now = time.time()
+    if now < _NETWORK_FAIL_UNTIL:
+        if paper_mode:
+            return _fallback_bootstrap_ohlcv(symbol, timeframe, limit=limit)
+        return pd.DataFrame()
+
+    try:
+        df = market.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if df is not None and not df.empty:
+            _NETWORK_FAIL_UNTIL = 0.0
+            return df
+    except Exception as e:
+        if logger:
+            logger.debug(f"Runtime OHLCV fetch failed for {symbol} {timeframe}: {e}")
+
+    _NETWORK_FAIL_UNTIL = now + _NETWORK_COOLDOWN_SECONDS
+    if paper_mode:
+        if logger:
+            logger.warning(f"Paper runtime falling back to synthetic OHLCV for {symbol} {timeframe}.")
+        return _fallback_bootstrap_ohlcv(symbol, timeframe, limit=limit)
+    return pd.DataFrame()
+
+
+def _reapply_runtime_executor_config(executor, cfg):
+    exec_cfg = cfg.get("execution", {}) or {}
+    executor.max_open_positions = cfg["risk"].get("max_open_positions", 1)
+    executor.daily_loss_cap_pct = cfg["risk"].get("daily_loss_cap")
+    executor.min_balance_floor = float(cfg["risk"].get("min_balance_floor", 90.0))
+    leverage_cfg = cfg.get("leverage", {})
+    executor.dynamic_leverage_enabled = bool(leverage_cfg.get("enabled", False))
+    executor.leverage_min = float(leverage_cfg.get("min_leverage", 1.0))
+    executor.leverage_max = float(leverage_cfg.get("max_leverage", 4.0))
+    executor.leverage_use_score = bool(leverage_cfg.get("use_score_multiplier", False))
+    executor.leverage_score_weight = float(leverage_cfg.get("score_weight", 0.3))
+    executor.atr_volatility_scaling = bool(leverage_cfg.get("atr_volatility_scaling", False))
+    executor.atr_reference_pct = float(leverage_cfg.get("atr_reference_pct", 0.02))
+    executor.atr_min_multiplier = float(leverage_cfg.get("atr_min_multiplier", 0.3))
+    conf_levels = leverage_cfg.get("confidence_levels", {})
+    executor.leverage_confidence_levels = {float(k): float(v) for k, v in conf_levels.items()}
+    executor.dca_enabled = bool(exec_cfg.get("dca_enabled", False))
+    executor.dca_max_steps = int(exec_cfg.get("dca_max_steps", 0))
+    executor.dca_distance_pct = float(exec_cfg.get("dca_distance_pct", 0.01))
+
 def run_hybrid_bot():
     _enforce_single_instance()
     _enable_windows_vt_mode()
     
     load_dotenv()
 
-    cfg = load_config()
+    cfg = load_config(os.environ.get("BOT_CONFIG", "config.yaml"))
     setup_logging(cfg.get("logging", {}) or {})
     logger = logging.getLogger("main")
     symbol = cfg['symbol']
@@ -567,12 +694,13 @@ def run_hybrid_bot():
     if "refresh_seconds" not in ai_overlay_cfg and "overlay_refresh_seconds" in ai_overlay_cfg:
         ai_overlay_cfg = dict(ai_overlay_cfg)
         ai_overlay_cfg["refresh_seconds"] = ai_overlay_cfg.get("overlay_refresh_seconds")
+    
     ui_cfg = cfg.setdefault("ui", {})
     mem_cfg = cfg.get("memory", {}) or {}
     auto_learning_cfg = cfg.get("auto_learning", {}) or {}
 
-    api_key = os.getenv("BINANCE_API_KEY")
-    api_secret = os.getenv("BINANCE_SECRET")
+    api_key = (os.getenv("BINANCE_API_KEY") or "").strip()
+    api_secret = (os.getenv("BINANCE_SECRET") or "").strip()
 
     print("Booting up Hybrid Crypto AI Bot...")
 
@@ -608,22 +736,30 @@ def run_hybrid_bot():
     ai_orch = HybridAIOrchestrator(model=ai_model)
     
     print("Fetching historical data to warm up indicators (EMAs/RSI/VWAP)...")
-    hist_df = market.fetch_ohlcv(symbol, timeframe=cfg['timeframe'], limit=100)
+    paper_bootstrapped_synthetic = False
+    paper_mode = requested_exec_mode == "paper"
+    hist_df = _runtime_fetch_ohlcv(market, symbol, cfg['timeframe'], 100, paper_mode=paper_mode, logger=logger)
     if hist_df.empty:
         # Fallback: try the other market type once (spot <-> usdm) for convenience.
         alt_market = "spot" if getattr(market, "market", "usdm") == "usdm" else "usdm"
         alt = MarketData(market=alt_market)
-        alt_df = alt.fetch_ohlcv(symbol, timeframe=cfg['timeframe'], limit=100)
+        alt_df = _runtime_fetch_ohlcv(alt, symbol, cfg['timeframe'], 100, paper_mode=paper_mode, logger=logger)
         if not alt_df.empty:
             market = alt
             hist_df = alt_df
             print(f"Note: switched market data source to `{alt_market}` for symbol {symbol}.")
         else:
-            print(f"CRITICAL ERROR: Failed to fetch initial OHLCV data for {symbol} ({cfg['timeframe']}).")
-            print("Tip: check symbol spelling and whether it exists on Futures (usdm) vs Spot.")
-            print("Tip: try `symbol: \"BTC/USDT\"` to verify connectivity.")
-            logger.critical("Failed to fetch initial OHLCV data. Exiting.")
-            return
+            if paper_mode:
+                hist_df = _fallback_bootstrap_ohlcv(symbol, cfg['timeframe'], limit=100)
+                paper_bootstrapped_synthetic = True
+                print(f"{YELLOW}{BOLD}Paper demo bootstrapping synthetic candles for {symbol} ({cfg['timeframe']}).{RESET}")
+                logger.warning("Using synthetic OHLCV bootstrap for paper demo startup.")
+            else:
+                print(f"CRITICAL ERROR: Failed to fetch initial OHLCV data for {symbol} ({cfg['timeframe']}).")
+                print("Tip: check symbol spelling and whether it exists on Futures (usdm) vs Spot.")
+                print("Tip: try `symbol: \"BTC/USDT\"` to verify connectivity.")
+                logger.critical("Failed to fetch initial OHLCV data. Exiting.")
+                return
 
     df_indicators = calculate_base_indicators(hist_df)
     latest_indicators = (df_indicators.iloc[-2] if len(df_indicators) > 1 else df_indicators.iloc[-1]).to_dict()
@@ -660,9 +796,8 @@ def run_hybrid_bot():
     )
     executor.symbol = symbol
 
-    executor.max_open_positions = cfg['risk'].get('max_open_positions', 1)
-    executor.daily_loss_cap_pct = cfg['risk'].get('daily_loss_cap')
-    executor.min_balance_floor = float(cfg['risk'].get('min_balance_floor', 90.0))
+    if cfg.get("execution", {}).get("mode", "").lower() == "paper":
+        executor.label = "PAPER"
 
     auto_learning_enabled = bool(auto_learning_cfg.get("enabled", False))
     auto_learning_min_trades = max(50, int(auto_learning_cfg.get("min_completed_trades", 50)))
@@ -740,8 +875,7 @@ def run_hybrid_bot():
     ticks = 0
     state = None
     session_start = time.time()
-    ticks = 0
-    status_buf = deque(maxlen=20)
+    status_buf = deque(maxlen=80)
     last_reported_status = ""
     open_orders_cache = []
     mtf_context = {}
@@ -753,7 +887,6 @@ def run_hybrid_bot():
     last_ai_trade_ts = 0.0
     last_ai_trade_key = None
     last_ai_trade_resp = None
-    last_reported_status = ""
     last_reported_signal = ""
     last_learning_closed_trades = int(getattr(executor, "stats_trades", 0) or 0)
     loss_tilt_pause_until = 0.0
@@ -769,8 +902,6 @@ def run_hybrid_bot():
         "computed_at": 0.0,
     }
 
-    # Keep this bounded so long runs don't grow memory (and we only show the last few anyway).
-    status_buf = deque(maxlen=80)
     signal_history = deque(maxlen=5) # 5-second smoothing buffer
     # chart_bars initialized above
     last_chart_tf = cfg.get("timeframe", "5m")
@@ -778,7 +909,9 @@ def run_hybrid_bot():
     dashboard_cfg = cfg.get("dashboard", {}) or {}
     dashboard_runtime = None
     if dashboard_cfg.get("enabled", True):
-        dashboard_runtime = DashboardRuntime(cfg)
+        config_file = os.environ.get("BOT_CONFIG", "config.yaml")
+        overrides_file = "ui_state.json" if config_file == "config.yaml" else f"{os.path.splitext(os.path.basename(config_file))[0]}_state.json"
+        dashboard_runtime = DashboardRuntime(cfg, overrides_path=overrides_file)
         dashboard_host = dashboard_cfg.get("host", "127.0.0.1")
         dashboard_port = int(dashboard_cfg.get("port", 8080))
         dashboard_runtime.ensure_running(dashboard_host, dashboard_port)
@@ -793,13 +926,11 @@ def run_hybrid_bot():
 
             # Timeframe Switch Logic
             ui_tf = cfg.get("ui", {}).get("chart_tf", cfg.get("timeframe", "5m"))
-            with open("dashboard_debug.log", "a") as f:
-                f.write(f"{time.ctime()} | MainLoop | ui_tf: {ui_tf} | last: {last_chart_tf} | cfg_id: {id(cfg)}\n")
             if ui_tf != last_chart_tf:
                 # print(f"[DEBUG] TF Switch Detected: {last_chart_tf} -> {ui_tf}")
                 status(f"Switching Chart to {ui_tf}")
                 try:
-                    new_hist = market.fetch_ohlcv(symbol, timeframe=ui_tf, limit=100)
+                    new_hist = _runtime_fetch_ohlcv(market, symbol, ui_tf, 100, paper_mode=paper_mode, logger=logger)
                     if not new_hist.empty:
                         chart_bars.clear()
                         for _, row in new_hist.iterrows():
@@ -811,21 +942,23 @@ def run_hybrid_bot():
                             })
                         last_chart_tf = ui_tf
                         status(f"Chart TF: {ui_tf} Loaded")
+                    else:
+                        status(f"Chart TF {ui_tf}: fetch returned empty data, retrying next cycle")
                 except Exception as e:
                     logger.error(f"Failed to switch chart TF: {e}")
-                    last_chart_tf = ui_tf # Don't retry infinitely on error
 
             if ticks == 1 or ticks % indicator_refresh_interval == 0:
                 logger.info("Refreshing macro indicators...")
                 status("Refreshing indicators/MTF")
                 # Main execution OHLCV (always use bot's execution timeframe)
-                new_df = market.fetch_ohlcv(symbol, timeframe=cfg['timeframe'], limit=100)
-                macro_df = market.fetch_ohlcv(symbol, timeframe=cfg.get('macro_timeframe', '1h'), limit=100)
+                new_df = _runtime_fetch_ohlcv(market, symbol, cfg['timeframe'], 100, paper_mode=paper_mode, logger=logger)
+                macro_df = _runtime_fetch_ohlcv(market, symbol, cfg.get('macro_timeframe', '1h'), 100, paper_mode=paper_mode, logger=logger)
 
                 # Chart-specific OHLCV update (use dashboard's selected timeframe)
                 try:
-                    chart_update_df = market.fetch_ohlcv(symbol, timeframe=ui_tf, limit=5)
+                    chart_update_df = _runtime_fetch_ohlcv(market, symbol, ui_tf, 5, paper_mode=paper_mode, logger=logger)
                     if not chart_update_df.empty:
+                        seen_times = {b["time"] for b in chart_bars}
                         for _, row in chart_update_df.iterrows():
                             new_bar = {
                                 "time": int(row["timestamp"].timestamp() * 1000), 
@@ -833,15 +966,15 @@ def run_hybrid_bot():
                                 "low": float(row["low"]), "close": float(row["close"]), 
                                 "volume": float(row["volume"])
                             }
-                            # Check if this bar (at this timeframe) already exists
-                            if not any(b["time"] == new_bar["time"] for b in chart_bars):
+                            if new_bar["time"] not in seen_times:
                                 chart_bars.append(new_bar)
+                                seen_times.add(new_bar["time"])
                 except Exception as e:
                     logger.warning(f"Chart periodic update failed: {e}")
                     
                 if mtf_cfg.get("enabled", False):
                     for tf in mtf_cfg.get("timeframes", ["15m", "3h", "4h"]):
-                        htf_df = market.fetch_ohlcv(symbol, timeframe=tf, limit=200)
+                        htf_df = _runtime_fetch_ohlcv(market, symbol, tf, 200, paper_mode=paper_mode, logger=logger)
                         if htf_df.empty:
                             status(f"MTF {tf}: fetch failed")
                             continue
@@ -860,7 +993,7 @@ def run_hybrid_bot():
                 # Refresh Advanced Pivot Points from daily OHLCV (every 15 min)
                 if time.time() - last_pivot_refresh_ts >= 900 or not pivot_data:
                     try:
-                        daily_df = market.fetch_ohlcv(symbol, timeframe='1d', limit=5)
+                        daily_df = _runtime_fetch_ohlcv(market, symbol, '1d', 5, paper_mode=paper_mode, logger=logger)
                         if not daily_df.empty and len(daily_df) >= 2:
                             pivot_data = compute_advanced_pivots(daily_df)
                             last_pivot_refresh_ts = time.time()
@@ -942,6 +1075,7 @@ def run_hybrid_bot():
                 )
                 executor.symbol = symbol
                 executor.label = "LIVE"
+                _reapply_runtime_executor_config(executor, cfg)
             elif target_mode == "paper" and not is_paper_executor:
                 logger.info("Switching to PAPER execution mode as requested.")
                 try:
@@ -958,6 +1092,7 @@ def run_hybrid_bot():
                 )
                 executor.symbol = symbol
                 executor.label = "PAPER"
+                _reapply_runtime_executor_config(executor, cfg)
 
             is_paused = bool(cfg.get("execution", {}).get("paused", False))
             if is_paused:
@@ -971,8 +1106,6 @@ def run_hybrid_bot():
                         executor.close_all_positions(symbol)
                     except Exception as e:
                         logger.error(f"Error closing positions on pause: {e}")
-                time.sleep(tick_delay)
-                continue
 
             # Update executor with current ATR for volatility-based leverage
             atr_pct = latest_indicators.get('atr_pct')
@@ -1045,18 +1178,7 @@ def run_hybrid_bot():
 
             signal_df = df_indicators.iloc[:-1] if (df_indicators is not None and len(df_indicators) > 1) else df_indicators
             
-            # Dashboard Pause Logic
-            is_paused = bool(cfg.get("execution", {}).get("paused", False))
-            if is_paused:
-                signal = {
-                    "action": "HOLD",
-                    "reason": "BOT PAUSED (Manual)",
-                    "confidence": 0.0,
-                    "score": 0.0,
-                    "market_bias": "NEUTRAL"
-                }
-            else:
-                signal = generate_quant_signal(
+            signal = generate_quant_signal(
                     state,
                     latest_indicators,
                     runtime_strategy_config,
@@ -1231,7 +1353,7 @@ def run_hybrid_bot():
                         signal['reason'] += " [AI Veto: Volatile regime]"
 
                 # Re-check action after vetoes
-                if signal['action'] != "HOLD":
+            if not is_paused and signal['action'] != "HOLD":
                     entry_style = str(ai_overlay_state.get('entry_style', 'MIXED')).upper()
                     target_price = float(signal.get('entry', state['price']) or state['price'])
 
