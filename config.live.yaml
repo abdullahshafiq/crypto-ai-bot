@@ -133,6 +133,7 @@ strategy:
   max_chase_pct: 0.0030
   mtf_neutral_allow_score: 0.35
   entry_min_confidence_hard: 0.20
+  midrange_min_score: 0.28
   entry_near_resistance_block_pct: 0.0030
   entry_near_support_block_pct: 0.0030
   macd_noise_threshold: 0.00005
