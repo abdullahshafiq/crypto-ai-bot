@@ -182,10 +182,24 @@ def _default_sl_price(side: str, entry: float, sl_pct: float) -> float:
     return entry * (1 - sl_pct) if side in {"LONG", "BUY"} else entry * (1 + sl_pct)
 
 
-def _safe_initial_sl_price(side: str, entry: float, proposed_sl, sl_pct: float) -> float:
+def _pivot_guarded_sl_price(side: str, entry: float, sl: float, pivot_classic=None) -> float:
+    side_u = str(side or "").upper()
+    if side_u not in {"SHORT", "SELL"} or not isinstance(pivot_classic, dict):
+        return sl
+    try:
+        r1 = float(pivot_classic.get("r1", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        r1 = 0.0
+    if entry > 0 and r1 > entry and sl < r1 * 1.001:
+        return r1 * 1.002
+    return sl
+
+
+def _safe_initial_sl_price(side: str, entry: float, proposed_sl, sl_pct: float, pivot_classic=None) -> float:
     side_u = str(side or "").upper()
     entry = float(entry)
     default_sl = _default_sl_price(side_u, entry, sl_pct)
+    default_sl = _pivot_guarded_sl_price(side_u, entry, default_sl, pivot_classic)
     min_dist_pct = abs(float(sl_pct or 0.0030))
     try:
         sl = float(proposed_sl)
@@ -206,7 +220,7 @@ def _safe_initial_sl_price(side: str, entry: float, proposed_sl, sl_pct: float) 
         if ((sl - entry) / entry) < min_dist_pct:
             return default_sl
 
-    return sl
+    return _pivot_guarded_sl_price(side_u, entry, sl, pivot_classic)
 
 
 def _safe_tp_price(side: str, entry: float, proposed_tp=None, tp_pct: float = 0.0025) -> float:
@@ -1439,6 +1453,7 @@ class BinanceFuturesExecution:
                     pending_tp = None
                     pending_support = None
                     pending_resistance = None
+                    pending_pivot_classic = None
                     pending_trade_id = 0
                     pending_score = 0.0
                     pending_confidence = 0.0
@@ -1451,6 +1466,7 @@ class BinanceFuturesExecution:
                             pending_tp = pending_entry.get("tp")
                             pending_support = pending_entry.get("structure_support")
                             pending_resistance = pending_entry.get("structure_resistance")
+                            pending_pivot_classic = pending_entry.get("pivot_classic")
                             pending_trade_id = int(pending_entry.get("trade_id", 0) or 0)
                             pending_score = float(pending_entry.get("score", 0.0) or 0.0)
                             pending_confidence = float(pending_entry.get("confidence", 0.0) or 0.0)
@@ -1461,6 +1477,7 @@ class BinanceFuturesExecution:
                         entry_price,
                         pending_sl,
                         getattr(self, 'default_sl_pct', 0.0030),
+                        pending_pivot_classic,
                     )
                     tp_price = _safe_tp_price(
                         exch_side,
@@ -1874,6 +1891,7 @@ class BinanceFuturesExecution:
                             fill_price,
                             pending_entry.get("sl", default_sl),
                             getattr(self, 'default_sl_pct', 0.0030),
+                            pending_entry.get("pivot_classic"),
                         )
                         try:
                             tp_price = float(pending_entry.get("tp")) if pending_entry.get("tp") else None
@@ -2217,6 +2235,7 @@ class BinanceFuturesExecution:
                             float(price_str),
                             signal.get('sl'),
                             getattr(self, 'default_sl_pct', 0.0030),
+                            signal.get('pivot_classic'),
                         ),
                         'tp': signal.get('tp'),
                         'hold_until_ts': float(signal.get("hold_until_ts", 0.0) or 0.0),
@@ -2225,6 +2244,7 @@ class BinanceFuturesExecution:
                         'reason': str(signal.get("reason", "") or ""),
                         'structure_support': signal.get('structure_support'),
                         'structure_resistance': signal.get('structure_resistance'),
+                        'pivot_classic': signal.get('pivot_classic'),
                         'ttl_seconds': float(signal.get("pending_entry_ttl_seconds", getattr(self, "pending_entry_ttl_seconds", 20)) or getattr(self, "pending_entry_ttl_seconds", 20)),
                         'resting_entry': bool(resting_price > 0),
                     }
@@ -2268,6 +2288,7 @@ class BinanceFuturesExecution:
                 real_entry_price,
                 signal.get('sl'),
                 getattr(self, 'default_sl_pct', 0.0030),
+                signal.get('pivot_classic'),
             )
             logger.info(f"Using internal dynamic stop logic. Initial soft SL set at {sl_price:.4f}")
             try:
@@ -3445,6 +3466,7 @@ class PaperFuturesExecution:
                 simulated_entry_price,
                 signal.get('sl'),
                 getattr(self, 'default_sl_pct', 0.0030),
+                signal.get('pivot_classic'),
             )
             sl_dist = abs(simulated_entry_price - sl_price) / simulated_entry_price if simulated_entry_price else float(getattr(self, 'default_sl_pct', 0.0030))
             try:

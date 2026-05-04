@@ -44,19 +44,19 @@ TUNING = {
 # MASTER SIGNAL WEIGHTS (Institutional Tuning - Scalp Optimized)
 SIGNAL_WEIGHTS = {
     'mr': 0.05,    # Mean Reversion (EMA 21/50)
-    'ob': 0.08,    # Order Book Pressure
-    'vwap': 0.08,  # Volume Weighted Average Price
+    'ob': 0.14,    # Order Book Pressure
+    'vwap': 0.12,  # Volume Weighted Average Price
     'adx': 0.08,   # Trend Strength
     'vol': 0.08,   # Volume Delta
     'obv': 0.05,   # Accumulation / distribution flow
     'bb': 0.03,    # Bollinger Band Exhaustion
-    'macd': 0.30,  # Momentum Authority
-    'pa': 0.30,    # Price Action / SAR Authority
+    'macd': 0.18,  # Momentum Authority
+    'pa': 0.20,    # Price Action / SAR Authority
     'smc': 0.05,   # Market Structure
     'sr': 0.02,    # Support/Resistance Walls
     'loc': 0.08,   # Market location / session context
     'kdj': 0.03,   # Stochastic Momentum
-    'st': 0.25,    # EMA Trend Authority
+    'st': 0.22,    # EMA Trend Authority
 }
 # Normalize to 1.0 (sum was 1.40 — inflating all scores by 40%)
 _weight_total = sum(SIGNAL_WEIGHTS.values())
@@ -256,6 +256,131 @@ def calculate_funding_impact(latest_macro: dict) -> float:
         
     return impact
 
+def _detect_momentum_exhaustion(df: pd.DataFrame) -> str:
+    """Detect momentum deceleration before MACD fully flips."""
+    if df is None or len(df) < 4:
+        return "NONE"
+
+    recent = df.iloc[-4:].copy()
+    roc = recent["close"].pct_change()
+    if roc.isna().sum() > 1:
+        return "NONE"
+
+    roc_vals = roc.iloc[-3:].fillna(0.0).tolist()
+    if len(roc_vals) < 3:
+        return "NONE"
+
+    closes = recent["close"].tolist()
+    price_up = closes[-1] > closes[-3]
+    price_down = closes[-1] < closes[-3]
+
+    bull_exhaust = price_up and roc_vals[-1] < roc_vals[-2] < roc_vals[-3]
+    bear_exhaust = price_down and roc_vals[-1] > roc_vals[-2] > roc_vals[-3]
+
+    if bull_exhaust:
+        return "BULL_EXHAUST"
+    if bear_exhaust:
+        return "BEAR_EXHAUST"
+    return "NONE"
+
+def _body_range_ratio_score(df: pd.DataFrame, lookback: int = 3) -> float:
+    """Signed conviction score from candle body-to-range efficiency."""
+    if df is None or len(df) < max(lookback, 3):
+        return 0.0
+
+    recent = df.iloc[-lookback:].copy()
+    ranges = (recent["high"] - recent["low"]).replace(0, np.nan)
+    bodies = (recent["close"] - recent["open"]).abs()
+    ratios = (bodies / (ranges + 1e-9)).replace([np.inf, -np.inf], np.nan).dropna()
+    if ratios.empty:
+        return 0.0
+
+    avg_ratio = float(np.clip(ratios.mean(), 0.0, 1.0))
+    net_move = float(recent["close"].iloc[-1] - recent["open"].iloc[0])
+    if abs(net_move) < 1e-12:
+        return 0.0
+
+    direction = 1.0 if net_move > 0 else -1.0
+    conviction = max(0.0, (avg_ratio - 0.30) / 0.40)
+    if conviction <= 0.0:
+        return 0.0
+    return float(np.clip(direction * conviction, -1.0, 1.0))
+
+def _compute_vpoc(df: pd.DataFrame, lookback: int = 50) -> float:
+    """Approximate a VPOC from OHLCV midpoint weighted by volume."""
+    if df is None or len(df) < 3:
+        return 0.0
+
+    recent = df.iloc[-lookback:].copy()
+    midpoints = (recent["high"] + recent["low"]) / 2.0
+    volumes = recent["volume"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    if float(volumes.sum()) <= 0:
+        return float(midpoints.iloc[-1])
+
+    try:
+        return float(np.average(midpoints.fillna(method="ffill").fillna(method="bfill"), weights=volumes))
+    except Exception:
+        return float(midpoints.iloc[-1])
+
+def _compute_anchored_vwap(df: pd.DataFrame) -> float:
+    """Approximate a session-anchored VWAP using the current UTC day if available."""
+    if df is None or len(df) < 2:
+        return 0.0
+
+    recent = df.copy()
+    if "timestamp" in recent.columns:
+        try:
+            ts = pd.to_datetime(recent["timestamp"], utc=True, errors="coerce")
+            if ts.notna().any():
+                day_start = ts.dt.floor("D").iloc[-1]
+                day_mask = ts >= day_start
+                day_df = recent.loc[day_mask].copy()
+                if len(day_df) >= 2:
+                    recent = day_df
+        except Exception:
+            pass
+
+    typical = (recent["high"] + recent["low"] + recent["close"]) / 3.0
+    vol = recent["volume"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    vol_sum = float(vol.sum())
+    if vol_sum <= 0:
+        return float(typical.iloc[-1])
+    try:
+        return float(np.average(typical.fillna(method="ffill").fillna(method="bfill"), weights=vol))
+    except Exception:
+        return float(typical.iloc[-1])
+
+def _compute_cvd(df: pd.DataFrame) -> pd.Series:
+    """Approximate cumulative volume delta from OHLCV candles."""
+    if df is None or len(df) < 2:
+        return pd.Series(dtype=float)
+
+    rng = (df["high"] - df["low"]).replace(0, np.nan)
+    buy_vol = (((df["close"] - df["low"]) / (rng + 1e-9)).clip(0.0, 1.0) * df["volume"].fillna(0.0)).fillna(0.0)
+    sell_vol = (((df["high"] - df["close"]) / (rng + 1e-9)).clip(0.0, 1.0) * df["volume"].fillna(0.0)).fillna(0.0)
+    cvd = (buy_vol - sell_vol).cumsum()
+    return cvd
+
+def _detect_cvd_divergence(df: pd.DataFrame) -> tuple[str, float]:
+    """Detect simple CVD divergence against price swings."""
+    if df is None or len(df) < 10:
+        return "NONE", 0.0
+
+    cvd = _compute_cvd(df)
+    if cvd.empty or len(cvd) < 6:
+        return "NONE", 0.0
+
+    price_now = float(df["close"].iloc[-1])
+    price_prev = float(df["close"].iloc[-5])
+    cvd_now = float(cvd.iloc[-1])
+    cvd_prev = float(cvd.iloc[-5])
+
+    if price_now > price_prev and cvd_now < cvd_prev:
+        return "BEARISH", -0.18
+    if price_now < price_prev and cvd_now > cvd_prev:
+        return "BULLISH", 0.18
+    return "NONE", 0.0
+
 def generate_alpha_overlay(df: pd.DataFrame, smc_score: float, macro_bias: str) -> float:
     """
     MASTER RECONSTRUCTION: Alpha Overlay Engine.
@@ -339,7 +464,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     Mitigation Zones, Fair Value Gaps (FVG), and Institutional S/R Walls.
     """
     if len(df) < 50: 
-        return 0.0, 0.0, "Warming Engine"
+        return 0.0, 0.0, "Warming Engine", {"active": False, "direction": "NEUTRAL", "mid": None, "high": None, "low": None}
 
     df = df.copy()
     
@@ -355,7 +480,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     valleys = df[df['low'] == df['swing_low']].copy()
     
     if len(swings) < 3 or len(valleys) < 3:
-        return 0.0, 0.0, "Building Structure"
+        return 0.0, 0.0, "Building Structure", {"active": False, "direction": "NEUTRAL", "mid": None, "high": None, "low": None}
 
     # Precise structural price points
     last_high = swings['high'].iloc[-1]
@@ -367,6 +492,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
 
     smc_score = 0.0
     smc_label = "Neutral"
+    ob_context = {"active": False, "direction": "NEUTRAL", "mid": None, "high": None, "low": None, "reason": ""}
 
     # --- 2. STRUCTURAL BREAKS (BOS / CHoCH) ---
     # Break of Structure (BOS): Trend continuation signals.
@@ -389,6 +515,19 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
         else:
             smc_score = -1.3
             smc_label = "CHoCH Bearish (Flip)"
+
+    # Inducement / fake-break filter:
+    # If the CHoCH candle is mostly wick and not body, downgrade confidence.
+    if "CHoCH" in smc_label and len(df) >= 2:
+        break_candle = df.iloc[-1]
+        body = abs(float(break_candle["close"]) - float(break_candle["open"]))
+        body = max(body, max(float(break_candle["close"]) * 0.00005, 1e-9))
+        upper_wick = float(break_candle["high"]) - max(float(break_candle["open"]), float(break_candle["close"]))
+        lower_wick = min(float(break_candle["open"]), float(break_candle["close"])) - float(break_candle["low"])
+        wick = max(upper_wick, lower_wick)
+        if wick > body * 2.0:
+            smc_score *= 0.4
+            smc_label += " (Inducement?)"
 
     # --- 3. FAIR VALUE GAPS (FVG) / LIQUIDITY VOIDS ---
     # Detecting gaps where price moved too fast, creating an imbalance.
@@ -450,6 +589,39 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
         smc_score -= 0.5
         smc_label = "Institutional Resist Rejection"
 
+    # --- 5b. ORDER BLOCK MIDPOINT CONTEXT ---
+    # Track the most recent block zone so the caller can demand a midpoint retest.
+    for i in range(len(swings)-1, max(0, len(swings)-5), -1):
+        ob_high = float(swings['high'].iloc[i])
+        ob_low = float(swings['low'].iloc[i])
+        if ob_low <= current_price <= ob_high:
+            ob_mid = (ob_high + ob_low) / 2.0
+            ob_context = {
+                "active": True,
+                "direction": "BEARISH",
+                "mid": ob_mid,
+                "high": ob_high,
+                "low": ob_low,
+                "reason": "Inside Bearish OB",
+            }
+            smc_label = "Inside Bearish OB"
+            break
+    for i in range(len(valleys)-1, max(0, len(valleys)-5), -1):
+        ob_high = float(valleys['high'].iloc[i])
+        ob_low = float(valleys['low'].iloc[i])
+        if ob_low <= current_price <= ob_high:
+            ob_mid = (ob_high + ob_low) / 2.0
+            ob_context = {
+                "active": True,
+                "direction": "BULLISH",
+                "mid": ob_mid,
+                "high": ob_high,
+                "low": ob_low,
+                "reason": "Inside Bullish OB",
+            }
+            smc_label = "Inside Bullish OB"
+            break
+
     # --- 6. S/R WALL LOGIC (Wall Detection) ---
     sr_score = 0.0
     # Combine the most recent significant structural points
@@ -476,7 +648,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
         sr_score = -1.5  # Massive resistance. Veto for longs!
         smc_label += " (Near Resistance Wall)"
 
-    return smc_score, sr_score, smc_label
+    return smc_score, sr_score, smc_label, ob_context
 
 def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
     """
@@ -485,10 +657,30 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
     instead of rolling window absolute min/max which misses recent pivots.
     """
     if df is None or len(df) < 50:
-        return {"trend": "NEUT", "support_levels": [], "resistance_levels": [], "s_dist": "-", "r_dist": "-"}
+        return {
+            "trend": "NEUT",
+            "support_levels": [],
+            "resistance_levels": [],
+            "s_dist": "-",
+            "r_dist": "-",
+            "rsi_14": 50.0,
+            "rsi_14_prev": 50.0,
+            "macd": 0.0,
+            "macd_prev": 0.0,
+            "macd_signal": 0.0,
+            "macd_diff": 0.0,
+            "macd_diff_prev": 0.0,
+            "ema_9": 0.0,
+            "ema_21": 0.0,
+            "ema_21_prev": 0.0,
+            "high": 0.0,
+            "low": 0.0,
+            "structure": "NEUTRAL",
+        }
         
     ema_9 = ta.trend.ema_indicator(df['close'], window=9).iloc[-1]
     ema_21 = ta.trend.ema_indicator(df['close'], window=21).iloc[-1]
+    rsi_series = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
     current_price = df['close'].iloc[-1]
     
     # --- Swing Detection: vectorized rolling window (was O(n²) nested loop) ---
@@ -577,6 +769,8 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
         "resistance_levels": all_resistances,
         "s_dist": f"{s_dist:+.1f}%",
         "r_dist": f"{r_dist:+.1f}%",
+        "rsi_14": float(rsi_series.iloc[-1]),
+        "rsi_14_prev": float(rsi_series.iloc[-2]),
         "macd": float(macd_val),
         "macd_prev": float(macd_prev),
         "macd_signal": float(macd_sig),
@@ -686,6 +880,8 @@ def _compute_market_location_score(
     current_price: float,
     support: float = None,
     resistance: float = None,
+    vpoc: float = None,
+    anchored_vwap: float = None,
     state: dict = None,
     latest_indicators: dict = None,
     strategy_config: dict = None,
@@ -729,6 +925,8 @@ def _compute_market_location_score(
         "previous_low": previous_low,
         "control_zone": control_zone,
         "average_zone": average_zone,
+        "vpoc": _clean(vpoc),
+        "anchored_vwap": _clean(anchored_vwap),
         "support": _clean(support),
         "resistance": _clean(resistance),
     }
@@ -774,6 +972,35 @@ def _compute_market_location_score(
         elif dist_to_resistance >= resistance_far_pct:
             loc_score += 0.04
             notes.append("Far From Resistance")
+
+    vpoc = _clean(vpoc)
+    vpoc_near_pct = float(strategy_config.get("vpoc_near_pct", 0.0010) or 0.0010)
+    vpoc_break_pct = float(strategy_config.get("vpoc_break_pct", 0.0015) or 0.0015)
+    if vpoc > 0 and current_price > 0:
+        dist_to_vpoc = abs(current_price - vpoc) / vpoc
+        if dist_to_vpoc <= vpoc_near_pct:
+            loc_score -= 0.08
+            notes.append("Near VPOC")
+        elif current_price > vpoc and (current_price - vpoc) / vpoc >= vpoc_break_pct:
+            loc_score += 0.05
+            notes.append("Above VPOC")
+        elif current_price < vpoc and (vpoc - current_price) / vpoc >= vpoc_break_pct:
+            loc_score -= 0.05
+            notes.append("Below VPOC")
+
+    anchored_vwap = _clean(anchored_vwap)
+    avwap_near_pct = float(strategy_config.get("anchored_vwap_near_pct", 0.0010) or 0.0010)
+    if anchored_vwap > 0 and current_price > 0:
+        dist_to_avwap = abs(current_price - anchored_vwap) / anchored_vwap
+        if dist_to_avwap <= avwap_near_pct:
+            loc_score -= 0.05
+            notes.append("Near Anchored VWAP")
+        elif current_price > anchored_vwap:
+            loc_score += 0.03
+            notes.append("Above Anchored VWAP")
+        else:
+            loc_score -= 0.03
+            notes.append("Below Anchored VWAP")
 
     loc_score = float(np.clip(loc_score, -0.6, 0.6))
     return loc_score, " | ".join(notes) if notes else "Neutral", levels
@@ -880,8 +1107,11 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     resistance_veto_pct = float(strategy_config.get("resistance_veto_pct", 0.0015) or 0.0015)
     spread_pct = float(state.get("spread_pct", 0.0) or 0.0)
     max_spread = float(strategy_config.get("max_spread", 0.0007) or 0.0007)
-    if spread_pct > max_spread:
-        return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Spread guard ({spread_pct:.4%}>{max_spread:.4%})", "weights": {}}
+    atr_pct_now = float(latest_indicators.get("atr_pct", 0.5) or 0.5) / 100.0
+    spread_atr_ratio_max = float(strategy_config.get("spread_atr_ratio_max", 0.15) or 0.15)
+    dynamic_max_spread = max(max_spread, atr_pct_now * spread_atr_ratio_max)
+    if spread_pct > dynamic_max_spread:
+        return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Spread/ATR guard ({spread_pct:.4%}>{dynamic_max_spread:.4%})", "weights": {}}
     ret_30s = state.get("ret_30s")
     max_ret_30s = float(strategy_config.get("max_ret_30s", 0.0050) or 0.0050)
     if isinstance(ret_30s, (int, float)) and abs(float(ret_30s)) > max_ret_30s:
@@ -898,6 +1128,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     else:
         macro_bias = str(latest_macro or "NEUTRAL").upper()
     support, resistance = _pick_structural_levels(current_price, mtf_context=mtf_context, pivot_data=pivot_data)
+    vpoc = _compute_vpoc(df_indicators)
+    anchored_vwap = _compute_anchored_vwap(df_indicators)
     last_close = float(df_indicators['close'].iloc[-1]) if len(df_indicators) else float(current_price)
     wall_state = _compute_wall_state(
         current_price=current_price,
@@ -910,6 +1142,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         current_price,
         support=support,
         resistance=resistance,
+        vpoc=vpoc,
+        anchored_vwap=anchored_vwap,
         state=state,
         latest_indicators=latest_indicators,
         strategy_config=strategy_config,
@@ -952,18 +1186,49 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             mtf_fast_bias = "LONG_ONLY"
         elif bear_votes >= min_agree:
             mtf_fast_bias = "SHORT_ONLY"
+
+    mtf_rsi_score = 0.0
+    mtf_rsi_bias = "NEUTRAL"
+    if mtf_config and mtf_config.get("enabled", False) and isinstance(mtf_context, dict):
+        rsi_bull_level = float(strategy_config.get("mtf_rsi_bull_level", 55) or 55)
+        rsi_bear_level = float(strategy_config.get("mtf_rsi_bear_level", 45) or 45)
+        rsi_min_agree = int(strategy_config.get("mtf_rsi_min_agree", 2) or 2)
+        rsi_min_agree = max(1, min(4, rsi_min_agree))
+        rsi_checks = [
+            ("3m", 0.30),
+            ("5m", 0.25),
+            ("15m", 0.25),
+            ("1h", 0.20),
+        ]
+        bull_votes = 0
+        bear_votes = 0
+        for tf, weight in rsi_checks:
+            ctx = mtf_context.get(tf)
+            if not isinstance(ctx, dict):
+                continue
+            try:
+                rsi_val = float(ctx.get("rsi_14", 50.0) or 50.0)
+            except (TypeError, ValueError):
+                continue
+            if rsi_val >= rsi_bull_level:
+                mtf_rsi_score += weight
+                bull_votes += 1
+            elif rsi_val <= rsi_bear_level:
+                mtf_rsi_score -= weight
+                bear_votes += 1
+        if bull_votes >= rsi_min_agree:
+            mtf_rsi_bias = "BULLISH"
+        elif bear_votes >= rsi_min_agree:
+            mtf_rsi_bias = "BEARISH"
     
     # --- 3. PRIMARY SIGNAL CALCULATION ---
     # Structural & SMC Bias
-    smc_score, sr_score, smc_label = detect_smc_and_sr(df_indicators, current_price)
+    smc_score, sr_score, smc_label, ob_context = detect_smc_and_sr(df_indicators, current_price)
     
     # Mean Reversion (MR) - Enhanced with Z-Score & RSI
     # Identifies statistically overextended price action likely to snap back.
     ema_9 = latest_indicators.get('ema_9', current_price)
     ema_21 = latest_indicators.get('ema_21', current_price)
-    
-    # Compute ATR early — needed by chase guard below
-    atr_pct_now = float(latest_indicators.get("atr_pct", 0.5) or 0.5) / 100.0
     
     # ANTI-CHASING GUARD: Prevent entering when EMAs already diverged (move already started)
     ema_dist_pct = abs(ema_9 - ema_21) / ema_21
@@ -1034,6 +1299,16 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # Fallback/Base score
     if macd_score == 0:
         macd_score = np.sign(macd_diff) if abs(macd_diff) > 0.0001 else 0.0
+
+    # --- EARLY DIVERGENCE / EXHAUSTION DETECTION ---
+    divergence_state = _detect_macd_divergence(df_indicators)
+    bear_div = divergence_state == "BEARISH"
+    bull_div = divergence_state == "BULLISH"
+    hidden_bull_div = divergence_state == "HIDDEN_BULLISH"
+    hidden_bear_div = divergence_state == "HIDDEN_BEARISH"
+    cvd_state, cvd_bonus = _detect_cvd_momentum_divergence(df_indicators)
+    momentum_exhaustion = _detect_momentum_exhaustion(df_indicators)
+    body_ratio_score = _body_range_ratio_score(df_indicators, lookback=3)
         
     # --- INSTITUTIONAL POWER SUITE (ALPHA) ---
     power_bonus = 0.0
@@ -1062,15 +1337,22 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if bb_width_now > bb_width_prev * 1.05:
             power_bonus += 0.20  # breakout confirmed
 
-    # --- DIVERGENCE DETECTION (Early - needed by div_bonus) ---
-    divergence_state = _detect_macd_divergence(df_indicators)
-    bear_div = divergence_state == "BEARISH"
-    bull_div = divergence_state == "BULLISH"
+    # 4. Candle conviction and MTF RSI confluence
+    power_bonus += body_ratio_score * 0.18
+    power_bonus += mtf_rsi_score * 0.12
 
     # --- DIVERGENCE BONUS (ALPHA) ---
     div_bonus = 0.0
     if bull_div: div_bonus += 0.25
     if bear_div: div_bonus -= 0.25
+    if hidden_bull_div: div_bonus += 0.18
+    if hidden_bear_div: div_bonus -= 0.18
+    if cvd_bonus != 0.0:
+        div_bonus += cvd_bonus
+    if momentum_exhaustion == "BULL_EXHAUST":
+        div_bonus -= 0.12
+    elif momentum_exhaustion == "BEAR_EXHAUST":
+        div_bonus += 0.12
 
     # --- HIGH TIMEFRAME STRICT BIAS (1H / 4H) ---
     # Keep this as low-weight background context.
@@ -1132,7 +1414,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     pivot_msg = "Gated:IndicatorsOnly"
             
     # --- 6. FINAL WEIGHTED SYNTHESIS ---
-    total_score = (
+    # Support walls should help longs and hurt shorts; resistance walls should do the opposite.
+    # Use the non-wall score to infer the current direction, then sign the wall contribution accordingly.
+    score_without_sr = (
         (mr_score * weights['mr']) +
         (vwap_score * weights['vwap']) +
         (adx_score * weights['adx']) +
@@ -1143,7 +1427,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         (macd_score * weights['macd']) +
         (pa_score * weights['pa']) +
         (smc_score * weights['smc']) +
-        (sr_score * weights['sr']) +
         (location_score * weights['loc']) +
         (kdj_score * weights['kdj']) +
         (st_score * weights['st']) +
@@ -1152,6 +1435,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         div_bonus + # Add the Divergence Bonus Priority
         power_bonus # Add the Institutional Power Suite
     )
+    sr_directional = sr_score if score_without_sr >= 0 else -sr_score
+    total_score = score_without_sr + (sr_directional * weights['sr'])
     
     # Apply context-based multipliers
     total_score *= penalty
@@ -1175,6 +1460,29 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # Cap score to [-1, 1] — prevents unbounded additive bonuses inflating confidence
     total_score = float(np.clip(total_score, -1.0, 1.0))
 
+    if atr_pct_now < atr_min * 2.0:
+        low_vol_min_score = float(strategy_config.get("low_vol_min_score", 0.45) or 0.45)
+        if abs(total_score) < low_vol_min_score:
+            return {
+                "action": "HOLD",
+                "score": total_score,
+                "confidence": min(abs(total_score), 1.0),
+                "reason": f"Low vol: need score >= {low_vol_min_score:.2f}",
+                "weights": {},
+            }
+
+    session_blocked, utc_hour, blocked_hours = _session_blackout_state(strategy_config)
+    if session_blocked:
+        session_min_score = float(strategy_config.get("session_block_min_score", 0.35) or 0.35)
+        if abs(total_score) < session_min_score:
+            return {
+                "action": "HOLD",
+                "score": total_score,
+                "confidence": min(abs(total_score), 1.0),
+                "reason": f"Session filter UTC{utc_hour:02d}: need score >= {session_min_score:.2f}",
+                "weights": {},
+            }
+
     # --- 7. SIGNAL INTEGRITY (Indicators Only) ---
     action = "HOLD"
     if total_score > 0.05: action = "BUY"
@@ -1190,6 +1498,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     psar_val = latest_indicators.get('psar')
     macd_val = float(latest_indicators.get('macd', 0) or 0)
     macd_diff_val = float(latest_indicators.get('macd_diff', 0) or 0)
+    price_above_ema9 = current_price > ema_9_val
+    price_below_ema9 = current_price < ema_9_val
     
     # Noise Channel Threshold: Ignore signals too close to the zero line.
     # For DOGE at $0.11, 0.0001 is a meaningful filter (similar to 0.5 on Forex)
@@ -1348,7 +1658,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if in_action_zone:
             # AGGRESSIVE SCALP MODE: In the Strike Zone, we use the EMA 9 line as a dynamic barrier.
             # We also check for Volume Surge and RSI overextension for high-conviction reversals.
-            price_above_ema9 = current_price > ema_9_val
             macd_fast_bull = macd_diff_val > 0
             macd_fast_bear = macd_diff_val < 0
             
@@ -1379,9 +1688,29 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                 if mtf_macd_bull and mtf_structure_bull and not bear_div:
                     action = "HOLD"
                     hold_reason = "MTF Gate: 15m/10m MACD bullish with higher-low structure"
-                if not (not price_above_ema9 and bear_momentum):
+                if not (price_below_ema9 and bear_momentum):
                     action = "HOLD"
                     hold_reason = "Strike Zone: Waiting for Price<EMA9 + Bear Momentum (SAR/Hist/RSI)"
+        
+        ob_active = bool(ob_context.get("active"))
+        ob_mid = ob_context.get("mid")
+        ob_dir = str(ob_context.get("direction", "NEUTRAL") or "NEUTRAL").upper()
+        if action in {"BUY", "SELL"} and ob_active and ob_mid:
+            ob_mid = float(ob_mid)
+            ob_mid_tolerance = float(strategy_config.get("ob_midpoint_tolerance_pct", 0.0015) or 0.0015)
+            near_ob_mid = abs(current_price - ob_mid) / ob_mid <= ob_mid_tolerance
+            if action == "BUY" and ob_dir == "BULLISH":
+                if not near_ob_mid:
+                    action = "HOLD"
+                    hold_reason = f"OB Gate: wait for 50% bullish OB retest near {ob_mid:.3f}"
+                else:
+                    signal_reason_suffix += " [OB Mid Retest]"
+            elif action == "SELL" and ob_dir == "BEARISH":
+                if not near_ob_mid:
+                    action = "HOLD"
+                    hold_reason = f"OB Gate: wait for 50% bearish OB retest near {ob_mid:.3f}"
+                else:
+                    signal_reason_suffix += " [OB Mid Retest]"
         else:
             # CONSERVATIVE TREND MODE: Outside Strike Zone, require full triple confirmation (EMA Cross + SAR + MACD Zero)
             ema_cross_bull = ema_9_val > ema_21_val
@@ -1429,7 +1758,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         f"{signal_reason_suffix} | Score:{total_score:.3f} SMC:{smc_label} Pivot:{pivot_msg} MTF:{mtf_fast_bias} "
         f"(MR:{mr_score:.1f} OB:{smc_score:.1f} SR:{sr_score:.1f} VWAP:{vwap_score:.1f} ADX:{adx_score:.1f} "
         f"LOC:{location_score:.1f} VOL:{volume_delta:.1f} OBV:{obv_score:.1f} BB:{bb_score:.1f} MACD:{macd_score:.1f} PA:{pa_score:.1f} "
-        f"KDJ:{kdj_score:.1f} ST:{st_score:.1f} DIV:{divergence_state})"
+        f"KDJ:{kdj_score:.1f} ST:{st_score:.1f} DIV:{divergence_state} CVD:{cvd_state} EXH:{momentum_exhaustion} "
+        f"RSI:{mtf_rsi_bias} BR:{body_ratio_score:.2f})"
     )
 
     # Exit Rule: Trigger closure if SAR flips
@@ -1444,13 +1774,24 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         "psar_exit": True if psar_streak != 0 else False, # will be used by main loop for exit
         "market_bias": mtf_fast_bias if mtf_fast_bias != "NEUTRAL" else "NEUTRAL",
         "mtf_fast_bias": mtf_fast_bias,
+        "mtf_rsi_bias": mtf_rsi_bias,
+        "mtf_rsi_score": float(mtf_rsi_score),
+        "momentum_exhaustion": momentum_exhaustion,
+        "cvd_state": cvd_state,
+        "body_ratio_score": float(body_ratio_score),
+        "vpoc": float(vpoc) if vpoc else 0.0,
+        "anchored_vwap": float(anchored_vwap) if anchored_vwap else 0.0,
+        "order_block": ob_context,
         "hold_reason": hold_reason
     }
+    gate_locked = bool(hold_reason)
 
     if support is not None:
         signal["structure_support"] = float(support)
     if resistance is not None:
         signal["structure_resistance"] = float(resistance)
+    if isinstance(pivot_data, dict):
+        signal["pivot_classic"] = dict(pivot_data.get("classic", {}) or {})
     signal["wall_state"] = wall_state
     signal["market_location"] = {
         "score": float(location_score),
@@ -1467,9 +1808,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["reason"] = f"{signal['reason']} MR:{mr_setup.get('reason', '')}"
         signal["score"] = float(signal["score"]) + float(mr_setup.get("score", 0.0) or 0.0)
         signal["confidence"] = min(abs(float(signal["score"])), 1.0)
-        if mr_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY":
+        if not gate_locked and mr_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY":
             signal["action"] = "BUY" if signal["action"] == "HOLD" or float(signal["score"]) > 0 else signal["action"]
-        elif mr_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
+        elif not gate_locked and mr_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
             signal["action"] = "SELL" if signal["action"] == "HOLD" or float(signal["score"]) < 0 else signal["action"]
 
     wick_setup = _detect_wick_sweep_setup(
@@ -1490,9 +1831,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if wick_setup.get("sl") is not None:
             signal["sl"] = float(wick_setup.get("sl"))
             signal["sl_source"] = "wick_sweep"
-        if wick_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY":
+        if not gate_locked and wick_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY":
             signal["action"] = "BUY" if signal["action"] == "HOLD" or float(signal["score"]) > 0 else signal["action"]
-        elif wick_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
+        elif not gate_locked and wick_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
             signal["action"] = "SELL" if signal["action"] == "HOLD" or float(signal["score"]) < 0 else signal["action"]
 
     # --- STRUCTURAL STOP LOSS ---
@@ -1503,6 +1844,14 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["sl"] = float(support) * (1 - stop_buffer)  # just below support
     elif final_action == "SELL" and resistance is not None:
         signal["sl"] = float(resistance) * (1 + stop_buffer)  # just above resistance
+        classic_pivots = pivot_data.get("classic", {}) if isinstance(pivot_data, dict) else {}
+        try:
+            r1_level = float(classic_pivots.get("r1", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            r1_level = 0.0
+        if r1_level > current_price and float(signal["sl"]) < r1_level * 1.001:
+            signal["sl"] = r1_level * 1.002
+            signal["sl_source"] = "pivot_r1_guard"
 
     # Recalculate final_action
     final_action = signal["action"]
@@ -1557,7 +1906,13 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["action"] = "HOLD"
         signal["hold_reason"] = "MTF trend veto: fast timeframes bearish"
     elif mtf_fast_bias == "NEUTRAL" and signal["action"] in {"BUY", "SELL"}:
-        if abs(total_score) < 0.05:
+        if signal["action"] == "SELL" and smc_score > 0:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = "NEUTRAL MTF + Bullish structure = no short"
+        elif signal["action"] == "BUY" and smc_score < 0:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = "NEUTRAL MTF + Bearish structure = no long"
+        elif abs(total_score) < 0.05:
             signal["action"] = "HOLD"
             signal["hold_reason"] = "MTF trend veto: fast timeframes not aligned"
         else:
@@ -1716,14 +2071,15 @@ def _detect_macd_divergence(df: pd.DataFrame) -> str:
         # Check the last two peaks
         p1_idx, p1_price = highs[-2]
         p2_idx, p2_price = highs[-1]
-        
         m1 = macd_peaks[-2]
         m2 = macd_peaks[-1]
-        
         # Bearish Divergence: Price HH + MACD LH
         if p2_price > p1_price and m2 < m1 and (p2_idx - p1_idx) > 3:
             return "BEARISH"
-            
+        # Hidden Bearish: Price LH + MACD HH (trend continuation short)
+        if p2_price < p1_price and m2 > m1 and (p2_idx - p1_idx) > 3:
+            return "HIDDEN_BEARISH"
+
     # 2. Detect troughs (Lows) for Bullish Divergence
     lows = []
     macd_troughs = []
@@ -1736,15 +2092,41 @@ def _detect_macd_divergence(df: pd.DataFrame) -> str:
     if len(lows) >= 2:
         p1_idx, p1_price = lows[-2]
         p2_idx, p2_price = lows[-1]
-        
         m1 = macd_troughs[-2]
         m2 = macd_troughs[-1]
-        
         # Bullish Divergence: Price LL + MACD HL
         if p2_price < p1_price and m2 > m1 and (p2_idx - p1_idx) > 3:
             return "BULLISH"
-            
+        # Hidden Bullish: Price HL + MACD LL (trend continuation long)
+        if p2_price > p1_price and m2 < m1 and (p2_idx - p1_idx) > 3:
+            return "HIDDEN_BULLISH"
+
     return "NONE"
+
+def _detect_cvd_momentum_divergence(df: pd.DataFrame) -> tuple[str, float]:
+    """Detect simple price/CVD divergence using OHLCV approximation."""
+    return _detect_cvd_divergence(df)
+
+
+def _session_blackout_state(strategy_config: dict) -> tuple[bool, int, set[int]]:
+    """Return whether the current UTC hour is inside a configured low-quality session."""
+    cfg = strategy_config or {}
+    enabled = bool(cfg.get("session_filter_enabled", False))
+    if not enabled:
+        return False, int(time.gmtime().tm_hour), set()
+
+    raw_hours = cfg.get("session_block_hours_utc", []) or []
+    blocked_hours: set[int] = set()
+    if isinstance(raw_hours, str):
+        raw_hours = [part.strip() for part in raw_hours.split(",") if part.strip()]
+    for item in raw_hours:
+        try:
+            blocked_hours.add(int(item) % 24)
+        except (TypeError, ValueError):
+            continue
+
+    current_hour = int(time.gmtime().tm_hour)
+    return current_hour in blocked_hours, current_hour, blocked_hours
 
 def get_structural_status(smc_label: str) -> str:
     """
