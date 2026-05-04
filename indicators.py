@@ -44,7 +44,7 @@ TUNING = {
 # MASTER SIGNAL WEIGHTS (Institutional Tuning - Scalp Optimized)
 SIGNAL_WEIGHTS = {
     'mr': 0.05,    # Mean Reversion (EMA 21/50)
-    'ob': 0.08,    # Order Block / SMC
+    'ob': 0.08,    # Order Book Pressure
     'vwap': 0.08,  # Volume Weighted Average Price
     'adx': 0.08,   # Trend Strength
     'vol': 0.08,   # Volume Delta
