@@ -706,7 +706,7 @@ def run_hybrid_bot():
 
     exec_cfg = cfg.get("execution", {}) or {}
     leverage = int(exec_cfg.get("leverage", 5))
-    requested_exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "paper"))).strip().lower()
+    requested_exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "live"))).strip().lower()
 
     strategy_config = {
         'max_spread': cfg['strategy']['max_spread'],
