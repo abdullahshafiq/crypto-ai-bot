@@ -189,7 +189,8 @@ def compute_volatility_context(df: pd.DataFrame) -> dict:
     # 1. Bollinger Band Squeeze (Width < 20-period Low)
     # This identifies periods of extreme low volatility preceding a breakout.
     bb_width = df['bb_width']
-    is_squeeze = bb_width.iloc[-1] < bb_width.rolling(window=20).min().iloc[-1] * 1.1
+    squeeze_buffer = float(TUNING.get("squeeze_buffer", 1.1) or 1.1)
+    is_squeeze = bb_width.iloc[-1] < bb_width.rolling(window=20).min().iloc[-1] * squeeze_buffer
     
     # 2. ATR Ranking (Normalized 0.0 to 1.0)
     # We rank the current ATR against its 100-candle history to determine if 
@@ -274,7 +275,8 @@ def generate_alpha_overlay(df: pd.DataFrame, smc_score: float, macro_bias: str) 
     # Confirms if the move is backed by real money.
     avg_vol = df['volume'].rolling(window=20).mean().iloc[-1]
     current_vol = df['volume'].iloc[-1]
-    vol_spike = current_vol > (avg_vol * 1.5)
+    vol_spike_mult = float(TUNING.get("vol_spike_mult", 1.5) or 1.5)
+    vol_spike = current_vol > (avg_vol * vol_spike_mult)
     
     # 3. Triple Alignment Strategy
     # When SMC, Momentum, and Macro Bias all point in the same direction.
@@ -392,18 +394,19 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     # Detecting gaps where price moved too fast, creating an imbalance.
     # Price often 'revisits' these gaps to fill liquidity.
     fvg_detected = False
+    fvg_sensitivity = float(TUNING.get("fvg_sensitivity", 0.0001) or 0.0001)
     for i in range(-5, -1):
         # Bullish FVG (Gap between Candle 1 High and Candle 3 Low)
         if df['high'].iloc[i-1] < df['low'].iloc[i+1]:
             gap_size = df['low'].iloc[i+1] - df['high'].iloc[i-1]
-            if current_price > df['high'].iloc[i-1] and current_price < df['low'].iloc[i+1]:
+            if gap_size >= (current_price * fvg_sensitivity) and current_price > df['high'].iloc[i-1] and current_price < df['low'].iloc[i+1]:
                 smc_score += 0.2
                 smc_label = "FVG Bullish Entry"
                 fvg_detected = True
         # Bearish FVG (Gap between Candle 1 Low and Candle 3 High)
         elif df['low'].iloc[i-1] > df['high'].iloc[i+1]:
             gap_size = df['low'].iloc[i-1] - df['high'].iloc[i+1]
-            if current_price < df['low'].iloc[i-1] and current_price > df['high'].iloc[i+1]:
+            if gap_size >= (current_price * fvg_sensitivity) and current_price < df['low'].iloc[i-1] and current_price > df['high'].iloc[i+1]:
                 smc_score -= 0.2
                 smc_label = "FVG Bearish Entry"
                 fvg_detected = True
@@ -436,7 +439,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     dist_from_high = (last_high - current_price) / last_high
     
     # 0.2% threshold for 'Bounces'
-    bounce_threshold = 0.002 
+    bounce_threshold = float(TUNING.get("bounce_threshold", 0.002) or 0.002)
     is_recovering = df['close'].iloc[-1] > df['close'].iloc[-2]
     is_falling = df['close'].iloc[-1] < df['close'].iloc[-2]
     
@@ -464,7 +467,7 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     # Calculate proximity to walls
     dist_to_sup = (current_price - nearest_sup) / nearest_sup if nearest_sup else 1.0
     dist_to_res = (nearest_res - current_price) / nearest_res if nearest_res else 1.0
-    wall_veto_threshold = 0.0015 # 0.15% (~12 cents on SOL)
+    wall_veto_threshold = float(TUNING.get("wall_proximity", 0.0015) or 0.0015)
     
     if dist_to_sup < wall_veto_threshold:
         sr_score = 1.5   # Massive support. Good for longs, Veto for shorts.
@@ -1104,12 +1107,12 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     obv = float(latest_indicators.get('obv', 0.0) or 0.0)
     obv_ema = float(latest_indicators.get('obv_ema', obv) or obv)
     obv_score = 1.0 if obv > obv_ema else -1.0
+    ob_score = _map_order_book_pressure(state)
 
     # KDJ & SuperTrend
     kdj_j = latest_indicators.get('j', 50)
     kdj_score = 1.0 if kdj_j < 20 else (-1.0 if kdj_j > 80 else 0.0)
     st_score = latest_indicators.get('trend_bias', 0)
-    atr_pct_now = float(latest_indicators.get("atr_pct", 0.0) or 0.0) / 100.0
     atr_min = float(strategy_config.get("vol_filter_atr_pct", 0.0005) or 0.0005)
     atr_max = float(strategy_config.get("vol_filter_atr_max_pct", 0.08) or 0.08)
     if atr_pct_now < atr_min or atr_pct_now > atr_max:
@@ -1135,6 +1138,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         (adx_score * weights['adx']) +
         (volume_delta * weights['vol']) +
         (obv_score * weights['obv']) +
+        (ob_score * weights['ob']) +
         (bb_score * weights['bb']) +
         (macd_score * weights['macd']) +
         (pa_score * weights['pa']) +
@@ -1254,11 +1258,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         lookback_macds = df_indicators['macd'].tail(3).values
         macd_zero_cross_bull = any((lookback_macds[i] > 0 and lookback_macds[i-1] <= 0) for i in range(1, len(lookback_macds)))
         macd_zero_cross_bear = any((lookback_macds[i] < 0 and lookback_macds[i-1] >= 0) for i in range(1, len(lookback_macds)))
-        
-        # Zero Bounce Detection (Pattern 3)
-        # If bars were dropping toward 0 but just bounced back UP
-        macd_bounce_bull = macd_diff_val > 0 and latest_indicators.get('macd_score', 0) >= 1.0
-        macd_bounce_bear = macd_diff_val < 0 and latest_indicators.get('macd_score', 0) <= -1.0
         
         # Combined Institutional MACD Signal (Pure Side-of-Zero logic)
         macd_inst_bull = (macd_pos_bull or macd_zero_cross_bull) and macd_outside_noise
