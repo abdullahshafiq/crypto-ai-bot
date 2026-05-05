@@ -19,14 +19,15 @@ execution:
   mode: "paper"
   market: "usdm"
   paper_futures_mode: "exchange_demo"
+  trade_log_file: "trade_log_demo_futures.csv"
   leverage: 3
   paused: false
   paper_starting_balance_usdt: 1000
   fee_rate: 0.0005
   fee_slippage_buffer_pct: 0.0002
   fee_edge_multiplier: 1.2
-  min_seconds_between_trades: 12
-  min_seconds_before_reversal: 15
+  min_seconds_between_trades: 60
+  min_seconds_before_reversal: 60
   reversal_min_confidence: 0.45
   reversal_min_score: 0.25
   reversal_min_net_edge_pct: 0.0020
@@ -194,5 +195,5 @@ ai:
 dashboard:
   enabled: true
   host: "127.0.0.1"
-  port: 8765
+  port: 8766
   candle_limit: 240

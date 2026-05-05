@@ -22,7 +22,7 @@ EDITABLE_FIELDS = [
     {"key": "leverage.enabled", "label": "Dynamic Leverage", "type": "bool", "cat": "Execution Engine"},
     {"key": "leverage.max_leverage", "label": "Max Leverage Cap", "type": "number", "step": "1", "min": 1, "max": 100, "cat": "Execution Engine"},
     {"key": "execution.use_limit_orders", "label": "Use Limit Orders", "type": "bool", "cat": "Execution Engine"},
-    {"key": "execution.min_seconds_between_trades", "label": "Trade Cooldown (s)", "type": "number", "step": "1", "min": 0, "max": 3600, "cat": "Execution Engine"},
+    {"key": "execution.min_seconds_between_trades", "label": "Trade Cooldown (s)", "type": "number", "step": "1", "min": 60, "max": 3600, "cat": "Execution Engine"},
     
     # CATEGORY: RISK MANAGEMENT
     {"key": "strategy.sl_pct", "label": "Stop Loss %", "type": "number", "step": "0.0001", "min": 0.0001, "max": 1.0, "cat": "Risk Management"},
@@ -33,7 +33,7 @@ EDITABLE_FIELDS = [
     {"key": "risk.min_balance_floor", "label": "Balance Floor ($)", "type": "number", "step": "0.01", "min": 0.0, "max": 1e9, "cat": "Risk Management"},
     
     # CATEGORY: STRATEGY & FILTERS
-    {"key": "strategy.min_conf", "label": "Min Confidence", "type": "number", "step": "0.01", "min": 0.0, "max": 1.0, "cat": "Strategy & Filters"},
+    {"key": "strategy.min_conf", "label": "Min Confidence", "type": "number", "step": "0.01", "min": 0.15, "max": 1.0, "cat": "Strategy & Filters"},
     {"key": "strategy.max_spread", "label": "Max Spread %", "type": "number", "step": "0.0001", "min": 0.0, "max": 1.0, "cat": "Strategy & Filters"},
     {"key": "strategy.max_chase_pct", "label": "Max Chase %", "type": "number", "step": "0.0001", "min": 0.0, "max": 1.0, "cat": "Strategy & Filters"},
     {"key": "strategy.wick_sweep_enabled", "label": "Wick Sweep Filter", "type": "bool", "cat": "Strategy & Filters"},
@@ -52,19 +52,22 @@ EDITABLE_FIELDS = [
 ]
 
 _INDEX_HTML_CACHE: str | None = None
+_INDEX_HTML_CACHE_MTIME: float | None = None
 
 def get_index_html() -> str:
-    global _INDEX_HTML_CACHE
-    if _INDEX_HTML_CACHE is not None:
-        return _INDEX_HTML_CACHE
+    global _INDEX_HTML_CACHE, _INDEX_HTML_CACHE_MTIME
+    path = Path(__file__).parent / "index.html"
     try:
-        path = Path(__file__).parent / "index.html"
-        if path.exists():
-            _INDEX_HTML_CACHE = path.read_text(encoding="utf-8")
+        mtime = path.stat().st_mtime
+        if _INDEX_HTML_CACHE is not None and _INDEX_HTML_CACHE_MTIME == mtime:
             return _INDEX_HTML_CACHE
+        _INDEX_HTML_CACHE = path.read_text(encoding="utf-8")
+        _INDEX_HTML_CACHE_MTIME = mtime
+        return _INDEX_HTML_CACHE
     except Exception as exc:
         print(f"[DASHBOARD] Failed to load index.html: {exc}")
     _INDEX_HTML_CACHE = "<h1>Error loading index.html</h1>"
+    _INDEX_HTML_CACHE_MTIME = None
     return _INDEX_HTML_CACHE
 
 def _deep_get(data: dict, path: str):
@@ -259,8 +262,15 @@ class _DashboardHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
-        if int(self.responses.get(self.command, (200,))[0]) >= 400:
-            print(f"[DASHBOARD] {self.client_address[0]} - {format % args}")
+        status = None
+        if len(args) >= 2:
+            try:
+                status = int(args[1])
+            except (TypeError, ValueError):
+                status = None
+        if status is not None and status < 400:
+            return
+        print(f"[DASHBOARD] {self.client_address[0]} - {format % args}")
 
     @property
     def runtime(self) -> DashboardRuntime:

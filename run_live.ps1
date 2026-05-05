@@ -1,8 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot
-$env:BOT_CONFIG = "config.paper.test.yaml"
-$env:BOT_INSTANCE_PORT = "45679"
+Remove-Item Env:\BOT_CONFIG -ErrorAction SilentlyContinue
+$env:BOT_INSTANCE_PORT = "45678"
 
 function Try-Run($exe, $args) {
     try {

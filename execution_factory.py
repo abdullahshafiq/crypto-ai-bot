@@ -47,10 +47,10 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
         scalp_cfg["runner_exchange_tp_multiplier"] = float(exec_cfg.get("scalp_runner_exchange_tp_multiplier", scalp_cfg.get("runner_exchange_tp_multiplier", 3.0)))
         executor.scalp_config = scalp_cfg
     executor.default_sl_pct = float(strategy_cfg.get("sl_pct", getattr(executor, "default_sl_pct", 0.0030)))
-    executor.min_seconds_between_trades = int(exec_cfg.get("min_seconds_between_trades", 30))
-    executor.min_seconds_before_reversal = int(exec_cfg.get("min_seconds_before_reversal", 30))
-    executor.reversal_min_confidence = float(exec_cfg.get("reversal_min_confidence", 0.20))
-    executor.reversal_min_score = float(exec_cfg.get("reversal_min_score", 0.15))
+    executor.min_seconds_between_trades = max(60, int(exec_cfg.get("min_seconds_between_trades", 60)))
+    executor.min_seconds_before_reversal = max(60, int(exec_cfg.get("min_seconds_before_reversal", 60)))
+    executor.reversal_min_confidence = max(0.45, float(exec_cfg.get("reversal_min_confidence", 0.45)))
+    executor.reversal_min_score = max(0.25, float(exec_cfg.get("reversal_min_score", 0.25)))
     executor.reversal_min_net_edge_pct = float(exec_cfg.get("reversal_min_net_edge_pct", 0.0015))
     executor.break_even_trigger_pct = float(exec_cfg.get("break_even_trigger_pct", 0.0030))
     executor.break_even_buffer_pct = float(exec_cfg.get("break_even_buffer_pct", 0.0004))
@@ -77,7 +77,8 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
     trailing_callback_pct = float(exec_cfg.get("trailing_callback_pct", 0.6))
     executor.trailing_callback_pct = trailing_callback_pct
     executor.trailing_stop_callback = trailing_callback_pct / 100.0
-    executor.trade_log_file = SPOT_TRADE_LOG_FILE if str(exec_cfg.get("market", "usdm")).lower() == "spot" else FUTURES_TRADE_LOG_FILE
+    default_trade_log = SPOT_TRADE_LOG_FILE if str(exec_cfg.get("market", "usdm")).lower() == "spot" else FUTURES_TRADE_LOG_FILE
+    executor.trade_log_file = str(exec_cfg.get("trade_log_file", default_trade_log) or default_trade_log)
     executor.spot_balance_pct = float(exec_cfg.get("spot_balance_pct", getattr(executor, "spot_balance_pct", 0.20)))
     executor.spot_reserve_pct = float(exec_cfg.get("spot_reserve_pct", spot_cfg.get("reserve_quote_pct", getattr(executor, "spot_reserve_pct", 0.30))))
     executor.spot_max_layers = int(exec_cfg.get("spot_max_layers", spot_cfg.get("max_layers", getattr(executor, "spot_max_layers", 3))))

@@ -25,8 +25,8 @@ execution:
   fee_rate: 0.0006
   fee_slippage_buffer_pct: 0.0002
   fee_edge_multiplier: 1.2
-  min_seconds_between_trades: 12
-  min_seconds_before_reversal: 15
+  min_seconds_between_trades: 60
+  min_seconds_before_reversal: 60
   reversal_min_confidence: 0.45     # slightly above entry min_conf
   reversal_min_score: 0.25
   reversal_min_net_edge_pct: 0.0020
@@ -159,6 +159,10 @@ strategy:
   wall_reversal_assist: true
   wall_reversal_score_gate: 0.12
   wall_breakout_score_gate: 0.15
+  range_position_veto_enabled: true
+  range_veto_top_pct: 0.75
+  range_veto_bottom_pct: 0.25
+  range_veto_escape_score: 0.80
   spread_atr_ratio_max: 0.15
   ob_midpoint_tolerance_pct: 0.0015
   anchored_vwap_near_pct: 0.0010

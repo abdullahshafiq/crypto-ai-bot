@@ -239,6 +239,13 @@ def load_config(path: str = "config.yaml") -> dict:
         
     return cfg
 
+def _instance_port_for_config(cfg: dict) -> int:
+    env_port = os.getenv("BOT_INSTANCE_PORT")
+    if env_port:
+        return int(env_port)
+    exec_mode = str((cfg.get("execution", {}) or {}).get("mode", "live") or "live").strip().lower()
+    return 45679 if exec_mode == "paper" else 45678
+
 def _detect_ui_mode(cfg_mode: str) -> str:
     # 1. Non-interactive terminals (piping, IDE outputs) MUST fallback safely
     if not sys.stdout.isatty():
@@ -494,8 +501,13 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
         frame_lines = len(out)
 
     tail_clear = '\033[J' if use_ansi else ('\n' if ui_mode in {"cls", "plain"} else '')
-    sys.stdout.write('\n'.join(out) + tail_clear)
-    sys.stdout.flush()
+    try:
+        sys.stdout.write('\n'.join(out) + tail_clear)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        # Some Windows shells / IDE consoles expose a stdout handle that cannot be flushed reliably.
+        # The dashboard should keep running even if the terminal renderer cannot repaint.
+        return
     _LAST_FRAME_LINES = frame_lines
 
 def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_start, status_lines, pivot_data, mtf_context, open_orders, latest_indicators, chart_bars, ai_overlay_state, cfg):
@@ -660,7 +672,7 @@ def _reapply_runtime_executor_config(executor, cfg):
     executor.max_open_positions = cfg["risk"].get("max_open_positions", 1)
     executor.daily_loss_cap_pct = cfg["risk"].get("daily_loss_cap")
     executor.min_balance_floor = float(cfg["risk"].get("min_balance_floor", 90.0))
-    leverage_cfg = cfg.get("leverage", {})
+    leverage_cfg = cfg.get("leverage", {}) or {}
     executor.dynamic_leverage_enabled = bool(leverage_cfg.get("enabled", False))
     executor.leverage_min = float(leverage_cfg.get("min_leverage", 1.0))
     executor.leverage_max = float(leverage_cfg.get("max_leverage", 4.0))
@@ -676,12 +688,12 @@ def _reapply_runtime_executor_config(executor, cfg):
     executor.dca_distance_pct = float(exec_cfg.get("dca_distance_pct", 0.01))
 
 def run_hybrid_bot():
-    _enforce_single_instance()
-    _enable_windows_vt_mode()
-    
     load_dotenv()
 
-    cfg = load_config(os.environ.get("BOT_CONFIG", "config.yaml"))
+    config_path = os.environ.get("BOT_CONFIG", "config.yaml")
+    cfg = load_config(config_path)
+    _enforce_single_instance(_instance_port_for_config(cfg))
+    _enable_windows_vt_mode()
     setup_logging(cfg.get("logging", {}) or {})
     logger = logging.getLogger("main")
     symbol = cfg['symbol']
@@ -694,13 +706,12 @@ def run_hybrid_bot():
     if "refresh_seconds" not in ai_overlay_cfg and "overlay_refresh_seconds" in ai_overlay_cfg:
         ai_overlay_cfg = dict(ai_overlay_cfg)
         ai_overlay_cfg["refresh_seconds"] = ai_overlay_cfg.get("overlay_refresh_seconds")
-    
     ui_cfg = cfg.setdefault("ui", {})
     mem_cfg = cfg.get("memory", {}) or {}
     auto_learning_cfg = cfg.get("auto_learning", {}) or {}
 
-    api_key = (os.getenv("BINANCE_API_KEY") or "").strip()
-    api_secret = (os.getenv("BINANCE_SECRET") or "").strip()
+    api_key = os.getenv("BINANCE_API_KEY")
+    api_secret = os.getenv("BINANCE_SECRET")
 
     print("Booting up Hybrid Crypto AI Bot...")
 
@@ -721,6 +732,8 @@ def run_hybrid_bot():
         'block_on_volume_spike': cfg['strategy'].get('block_on_volume_spike', False),
         'vol_filter_atr_pct': cfg['strategy'].get('vol_filter_atr_pct', 0.0005),
         'vol_filter_atr_max_pct': cfg['strategy'].get('vol_filter_atr_max_pct', 0.08),
+        # Pass timeframe so indicators.py can compute correct candle lookback for range veto
+        'timeframe': cfg.get('timeframe', '1m'),
     }
     fixed_trade_usdt = float(strategy_config.get('fixed_trade_usdt', 0.0) or 0.0)
 
@@ -798,6 +811,10 @@ def run_hybrid_bot():
 
     if cfg.get("execution", {}).get("mode", "").lower() == "paper":
         executor.label = "PAPER"
+
+    executor.max_open_positions = cfg['risk'].get('max_open_positions', 1)
+    executor.daily_loss_cap_pct = cfg['risk'].get('daily_loss_cap')
+    executor.min_balance_floor = float(cfg['risk'].get('min_balance_floor', 90.0))
 
     auto_learning_enabled = bool(auto_learning_cfg.get("enabled", False))
     auto_learning_min_trades = max(50, int(auto_learning_cfg.get("min_completed_trades", 50)))
@@ -909,7 +926,7 @@ def run_hybrid_bot():
     dashboard_cfg = cfg.get("dashboard", {}) or {}
     dashboard_runtime = None
     if dashboard_cfg.get("enabled", True):
-        config_file = os.environ.get("BOT_CONFIG", "config.yaml")
+        config_file = config_path
         overrides_file = "ui_state.json" if config_file == "config.yaml" else f"{os.path.splitext(os.path.basename(config_file))[0]}_state.json"
         dashboard_runtime = DashboardRuntime(cfg, overrides_path=overrides_file)
         dashboard_host = dashboard_cfg.get("host", "127.0.0.1")
@@ -1153,6 +1170,11 @@ def run_hybrid_bot():
                 break
 
             runtime_strategy_config = dict(strategy_config)
+            runtime_strategy_config["min_conf"] = max(float(runtime_strategy_config.get("min_conf", 0.15) or 0.15), 0.15)
+            runtime_strategy_config["entry_min_confidence_hard"] = max(
+                float(runtime_strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
+                0.20,
+            )
             closed_snapshot = list(getattr(executor, "closed_trades", []) or [])[-10:]
             consec_losses = _count_consecutive_losses(closed_snapshot)
             tilt_min_losses = max(1, int(strategy_config.get("loss_tilt_min_losses", 3) or 3))

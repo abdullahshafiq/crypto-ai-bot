@@ -555,25 +555,29 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     # Bullish Order Block (Last Red candle before a massive pump)
     # Bearish Order Block (Last Green candle before a massive dump)
     
-    # We look back at the last 5 swings to see if current price is 'mitigating' an old block
+    # We look back at the last 5 swings to see if current price is 'mitigating' an old block.
+    # FIX BUG1: Use candle body (open/close) not wick extremes (high/low) for OB bounds.
+    # A Bearish OB is the last bullish (green) candle before a dump → found at swing highs.
+    # A Bullish OB is the last bearish (red) candle before a pump → found at swing lows.
+    # Using wick extremes made zones 3-5x too wide, causing constant false OB labels.
     for i in range(len(swings)-1, max(0, len(swings)-5), -1):
-        swing_row = swings.iloc[i]
-        block_open = float(swing_row.get('open', swing_row.get('high', current_price)))
-        block_close = float(swing_row.get('close', swing_row.get('low', current_price)))
-        block_high = max(block_open, block_close)
-        block_low = min(block_open, block_close)
-        if current_price >= block_low and current_price <= block_high:
+        ob_body_high = max(float(swings['open'].iloc[i]), float(swings['close'].iloc[i]))
+        ob_body_low  = min(float(swings['open'].iloc[i]), float(swings['close'].iloc[i]))
+        # Require a meaningful body (not a doji)
+        if ob_body_high - ob_body_low < current_price * 0.0002:
+            continue
+        if ob_body_low <= current_price <= ob_body_high:
             smc_score -= 0.3
             smc_label = "Inside Bearish OB"
             break
             
     for i in range(len(valleys)-1, max(0, len(valleys)-5), -1):
-        valley_row = valleys.iloc[i]
-        block_open = float(valley_row.get('open', valley_row.get('high', current_price)))
-        block_close = float(valley_row.get('close', valley_row.get('low', current_price)))
-        block_high = max(block_open, block_close)
-        block_low = min(block_open, block_close)
-        if current_price >= block_low and current_price <= block_high:
+        ob_body_high = max(float(valleys['open'].iloc[i]), float(valleys['close'].iloc[i]))
+        ob_body_low  = min(float(valleys['open'].iloc[i]), float(valleys['close'].iloc[i]))
+        # Require a meaningful body (not a doji)
+        if ob_body_high - ob_body_low < current_price * 0.0002:
+            continue
+        if ob_body_low <= current_price <= ob_body_high:
             smc_score += 0.3
             smc_label = "Inside Bullish OB"
             break
@@ -591,18 +595,24 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
     if dist_from_low < bounce_threshold and is_recovering:
         smc_score += 0.5
         smc_label = "Institutional Support Bounce"
+        # Early directional signal: tag the ob_context so downstream OB gate
+        # and midrange gate know this is a bullish bounce zone.
+        # Hard veto of SELL here is not possible (action not yet known),
+        # but sr_score will be set to +1.5 by the wall logic below,
+        # and Bug2b hard veto will block SELL when sr_score >= 1.0.
     elif dist_from_high < bounce_threshold and is_falling:
         smc_score -= 0.5
         smc_label = "Institutional Resist Rejection"
+        # Similarly, sr_score will be -1.5 and Bug2b will block BUY.
 
     # --- 5b. ORDER BLOCK MIDPOINT CONTEXT ---
     # Track the most recent block zone so the caller can demand a midpoint retest.
+    # FIX BUG1b: Use body bounds (open/close) consistently with OB detection above.
     for i in range(len(swings)-1, max(0, len(swings)-5), -1):
-        swing_row = swings.iloc[i]
-        ob_open = float(swing_row.get('open', swing_row.get('high', current_price)))
-        ob_close = float(swing_row.get('close', swing_row.get('low', current_price)))
-        ob_high = max(ob_open, ob_close)
-        ob_low = min(ob_open, ob_close)
+        ob_high = max(float(swings['open'].iloc[i]), float(swings['close'].iloc[i]))
+        ob_low  = min(float(swings['open'].iloc[i]), float(swings['close'].iloc[i]))
+        if ob_high - ob_low < current_price * 0.0002:
+            continue
         if ob_low <= current_price <= ob_high:
             ob_mid = (ob_high + ob_low) / 2.0
             ob_context = {
@@ -616,11 +626,10 @@ def detect_smc_and_sr(df: pd.DataFrame, current_price: float) -> tuple:
             smc_label = "Inside Bearish OB"
             break
     for i in range(len(valleys)-1, max(0, len(valleys)-5), -1):
-        valley_row = valleys.iloc[i]
-        ob_open = float(valley_row.get('open', valley_row.get('high', current_price)))
-        ob_close = float(valley_row.get('close', valley_row.get('low', current_price)))
-        ob_high = max(ob_open, ob_close)
-        ob_low = min(ob_open, ob_close)
+        ob_high = max(float(valleys['open'].iloc[i]), float(valleys['close'].iloc[i]))
+        ob_low  = min(float(valleys['open'].iloc[i]), float(valleys['close'].iloc[i]))
+        if ob_high - ob_low < current_price * 0.0002:
+            continue
         if ob_low <= current_price <= ob_high:
             ob_mid = (ob_high + ob_low) / 2.0
             ob_context = {
@@ -1426,8 +1435,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     pivot_msg = "Gated:IndicatorsOnly"
             
     # --- 6. FINAL WEIGHTED SYNTHESIS ---
-    # Support walls are bullish context and resistance walls are bearish context.
-    # Keep that sign intact so a short near support is penalized, not amplified.
+    # Support walls should help longs and hurt shorts; resistance walls should do the opposite.
+    # Use the non-wall score to infer the current direction, then sign the wall contribution accordingly.
     score_without_sr = (
         (mr_score * weights['mr']) +
         (vwap_score * weights['vwap']) +
@@ -1447,7 +1456,14 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         div_bonus + # Add the Divergence Bonus Priority
         power_bonus # Add the Institutional Power Suite
     )
-    total_score = score_without_sr + (sr_score * weights['sr'])
+    # FIX BUG2: sr_directional sign must reflect the trade direction being evaluated.
+    # score_without_sr already contains smc_score which is biased near walls,
+    # so using its sign here can amplify the wrong side.
+    # Correct logic: support wall (sr_score > 0) helps BUYs and hurts SELLs.
+    # We still don't know `action` yet (set at line ~1487), so we use score_without_sr
+    # sign as the best proxy — but we also add a hard wall veto on the action below (line ~1510).
+    sr_directional = sr_score if score_without_sr >= 0 else -sr_score
+    total_score = score_without_sr + (sr_directional * weights['sr'])
     
     # Apply context-based multipliers
     total_score *= penalty
@@ -1494,10 +1510,86 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                 "weights": {},
             }
 
+    signal_reason_suffix = ""
+    hold_reason = ""
+    sr_wall_locked = False
+
     # --- 7. SIGNAL INTEGRITY (Indicators Only) ---
     action = "HOLD"
     if total_score > 0.05: action = "BUY"
     elif total_score < -0.05: action = "SELL"
+
+    # FIX BUG2b: Hard wall veto now that we know action direction.
+    # SR walls must block counter-direction entries regardless of how the score landed.
+    # sr_score > 0 means price is near support → veto SELL.
+    # sr_score < 0 means price is near resistance → veto BUY.
+    if sr_score >= 1.0 and action == "SELL":
+        action = "HOLD"
+        hold_reason = f"SR Wall Veto: price near support (sr={sr_score:.1f}) — no SHORT"
+        sr_wall_locked = True
+    elif sr_score <= -1.0 and action == "BUY":
+        action = "HOLD"
+        hold_reason = f"SR Wall Veto: price near resistance (sr={sr_score:.1f}) — no LONG"
+        sr_wall_locked = True
+
+    # --- RANGE POSITION VETO ---
+    # Blocks weak BUY entries near the top of the recent range and weak SELL entries
+    # near the bottom. Directly targets the "long at top / short at bottom" failure pattern.
+    #
+    # Escape conditions (entry still allowed):
+    #   1. Score is strong AND MTF is unanimously aligned (real breakout/breakdown)
+    #   2. Veto is disabled via config (range_position_veto_enabled: false)
+    #
+    # Timeframe-aware: uses candles_per_day from config so the lookback is correct
+    # on 1m (1440), 3m (480), 5m (288), etc. Falls back to 480 (3m equivalent).
+    if action in {"BUY", "SELL"} and bool(strategy_config.get("range_position_veto_enabled", True)):
+        _tf_str = str(strategy_config.get("timeframe", "3m") or "3m").strip().lower()
+        _tf_map = {"1m": 1440, "3m": 480, "5m": 288, "10m": 144, "15m": 96, "1h": 24, "4h": 6}
+        _cpd = int(strategy_config.get("candles_per_day", _tf_map.get(_tf_str, 480)))
+        _lookback = max(50, min(_cpd, len(df_indicators)))
+
+        _recent = df_indicators.iloc[-_lookback:]
+        _range_high = float(_recent["high"].max())
+        _range_low = float(_recent["low"].min())
+        _range_width = _range_high - _range_low
+
+        if _range_width > 0:
+            _pos = (current_price - _range_low) / _range_width   # 0.0 = bottom, 1.0 = top
+            _veto_top = float(strategy_config.get("range_veto_top_pct", 0.75) or 0.75)
+            _veto_bottom = float(strategy_config.get("range_veto_bottom_pct", 0.25) or 0.25)
+            _veto_min_score = float(strategy_config.get("range_veto_min_score", 0.55) or 0.55)
+            _veto_escape_score = max(0.80, float(strategy_config.get("range_veto_escape_score", 0.80) or 0.80))
+
+            _mtf_unanimous = mtf_fast_bias in {"LONG_ONLY", "SHORT_ONLY"}
+            _is_strong = (
+                abs(total_score) >= _veto_escape_score
+                and _mtf_unanimous
+                and abs(sr_score) < 1.0
+            )
+
+            if action == "BUY" and _pos >= _veto_top:
+                if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -0.5:
+                    # Unanimous bull MTF + very strong score + clear resistance = real breakout.
+                    pass
+                else:
+                    action = "HOLD"
+                    hold_reason = (
+                        f"Range Veto: BUY in top {int(_veto_top*100)}% of {_lookback}c range "
+                        f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f}). "
+                        f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-0.5 for breakout."
+                    )
+
+            elif action == "SELL" and _pos <= _veto_bottom:
+                if _is_strong and mtf_fast_bias == "SHORT_ONLY" and sr_score < 0.5:
+                    # Unanimous bear MTF + very strong score + clear support = real breakdown.
+                    pass
+                else:
+                    action = "HOLD"
+                    hold_reason = (
+                        f"Range Veto: SELL in bottom {int((1-_veto_bottom)*100)}% of {_lookback}c range "
+                        f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f}). "
+                        f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr<0.5 for breakdown."
+                    )
 
     # --- TREND CONFIRMATION: EMA + PSAR + MACD must agree ---
     # We follow the "MACD Zero Line Rule" from your screenshots:
@@ -1516,9 +1608,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # For DOGE at $0.11, 0.0001 is a meaningful filter (similar to 0.5 on Forex)
     macd_noise_threshold = float(strategy_config.get('macd_noise_threshold', 0.0001) or 0.0001)
 
-    signal_reason_suffix = ""
-    hold_reason = ""
-    
     if action in {"BUY", "SELL"}:
         ema_bull = ema_9_val > ema_21_val
         psar_bull = True  # default if PSAR unavailable
@@ -1630,6 +1719,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     f"(${current_price:.3f} / wall ${float(resistance):.3f}). "
                     f"Wait for break>${float(wall_state.get('resistance_break_level', resistance)):.3f}."
                 )
+                sr_wall_locked = True
             elif sup_touch and not sup_broken and action == "SELL":
                 # Shorting into an intact floor: only allow with strong breakdown evidence
                 breakdown_likely = (
@@ -1643,6 +1733,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                         f"Wall Veto: SELL near intact support (${current_price:.3f} / floor ${float(support):.3f}). "
                         f"Need SHORT_ONLY MTF + score<-0.25 for breakdown entry."
                     )
+                    sr_wall_locked = True
                 else:
                     entry_mode = "BREAKDOWN_SHORT"
                     signal_reason_suffix += " [Breakdown Short]"
@@ -1795,7 +1886,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         "order_block": ob_context,
         "hold_reason": hold_reason
     }
-    gate_locked = bool(hold_reason)
+    gate_locked = bool(hold_reason) or sr_wall_locked
 
     if support is not None:
         signal["structure_support"] = float(support)
@@ -1809,6 +1900,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         "notes": location_notes,
         "levels": location_levels,
     }
+    signal["sr_wall_locked"] = bool(sr_wall_locked)
 
     mr_setup = _detect_mean_reversion_setup(df_indicators, strategy_config)
     if mr_setup.get("triggered"):
@@ -1819,9 +1911,11 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["reason"] = f"{signal['reason']} MR:{mr_setup.get('reason', '')}"
         signal["score"] = float(signal["score"]) + float(mr_setup.get("score", 0.0) or 0.0)
         signal["confidence"] = min(abs(float(signal["score"])), 1.0)
-        if not gate_locked and mr_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY":
+        mr_long_allowed = (sr_score > -1.0) and not bool(wall_state.get("resistance_touching"))
+        mr_short_allowed = (sr_score < 1.0) and not bool(wall_state.get("support_touching"))
+        if not gate_locked and mr_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY" and mr_long_allowed:
             signal["action"] = "BUY" if signal["action"] == "HOLD" or float(signal["score"]) > 0 else signal["action"]
-        elif not gate_locked and mr_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
+        elif not gate_locked and mr_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY" and mr_short_allowed:
             signal["action"] = "SELL" if signal["action"] == "HOLD" or float(signal["score"]) < 0 else signal["action"]
 
     wick_setup = _detect_wick_sweep_setup(
@@ -1842,22 +1936,12 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if wick_setup.get("sl") is not None:
             signal["sl"] = float(wick_setup.get("sl"))
             signal["sl_source"] = "wick_sweep"
-        if not gate_locked and wick_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY":
+        wick_long_allowed = (sr_score > -1.0) and not bool(wall_state.get("resistance_touching"))
+        wick_short_allowed = (sr_score < 1.0) and not bool(wall_state.get("support_touching"))
+        if not gate_locked and wick_setup.get("direction") == "LONG" and mtf_fast_bias != "SHORT_ONLY" and wick_long_allowed:
             signal["action"] = "BUY" if signal["action"] == "HOLD" or float(signal["score"]) > 0 else signal["action"]
-        elif not gate_locked and wick_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY":
+        elif not gate_locked and wick_setup.get("direction") == "SHORT" and mtf_fast_bias != "LONG_ONLY" and wick_short_allowed:
             signal["action"] = "SELL" if signal["action"] == "HOLD" or float(signal["score"]) < 0 else signal["action"]
-
-    smc_label_text = str(smc_label or "")
-    if signal["action"] == "SELL" and "Support Bounce" in smc_label_text:
-        signal["action"] = "HOLD"
-        signal["hold_reason"] = "Support bounce veto: no short at support"
-        signal["reason"] = f"{signal['reason']} | {signal['hold_reason']}"
-        gate_locked = True
-    elif signal["action"] == "BUY" and "Resist Rejection" in smc_label_text:
-        signal["action"] = "HOLD"
-        signal["hold_reason"] = "Resistance rejection veto: no long at resistance"
-        signal["reason"] = f"{signal['reason']} | {signal['hold_reason']}"
-        gate_locked = True
 
     # --- STRUCTURAL STOP LOSS ---
     # Place SL at structural level, but cap at max_structural_sl_pct
@@ -1942,15 +2026,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             signal["reason"] = f"{signal['reason']} MTFPartial"
     elif mtf_fast_bias != "NEUTRAL":
         signal["reason"] = f"{signal['reason']} MTFConfirm:{mtf_fast_bias}"
-
-    htf_4h = mtf_context.get("4h", {}) if isinstance(mtf_context, dict) else {}
-    htf_4h_trend = str(htf_4h.get("trend", "NEUT") or "NEUT").upper()
-    if signal["action"] == "SELL" and htf_4h_trend == "BULL":
-        signal["action"] = "HOLD"
-        signal["hold_reason"] = "4h BULL veto: no SHORT entries against HTF trend"
-    elif signal["action"] == "BUY" and htf_4h_trend == "BEAR":
-        signal["action"] = "HOLD"
-        signal["hold_reason"] = "4h BEAR veto: no LONG entries against HTF trend"
     
     # --- RANGE REVERSAL SNIPER MODE (DYNAMIC OUTER EDGE) ---
     # We measure the total range width and only allow entries in the configured outer zone.
@@ -2016,16 +2091,6 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             signal["action"]      = "HOLD"
             signal["hold_reason"] = "Range Gate: No S/R boundaries — reversal entry skipped."
         # TREND and BREAKOUT entries proceed freely when S/R is unavailable.
-
-    # --- ORDER BLOCK DIRECTION VETO ---
-    if signal["action"] in {"BUY", "SELL"} and isinstance(ob_context, dict):
-        ob_reason = str(ob_context.get("reason") or smc_label or "").lower()
-        if signal["action"] == "SELL" and "bullish ob" in ob_reason:
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = "OB Veto: price inside Bullish OB — no short"
-        elif signal["action"] == "BUY" and "bearish ob" in ob_reason:
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = "OB Veto: price inside Bearish OB — no long"
 
     return signal
 
