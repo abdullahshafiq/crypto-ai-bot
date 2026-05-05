@@ -5,6 +5,7 @@ import re
 import time
 import requests
 from openai import OpenAI
+from ai_context import build_workspace_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,9 @@ class HybridAIOrchestrator:
 
         raise RuntimeError("No available AI providers succeeded.")
 
+    def _workspace_prompt(self, workspace: str, task_rules: str) -> str:
+        return build_workspace_prompt(workspace, task_rules)
+
     def evaluate_trade(self, context: dict, model: str | None = None) -> dict:
         fallback = {"decision": "ALLOW", "hold_minutes": 0, "confidence": 0.0, "rationale": "AI disabled"}
         if not self.enabled:
@@ -245,11 +249,11 @@ class HybridAIOrchestrator:
             return fallback
         self._last_trade_time = now
 
-        system_prompt = (
-            "Scalp hunter: default ALLOW. "
-            "If 3m/5m show momentum, ALLOW immediately. "
-            "hold_minutes must be 0. Trade NOW or don't trade. "
-            "JSON only: {decision, confidence, rationale}."
+        system_prompt = self._workspace_prompt(
+            "workspaces/execution-safety",
+            "JSON only: {decision, confidence, rationale}. "
+            "decision must be ALLOW or VETO. "
+            "hold_minutes is optional and must stay at 0 for live scalps.",
         )
 
         user_content = json.dumps(context, ensure_ascii=False)
@@ -339,14 +343,13 @@ class HybridAIOrchestrator:
         self._last_overlay_time = now
 
         try:
-            system_prompt = (
-                "Tactical scalp bias from 1m/3m/5m/10m/15m context; primary confirmation is 3m/5m/15m. "
-                "Favor momentum trends. "
+            system_prompt = self._workspace_prompt(
+                "workspaces/signal-review",
                 "JSON only: {bias, risk_mode, entry_style, avoid_new_entries, max_hold_minutes, confidence, rationale}. "
-                "bias: LONG_ONLY|SHORT_ONLY|NEUTRAL. risk_mode: NORMAL|CAUTIOUS|RISK_OFF. "
-                "entry_style: BUY_PULLBACKS|SELL_RALLIES|BREAKOUTS|MIXED. confidence: 0..1. "
-                "avoid_new_entries may be true only when risk_mode is RISK_OFF due to extreme risk; "
-                "for normal neutral or choppy markets use CAUTIOUS with avoid_new_entries false."
+                "bias: LONG_ONLY|SHORT_ONLY|NEUTRAL. "
+                "risk_mode: NORMAL|CAUTIOUS|RISK_OFF. "
+                "entry_style: BUY_PULLBACKS|SELL_RALLIES|BREAKOUTS|MIXED. "
+                "Prefer momentum confirmation, and use RISK_OFF only for extreme risk.",
             )
             raw = self._call_llm(system_prompt, json.dumps(context, ensure_ascii=False), max_tokens=300, json_mode=True)
             data = _extract_json_object(raw)

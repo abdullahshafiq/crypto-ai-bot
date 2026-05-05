@@ -1,31 +1,30 @@
 {
-    "learned_at": "2026-04-30T05:06:45.498693+00:00",
+    "learned_at": "2026-05-04T22:15:09.600480+00:00",
     "model_type": "logistic_regression",
-    "completed_trades": 263,
-    "win_rate": 0.6122,
-    "net_pnl": 23.5616,
-    "avg_win": 0.39555,
-    "avg_loss": -0.393352,
+    "completed_trades": 300,
+    "win_rate": 0.6467,
+    "net_pnl": 48.3576,
+    "avg_win": 0.334816,
+    "avg_loss": -0.156574,
     "risk_multiplier": 1.0,
-    "train_accuracy": 0.8286,
-    "holdout_accuracy": 1.0,
+    "train_accuracy": 0.7917,
+    "holdout_accuracy": 0.5167,
     "weights": {
-        "mr": 0.0654,
-        "vwap": 0.1396,
-        "bb": 0.0388,
-        "macd": 0.0364,
-        "pa": 0.1623,
-        "smc": 0.1675,
-        "sr": 0.0659,
-        "kdj": 0.2058,
-        "st": 0.1182
+        "mr": 0.0695,
+        "vwap": 0.1825,
+        "bb": 0.0803,
+        "macd": 0.041,
+        "pa": 0.1299,
+        "smc": 0.162,
+        "sr": 0.1107,
+        "kdj": 0.0695,
+        "st": 0.1544
     },
     "ai_advisor": {
-        "enabled": true,
-        "applied": true,
+        "enabled": false,
+        "applied": false,
         "model": "gpt-4o-mini",
-        "rationale": "The win rate is above 0.50, but the net PnL is positive, indicating some profitability. However, to reduce potential overfitting and noise, I recommend decreasing the weights of the less impactful indicators (mr, vwap, bb, macd, smc, sr) while keeping the more effective ones (pa, kdj, st) stable. Th",
-        "error": "",
-        "risk_multiplier": 1.0
+        "rationale": "",
+        "error": "OPENAI_API_KEY missing"
     }
 }

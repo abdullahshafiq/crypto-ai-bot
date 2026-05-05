@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime
 
 import pandas as pd
+from ai_context import build_workspace_prompt
 
 try:
     from sklearn.linear_model import LogisticRegression
@@ -211,15 +212,12 @@ def _apply_ai_advisor(
             "features": ACTIVE_FEATURES,
         }
 
-        system_prompt = (
-            "You are a conservative model-risk advisor for a crypto scalping bot. "
-            "You do not place trades. You only review learned indicator weights and risk sizing. "
+        system_prompt = build_workspace_prompt(
+            "workspaces/post-trade-learning",
             "Return valid JSON only with keys: weight_multipliers, risk_multiplier, rationale. "
             f"weight_multipliers must include only these keys: {ACTIVE_FEATURES}. "
             f"Each multiplier must be between {lower} and {upper}. "
-            "risk_multiplier must be between 0.10 and 1.00. "
-            "If net_pnl is negative or win_rate is below 0.50, do not increase risk. "
-            "Prefer reducing noisy/overfit indicators and explain briefly."
+            "risk_multiplier must be between 0.10 and 1.00.",
         )
 
         client = OpenAI(api_key=api_key)

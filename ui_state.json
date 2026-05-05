@@ -1,7 +1,7 @@
 {
   "execution.paused": false,
   "execution.mode": "live",
-  "ai.enabled": false,
+  "ai.enabled": true,
   "execution.market": "usdm",
   "execution.leverage": 5,
   "execution.spot_balance_pct": 0.35,
