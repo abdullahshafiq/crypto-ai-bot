@@ -1,10 +1,12 @@
 import json
+import logging
 import os
 import re
+import threading
+from collections import deque
 from datetime import UTC, datetime
 
 import pandas as pd
-from ai_context import build_workspace_prompt
 
 try:
     from sklearn.linear_model import LogisticRegression
@@ -16,8 +18,6 @@ except ModuleNotFoundError:
     StandardScaler = None
     SKLEARN_AVAILABLE = False
 
-TRADE_LOG_V2 = os.path.join(os.path.dirname(__file__), "trade_log_futures.csv")
-TRADE_LOG = os.path.join(os.path.dirname(__file__), "trade_log.csv")
 WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), "weights.json")
 LEARNING_STATE_FILE = os.path.join(os.path.dirname(__file__), "learning_state.json")
 
@@ -33,6 +33,66 @@ DEFAULT_WEIGHTS = {
     "kdj": 0.10,
     "st": 0.10,
 }
+
+logger = logging.getLogger(__name__)
+
+
+class SessionTracker:
+    """Collects completed trades in-memory for the current session only.
+
+    On each bot restart the session starts fresh — no stale historical data
+    is carried over.  The tracker stores the entry-side indicator scores
+    (the ``reason`` string from the signal) alongside PnL so the ML
+    optimiser can learn *within* the session.
+    """
+
+    def __init__(self, max_trades: int = 1000):
+        self._trades: deque[dict] = deque(maxlen=max_trades)
+        self._lock = threading.Lock()
+        self._pending_entries: dict[int, dict] = {}
+
+    def register_entry(self, trade_id: int, side: str, reason: str):
+        with self._lock:
+            self._pending_entries[trade_id] = {
+                "side": side.upper(),
+                "reason": reason or "",
+            }
+
+    def register_exit(self, trade_id: int, net_pnl: float, entry_price: float = 0.0, exit_price: float = 0.0):
+        with self._lock:
+            entry_info = self._pending_entries.pop(trade_id, None)
+            if entry_info is None:
+                return
+            self._trades.append({
+                "side": entry_info["side"],
+                "reason": entry_info["reason"],
+                "net_pnl": float(net_pnl),
+                "entry_price": float(entry_price),
+                "exit_price": float(exit_price),
+                "profitable": 1 if float(net_pnl) > 0 else 0,
+                "timestamp": datetime.now(UTC).isoformat(),
+            })
+
+    def get_trades(self) -> list[dict]:
+        with self._lock:
+            return list(self._trades)
+
+    def clear(self):
+        with self._lock:
+            self._trades.clear()
+            self._pending_entries.clear()
+
+    @property
+    def count(self) -> int:
+        with self._lock:
+            return len(self._trades)
+
+
+_session_tracker = SessionTracker()
+
+
+def get_session_tracker() -> SessionTracker:
+    return _session_tracker
 
 
 def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
@@ -50,7 +110,6 @@ def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
 
 
 def parse_reason(reason_str: str) -> dict[str, float]:
-    """Extract indicator scores from the signal reason string."""
     scores = {key: 0.0 for key in ACTIVE_FEATURES}
     if not reason_str:
         return scores
@@ -67,90 +126,28 @@ def parse_reason(reason_str: str) -> dict[str, float]:
     return scores
 
 
-def _load_completed_trades(log_path: str) -> pd.DataFrame:
-    df = pd.read_csv(log_path)
+def _build_session_dataset(trades: list[dict]) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    rows = []
+    profitable = []
+    pnl_list = []
+    for trade in trades:
+        scores = parse_reason(str(trade.get("reason", "")))
+        side = str(trade.get("side", "")).upper()
+        direction = -1.0 if side == "SELL" else 1.0
+        rows.append({key: scores[key] * direction for key in ACTIVE_FEATURES})
+        profitable.append(trade.get("profitable", 1 if trade.get("net_pnl", 0) > 0 else 0))
+        pnl_list.append(float(trade.get("net_pnl", 0.0)))
 
-    if {"trade_id", "event", "price"}.issubset(df.columns):
-        df["trade_id"] = pd.to_numeric(df["trade_id"], errors="coerce")
-        df = df.dropna(subset=["trade_id"]).copy()
-        df["trade_id"] = df["trade_id"].astype(int)
-        if "timestamp" in df.columns:
-            df["_ts"] = pd.to_datetime(df["timestamp"], errors="coerce")
-            df = df.sort_values("_ts")
-
-        open_entries: dict[int, list[pd.Series]] = {}
-        completed_rows = []
-        for _, row in df.iterrows():
-            event = str(row.get("event", "")).upper()
-            trade_id = int(row.get("trade_id"))
-            if event == "ENTRY":
-                open_entries.setdefault(trade_id, []).append(row)
-            elif event == "EXIT" and open_entries.get(trade_id):
-                entry = open_entries[trade_id].pop(0)
-                entry_fee = pd.to_numeric(entry.get("fees", 0.0), errors="coerce")
-                exit_fee = pd.to_numeric(row.get("fees", 0.0), errors="coerce")
-                pnl = pd.to_numeric(row.get("pnl", 0.0), errors="coerce")
-                entry_fee = 0.0 if pd.isna(entry_fee) else float(entry_fee)
-                exit_fee = 0.0 if pd.isna(exit_fee) else float(exit_fee)
-                pnl = 0.0 if pd.isna(pnl) else float(pnl)
-                completed_rows.append({
-                    "trade_id": trade_id,
-                    "Entry_Price": entry.get("price"),
-                    "Exit_Price": row.get("price"),
-                    "Reason": entry.get("reason", ""),
-                    "Side": entry.get("side", ""),
-                    "timestamp_exit": row.get("timestamp"),
-                    "net_pnl": pnl - entry_fee - exit_fee,
-                })
-
-        if not completed_rows:
-            return pd.DataFrame()
-
-        completed = pd.DataFrame(completed_rows)
-        completed["Entry_Price"] = pd.to_numeric(completed["Entry_Price"], errors="coerce")
-        completed["Exit_Price"] = pd.to_numeric(completed["Exit_Price"], errors="coerce")
-        completed["timestamp_exit"] = pd.to_datetime(completed["timestamp_exit"], errors="coerce")
-        completed["profitable"] = (completed["net_pnl"] > 0).astype(int)
-        completed = completed.dropna(subset=["Entry_Price", "Exit_Price"]).copy()
-        return completed.sort_values("timestamp_exit")
-
-    if not {"Entry_Price", "Exit_Price", "Reason"}.issubset(df.columns):
-        return pd.DataFrame()
-
-    completed = df[df["Exit_Price"].notna()].copy()
-    pnl_col = "PnL" if "PnL" in completed.columns else "pnl"
-    if pnl_col in completed.columns:
-        completed["net_pnl"] = pd.to_numeric(completed[pnl_col], errors="coerce").fillna(0.0)
-    else:
-        completed["net_pnl"] = pd.to_numeric(completed["Exit_Price"], errors="coerce") - pd.to_numeric(completed["Entry_Price"], errors="coerce")
-    completed["Side"] = completed.get("Side", "BUY")
-    completed["profitable"] = (completed["net_pnl"] > 0).astype(int)
-    return completed
-
-
-def build_learning_dataset(max_recent_trades: int = 300) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
-    log_path = TRADE_LOG_V2 if os.path.exists(TRADE_LOG_V2) else TRADE_LOG
-    if not os.path.exists(log_path):
+    if not rows:
         return pd.DataFrame(), pd.Series(dtype=int), pd.DataFrame()
 
-    completed = _load_completed_trades(log_path)
-    if completed.empty:
-        return pd.DataFrame(), pd.Series(dtype=int), completed
-
-    if max_recent_trades > 0:
-        completed = completed.tail(int(max_recent_trades)).copy()
-
-    rows = []
-    for _, row in completed.iterrows():
-        scores = parse_reason(str(row.get("Reason", "")))
-        side = str(row.get("Side", "")).upper()
-        direction = -1.0 if side == "SELL" else 1.0
-        # Align each indicator with the chosen trade direction. A positive value
-        # means the indicator agreed with the entry side; negative means conflict.
-        rows.append({key: scores[key] * direction for key in ACTIVE_FEATURES})
-
     X = pd.DataFrame(rows, columns=ACTIVE_FEATURES).fillna(0.0)
-    y = completed["profitable"].astype(int)
+    y = pd.Series(profitable, dtype=int)
+    completed = pd.DataFrame({
+        "Side": [t.get("side", "") for t in trades],
+        "net_pnl": pnl_list,
+        "profitable": profitable,
+    })
     return X, y, completed
 
 
@@ -160,12 +157,10 @@ def _apply_ai_advisor(
     ai_model: str,
     max_weight_shift: float = 0.12,
 ) -> tuple[dict[str, float], dict]:
-    """
-    Ask OpenAI for a bounded risk review of the learned weights.
+    """Ask an LLM for a bounded risk review of the learned weights.
 
-    The AI is not allowed to create trades or directly raise risk after poor
-    results. It can only make small weight nudges and recommend equal/lower
-    sizing unless the statistical sample is already positive.
+    Uses the HybridAIOrchestrator (DeepSeek / Gemini / OpenRouter / OpenAI
+    fallback chain) instead of calling OpenAI directly.
     """
     advisor_state = {
         "enabled": False,
@@ -176,19 +171,12 @@ def _apply_ai_advisor(
     }
 
     try:
-        try:
-            from dotenv import load_dotenv
+        from agents import HybridAIOrchestrator
 
-            load_dotenv()
-        except Exception:
-            pass
-
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            advisor_state["error"] = "OPENAI_API_KEY missing"
+        orch = HybridAIOrchestrator(model=ai_model)
+        if not orch.enabled:
+            advisor_state["error"] = "No AI providers available"
             return weights, advisor_state
-
-        from openai import OpenAI
 
         advisor_state["enabled"] = True
         max_weight_shift = max(0.0, min(0.30, float(max_weight_shift)))
@@ -212,28 +200,23 @@ def _apply_ai_advisor(
             "features": ACTIVE_FEATURES,
         }
 
-        system_prompt = build_workspace_prompt(
-            "workspaces/post-trade-learning",
+        system_prompt = (
             "Return valid JSON only with keys: weight_multipliers, risk_multiplier, rationale. "
-            f"weight_multipliers must include only these keys: {ACTIVE_FEATURES}. "
-            f"Each multiplier must be between {lower} and {upper}. "
-            "risk_multiplier must be between 0.10 and 1.00.",
+            f"weight_multipliers must include only these keys: { ACTIVE_FEATURES }. "
+            f"Each multiplier must be between { lower } and { upper }. "
+            "risk_multiplier must be between 0.10 and 1.00."
         )
 
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=ai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.0,
+        raw = orch._call_llm(
+            system_prompt,
+            json.dumps(payload, ensure_ascii=False),
             max_tokens=300,
+            json_mode=True,
         )
-        raw = (response.choices[0].message.content or "").strip()
-        start = raw.find("{")
-        end = raw.rfind("}")
-        data = json.loads(raw[start:end + 1] if start != -1 and end != -1 and end > start else raw)
+
+        from agents import _extract_json_object
+
+        data = _extract_json_object(raw)
 
         multipliers = data.get("weight_multipliers", {}) or {}
         adjusted = {}
@@ -265,39 +248,46 @@ def _apply_ai_advisor(
         return adjusted, advisor_state
     except Exception as e:
         advisor_state["error"] = str(e)[:300]
+        logger.warning(f"AI advisor failed: {e}")
         return weights, advisor_state
 
 
 def optimize_weights(
-    min_trades: int = 30,
-    max_recent_trades: int = 300,
+    min_trades: int = 10,
     shrinkage: float = 0.35,
     ai_enabled: bool = False,
-    ai_model: str = "gpt-4o-mini",
+    ai_model: str = "deepseek-chat",
     ai_max_weight_shift: float = 0.12,
     quiet: bool = False,
+    session_trades: list[dict] | None = None,
 ) -> dict | None:
-    """
-    Learn indicator weights from completed trades.
+    """Learn indicator weights from session trades only.
 
-    The learned model is intentionally conservative: it only increases weights
-    for indicators that historically agreed with profitable entries, then blends
-    them back toward the default weights to avoid overfitting a small sample.
+    Uses *only* trades collected during the current bot session — no
+    historical CSV data is read.  This ensures the model adapts to
+    prevailing market conditions and immediately penalises indicators
+    that are producing losses *right now*.
+
+    When ``session_trades`` is ``None``, falls back to the global
+    :class:`SessionTracker`.
     """
-    X, y, completed = build_learning_dataset(max_recent_trades=max_recent_trades)
-    if completed.empty:
+    tracker = get_session_tracker()
+    trades = session_trades if session_trades is not None else tracker.get_trades()
+
+    if not trades:
         if not quiet:
-            print("No completed trades found.")
+            logger.info("No session trades available for learning.")
         return None
 
-    if len(completed) < int(min_trades):
+    X, y, completed = _build_session_dataset(trades)
+    if X.empty or len(completed) < int(min_trades):
         if not quiet:
-            print(f"Not enough completed trades to optimize weights (found {len(completed)}, need {min_trades}).")
+            logger.info(f"Not enough session trades to optimise weights (found {len(completed)}, need {min_trades}).")
         return None
 
     if len(set(y.tolist())) < 2:
         if not quiet:
-            print("Model cannot be trained yet: need both wins and losses.")
+            logger.info("Model cannot be trained yet: need both wins and losses in the session.")
         return None
 
     train_accuracy = None
@@ -305,7 +295,7 @@ def optimize_weights(
 
     if SKLEARN_AVAILABLE:
         split_idx = int(len(X) * 0.8)
-        use_holdout = len(X) >= 50 and split_idx > 0 and split_idx < len(X)
+        use_holdout = len(X) >= 20 and split_idx > 0 and split_idx < len(X)
 
         scaler = StandardScaler()
         if use_holdout:
@@ -331,43 +321,63 @@ def optimize_weights(
         train_accuracy = float(accuracy_score(y_train, model.predict(X_train_scaled)))
         if use_holdout and X_test_scaled is not None and y_test is not None:
             holdout_accuracy = float(accuracy_score(y_test, model.predict(X_test_scaled)))
-        model_type = "logistic_regression"
+            state_model_type = "logistic_regression_session_holdout"
+        else:
+            state_model_type = "logistic_regression_session"
     else:
-        # Fallback learner: reward indicators whose agreement with the entry
-        # direction is associated with wins, penalize those associated with losses.
         outcome = (y.astype(float) * 2.0) - 1.0
         raw_weights = {}
         for key in ACTIVE_FEATURES:
             edge = float((X[key].astype(float) * outcome).mean())
             raw_weights[key] = max(0.0, edge)
-        model_type = "correlation_fallback"
+        state_model_type = "correlation_fallback_session"
 
     learned = _normalize_weights(raw_weights)
     shrinkage = max(0.0, min(1.0, float(shrinkage)))
 
-    # Holdout gate: if model can't predict on unseen data, discard learned weights
+    # Adaptive shrinkage: use a higher learning ratio earlier in the session
+    # so corrections take effect fast, then taper off as sample grows.
+    n = len(completed)
+    session_boost = max(0.0, 0.20 - (n / 200.0) * 0.20)
+    effective_shrinkage = min(1.0, shrinkage + session_boost)
+
+    # Holdout gate: discard learned weights if model can't generalise
     if holdout_accuracy is not None and holdout_accuracy < 0.50:
         if not quiet:
-            print(f"Holdout accuracy {holdout_accuracy:.1%} < 50% — discarding learned weights (overfitting).")
-            print("Keeping default weights only.")
+            logger.warning(f"Holdout accuracy {holdout_accuracy:.1%} < 50%% — discarding learned weights.")
         learned = DEFAULT_WEIGHTS.copy()
-        shrinkage = 0.0  # 100% defaults
+        effective_shrinkage = 0.0
     elif holdout_accuracy is not None and holdout_accuracy < 0.55:
         if not quiet:
-            print(f"Holdout accuracy {holdout_accuracy:.1%} weak — reducing learned weight influence.")
-        shrinkage = min(shrinkage + 0.15, 0.35)
+            logger.info(f"Holdout accuracy {holdout_accuracy:.1%} weak — reducing learned weight influence.")
+        effective_shrinkage = min(effective_shrinkage + 0.15, 0.35)
 
     blended = _normalize_weights({
-        key: (DEFAULT_WEIGHTS[key] * (1.0 - shrinkage)) + (learned[key] * shrinkage)
+        key: (DEFAULT_WEIGHTS[key] * (1.0 - effective_shrinkage)) + (learned[key] * effective_shrinkage)
         for key in ACTIVE_FEATURES
     })
 
-    net_pnl = pd.to_numeric(completed["net_pnl"], errors="coerce").fillna(0.0)
-    wins = net_pnl[net_pnl > 0]
-    losses = net_pnl[net_pnl <= 0]
-    win_rate = float((net_pnl > 0).mean())
-    total_net_pnl = float(net_pnl.sum())
-    if total_net_pnl < 0 and win_rate < 0.45:
+    net_pnl_values = pd.to_numeric(completed["net_pnl"], errors="coerce").fillna(0.0)
+    wins = net_pnl_values[net_pnl_values > 0]
+    losses = net_pnl_values[net_pnl_values <= 0]
+    win_rate = float((net_pnl_values > 0).mean())
+    total_net_pnl = float(net_pnl_values.sum())
+
+    # Aggressive risk reduction during losing streaks within the session
+    consecutive_losses = 0
+    for pnl in reversed(net_pnl_values.tolist()):
+        if pnl <= 0:
+            consecutive_losses += 1
+        else:
+            break
+
+    if total_net_pnl < 0 and win_rate < 0.35:
+        risk_multiplier = 0.10
+    elif consecutive_losses >= 5:
+        risk_multiplier = 0.25
+    elif consecutive_losses >= 3:
+        risk_multiplier = 0.40
+    elif total_net_pnl < 0 and win_rate < 0.45:
         risk_multiplier = 0.25
     elif total_net_pnl < 0 or win_rate < 0.50:
         risk_multiplier = 0.50
@@ -375,17 +385,22 @@ def optimize_weights(
         risk_multiplier = 0.75
     else:
         risk_multiplier = 1.0
+
+    state_model_type_final = state_model_type
     state = {
         "learned_at": datetime.now(UTC).isoformat(),
-        "model_type": model_type,
+        "source": "session",
+        "model_type": state_model_type_final,
         "completed_trades": int(len(completed)),
         "win_rate": round(win_rate, 4),
         "net_pnl": round(total_net_pnl, 6),
         "avg_win": round(float(wins.mean()) if not wins.empty else 0.0, 6),
         "avg_loss": round(float(losses.mean()) if not losses.empty else 0.0, 6),
+        "consecutive_losses": consecutive_losses,
         "risk_multiplier": risk_multiplier,
         "train_accuracy": round(train_accuracy, 4) if train_accuracy is not None else None,
         "holdout_accuracy": round(holdout_accuracy, 4) if holdout_accuracy is not None else None,
+        "shrinkage_used": round(effective_shrinkage, 4),
         "weights": blended,
     }
 
@@ -407,8 +422,7 @@ def optimize_weights(
         json.dump(state, f, indent=4)
 
     if not quiet:
-        print(f"Saved learned weights to {WEIGHTS_FILE}")
-        print(json.dumps(state, indent=2))
+        logger.info(f"Session learning updated: {len(completed)} trades, WR {win_rate:.1%}, risk {risk_multiplier:.2f}x, PnL {total_net_pnl:+.4f}")
     return state
 
 

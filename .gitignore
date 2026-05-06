@@ -12,3 +12,4 @@ env/
 dashboard_overrides.yaml
 .DS_Store
 Thumbs.db
+.md

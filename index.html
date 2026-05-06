@@ -88,15 +88,16 @@
           <div class="card-content">
             <div class="flex items-baseline gap-2"><span class="text-3xl md:text-4xl font-black text-white tracking-tighter" id="balance">0.00</span><span class="text-xs text-slate-500 font-mono font-bold">USDC</span></div>
             <div class="mt-4 grid grid-cols-2 gap-4">
-               <div class="bg-black/20 p-3 rounded-xl border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Total Profit</p><p class="text-sm font-black text-emerald-400" id="totalProfit">+$0.00</p></div>
-               <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-right"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Total Loss</p><p class="text-sm font-black text-rose-500" id="totalLoss">-$0.00</p></div>
+               <div class="bg-black/20 p-3 rounded-xl border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Realized Profit</p><p class="text-sm font-black text-emerald-400" id="totalProfit">+$0.00</p></div>
+               <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-right"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Realized Loss</p><p class="text-sm font-black text-rose-500" id="totalLoss">-$0.00</p></div>
             </div>
             <div class="mt-4 flex items-center justify-between bg-slate-900/60 p-3 rounded-xl border border-white/5"><span class="text-xs text-slate-400 font-black uppercase tracking-wider">Session PnL</span><span class="text-lg font-black tracking-tight" id="pnl">0.00%</span></div>
+            <div class="mt-3 flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/5"><span class="text-xs text-slate-400 font-black uppercase tracking-wider">Open PnL</span><span class="text-base font-black tracking-tight" id="openPnl">0.00 USDC</span></div>
           </div>
         </div>
 
         <!-- TACTICAL CARD -->
-        <div class="terminal-card rounded-3xl border-emerald-500/30 inner-glow col-span-1" id="cardTactical">
+        <div class="terminal-card rounded-3xl border-white/10 inner-glow col-span-1 transition-all duration-500" id="cardTactical">
           <div class="card-header flex-wrap gap-y-3">
             <div class="flex items-center gap-2 md:gap-3 flex-1 min-w-[150px]">
               <p class="text-[10px] md:text-xs font-black text-white uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="crosshair" class="w-4 h-4 text-emerald-400"></i> <span id="symbolName">TACTICAL POSITION</span></p>
@@ -149,6 +150,7 @@
             <div class="bg-black/40 p-4 rounded-2xl border border-white/5 relative overflow-hidden group">
               <div class="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <p id="aiRationale" class="text-xs font-mono text-slate-300 leading-relaxed relative z-10">Initializing neural vector...</p>
+              <p id="gateTrace" class="mt-2 text-[10px] font-mono text-amber-300 leading-relaxed relative z-10 uppercase tracking-wide">Gate: -</p>
               <div class="mt-2 h-0.5 w-full bg-slate-800/50 rounded-full overflow-hidden">
                 <div id="signalConf" class="h-full bg-indigo-500 transition-all duration-700 w-0"></div>
               </div>
@@ -285,6 +287,8 @@
         safeSet('balance', fmt(s.balance, 2));
         safeSet('totalProfit', `+$${fmt(s.pnl_stats?.total_profit || 0, 2)}`);
         safeSet('totalLoss', `-$${fmt(Math.abs(s.pnl_stats?.total_loss || 0), 2)}`);
+        const openPnL = Number(s.unrealized_pnl || 0);
+        safeSet('openPnl', `${openPnL >= 0 ? '+' : '-'}$${fmt(Math.abs(openPnL), 2)} USDC`, `text-base font-black tracking-tight ${openPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
         const curP = s.price || 0, lastC = s.last_close || curP, pColor = curP >= lastC ? 'text-emerald-400' : 'text-rose-400';
         safeSet('livePrice', curP ? fmt(curP, 4) : '---.----', `text-3xl font-mono font-black tracking-tighter ${pColor}`);
         const pnlV = s.pnl_pct || 0; safeSet('pnl', `${fmt(pnlV, 2)}%`, `text-base font-black tracking-tight ${pnlV>=0?'text-emerald-400':'text-rose-400'}`);
@@ -315,11 +319,29 @@
         safeSet('riskPill', `${overlay.risk_mode || 'NORMAL'} RISK`, `text-[10px] font-black px-1.5 py-0.5 rounded border uppercase ${overlay.risk_mode==='AGGRESSIVE'?'bg-amber-500/10 text-amber-400 border-amber-500/20':'bg-slate-800 text-slate-500 border-slate-700'}`);
         
         safeSet('aiRationale', overlay.rationale || sig.reason || 'Initializing neural vector...');
+        safeSet('gateTrace', sig.gate_trace ? `Gate: ${sig.gate_trace}` : (sig.hold_reason ? `Gate: ${sig.hold_reason}` : 'Gate: -'));
         if (q('signalConf')) { 
           q('signalConf').style.width = `${conf}%`; 
           q('signalConf').className = `h-full transition-all duration-700 ${sig.action==='BUY'?'bg-emerald-500':sig.action==='SELL'?'bg-rose-500':'bg-slate-600'}`; 
         }
         if (q('posSide')) { q('posSide').textContent = pos?pos.side:'FLAT'; q('posSide').className = `text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${pos?(pos.side==='LONG'?'bg-emerald-500/20 text-emerald-400 border-emerald-500/30':'bg-rose-500/20 text-rose-400 border-rose-500/30'):'bg-slate-800 text-slate-500 border-slate-700'}`; }
+        
+        const cardTactical = q('cardTactical');
+        if (cardTactical) {
+          if (pos) {
+            if (pos.side === 'LONG') {
+              cardTactical.classList.add('border-emerald-500/50', 'bg-emerald-500/5');
+              cardTactical.classList.remove('border-rose-500/50', 'bg-rose-500/5', 'border-white/10');
+            } else if (pos.side === 'SHORT') {
+              cardTactical.classList.add('border-rose-500/50', 'bg-rose-500/5');
+              cardTactical.classList.remove('border-emerald-500/50', 'bg-emerald-500/5', 'border-white/10');
+            }
+          } else {
+            cardTactical.classList.add('border-white/10');
+            cardTactical.classList.remove('border-emerald-500/50', 'bg-emerald-500/5', 'border-rose-500/50', 'bg-rose-500/5');
+          }
+        }
+
         safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-'); safeSet('posSl', pos ? fmt(pos.sl, 5) : '-'); safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
         const mCtx = s.mtf_context || {}, m5 = mCtx['5m'] || {}, allLvls = [...(m5.support_levels || []), ...(m5.resistance_levels || [])].map(l => parseFloat(l)).filter(l => !isNaN(l)).sort((a,b)=>a-b);
         safeSet('bullStrike', (allLvls.filter(l => l > curP)[0]) ? fmt(allLvls.filter(l => l > curP)[0], 5) : 'WAITING');

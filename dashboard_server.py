@@ -22,6 +22,7 @@ EDITABLE_FIELDS = [
     {"key": "leverage.enabled", "label": "Dynamic Leverage", "type": "bool", "cat": "Execution Engine"},
     {"key": "leverage.max_leverage", "label": "Max Leverage Cap", "type": "number", "step": "1", "min": 1, "max": 100, "cat": "Execution Engine"},
     {"key": "execution.use_limit_orders", "label": "Use Limit Orders", "type": "bool", "cat": "Execution Engine"},
+    {"key": "execution.close_positions_on_pause", "label": "Close Positions On Pause", "type": "bool", "cat": "Execution Engine"},
     {"key": "execution.min_seconds_between_trades", "label": "Trade Cooldown (s)", "type": "number", "step": "1", "min": 60, "max": 3600, "cat": "Execution Engine"},
     
     # CATEGORY: RISK MANAGEMENT

@@ -10,7 +10,7 @@
 # =============================================================================
 
 symbol: "AVAX/USDC:USDC"
-timeframe: "1m"
+timeframe: "3m"
 macro_timeframe: "5m"
 
 data:
