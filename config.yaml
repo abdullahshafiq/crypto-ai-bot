@@ -5,7 +5,7 @@
 # =============================================================================
 
 symbol: "AVAX/USDC:USDC"
-timeframe: "3"
+timeframe: "3m"
 macro_timeframe: "5m"
 
 # Market data source (spot vs futures)
@@ -23,7 +23,6 @@ execution:
   spot_balance_pct: 0.35
   spot_reserve_pct: 0.30
   spot_max_layers: 3
-  dynamic_leverage: true
   paper_starting_balance_usdt: 50
   fee_rate: 0.0006
   fee_slippage_buffer_pct: 0.0002
@@ -33,18 +32,18 @@ execution:
   reversal_min_confidence: 0.45     # slightly above entry min_conf
   reversal_min_score: 0.25
   reversal_min_net_edge_pct: 0.0020
-  break_even_trigger_pct: 0.0015
-  break_even_buffer_pct: 0.0004
+  break_even_trigger_pct: 0.0030
+  break_even_buffer_pct: 0.0008
   profit_trailing_enabled: true
-  profit_trailing_activation_pct: 0.0015 # arm trailing only after +0.15% profit
+  profit_trailing_activation_pct: 0.0030 # arm trailing only after +0.30% profit
   trailing_tp_enabled: true
-  trailing_tp_giveback_pct: 0.12      # close when profit gives back 12% from peak
-  trailing_tp_min_peak_pct: 0.0020    # needs at least +0.20% peak profit first
-  trail_tighten_1_pct: 0.0020       # T1 trigger: start trailing at 0.20% profit
-  trail_tighten_2_pct: 0.0040       # T2 trigger: tighten at 0.40% profit (was 0.24%)
-  trail_t1_gap_pct: 0.0025          # T1 trails 0.25% behind best price
-  trail_t2_gap_pct: 0.0020          # T2 trails 0.20% behind best price (was 0.10%)
-  min_profit_after_fees: 0.0005
+  trailing_tp_giveback_pct: 0.35      # allow more room for trend continuation
+  trailing_tp_min_peak_pct: 0.0060    # needs at least +0.60% peak profit first
+  trail_tighten_1_pct: 0.0050       # T1 trigger: start trailing at 0.50% profit
+  trail_tighten_2_pct: 0.0100       # T2 trigger: tighten at 1.00% profit
+  trail_t1_gap_pct: 0.0040          # T1 trails 0.40% behind best price
+  trail_t2_gap_pct: 0.0030          # T2 trails 0.30% behind best price
+  min_profit_after_fees: 0.0010
   exit_on_reversal_only_in_profit: true
   use_limit_orders: true
   use_native_trailing_stop: true
@@ -58,31 +57,31 @@ execution:
   resting_entry_offset_pct: 0.0002
   resting_entry_max_distance_pct: 0.0125
   trailing_callback_pct: 0.65
-  same_side_reentry_cooldown_seconds: 180
+  same_side_reentry_cooldown_seconds: 300
   same_side_reentry_strong_confidence: 0.85
-  scalp_min_hold_seconds: 10
+  scalp_min_hold_seconds: 20
   scalp_runner_enabled: true
-  scalp_runner_pullback_pct: 0.0012
-  scalp_runner_min_lock_pct: 0.0025
-  scalp_runner_exchange_tp_multiplier: 3.0
+  scalp_runner_pullback_pct: 0.0020
+  scalp_runner_min_lock_pct: 0.0040
+  scalp_runner_exchange_tp_multiplier: 4.0
   scalp_runner_partial_exit_pct: 0.45
-  ttl_exit_seconds: 600             # 2 candles minimum (was 300 = 1 candle)
+  ttl_exit_seconds: 1800             # let winning trades live longer before TTL pressure
 
 # Dynamic Leverage (confidence-based)
 leverage:
   enabled: true
-  min_leverage: 1
+  min_leverage: 2
   max_leverage: 4
   confidence_levels:
-    0.10: 1.0                  # floor: no leverage boost at min confidence
-    0.20: 2.0                  # entry zone
+    0.10: 2.0                  # floor: 2x even at minimum entry confidence
+    0.15: 2.0                  # matches min_conf so all entries start at 2x
     0.35: 3.0                  # moderate
     0.50: 4.0                  # strong (Cap at 4x)
     0.75: 4.0                  # max conviction
   use_score_multiplier: true
   score_weight: 0.2
   atr_volatility_scaling: true
-  atr_reference_pct: 0.5      # target ATR% before scaling (matches indicator % units)
+  atr_reference_pct: 0.02     # target ATR% before scaling — ~2% is typical AVAX volatility
   atr_min_multiplier: 0.5
 
 # Multi-Timeframe Trend + S/R
@@ -133,7 +132,7 @@ strategy:
   max_ret_5s: 0.0018
   block_on_volume_spike: false
   fixed_trade_usdt: 25
-  tp_pct: 0.0035              # wider TP so runner can arm on this pair
+  tp_pct: 0.0060              # allow trend runners more room before arming
   sl_pct: 0.0025              # tighter default SL to cut failed calls sooner
   max_structural_sl_pct: 0.0060  # cap structural SL at 0.6%
   min_reward_risk: 0.65
@@ -153,7 +152,7 @@ strategy:
   vpoc_near_pct: 0.0010
   vpoc_break_pct: 0.0015
   session_filter_enabled: true
-  session_block_hours_utc: [3, 4, 5, 6]
+  session_block_hours_utc: []
   session_block_min_score: 0.35
   entry_near_resistance_block_pct: 0.0030
   entry_near_support_block_pct: 0.0030
@@ -171,7 +170,10 @@ strategy:
   range_position_veto_enabled: true
   range_veto_top_pct: 0.75
   range_veto_bottom_pct: 0.25
-  range_veto_escape_score: 0.80
+  range_veto_escape_score: 0.90
+  rsi_ob_entry_gate: 72
+  rsi_os_entry_gate: 28
+  orb_volume_mult: 1.5
   spread_atr_ratio_max: 0.15
   ob_midpoint_tolerance_pct: 0.0015
   anchored_vwap_near_pct: 0.0010

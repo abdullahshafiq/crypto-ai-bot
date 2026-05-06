@@ -1,3 +1,0 @@
-from execution import BinanceFuturesExecution
-
-__all__ = ["BinanceFuturesExecution"]

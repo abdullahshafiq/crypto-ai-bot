@@ -546,9 +546,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     if atr_pct_now < atr_min or atr_pct_now > atr_max:
         return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"ATR guard ({atr_pct_now:.3%})", "weights": {}}
 
-    # ADX Ranging Market Filter: lowered to 10 for absolute sensitivity during testing
-    if adx_value < 10:
-        return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Ranging market (ADX:{adx_value:.0f}<10)", "weights": {}}
+    # ADX Ranging Market Filter: below 15 = choppy range, indicators are noise
+    if adx_value < 15:
+        return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Ranging market (ADX:{adx_value:.0f}<15)", "weights": {}}
 
     # --- 4. ALPHA OVERLAY & REFINEMENT ---
     # The 'Alpha Overlay' adds extra weight when multiple trends align.
@@ -1492,6 +1492,63 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         support=support,
         resistance=resistance,
     )
+
+    # --- EXHAUSTION & DIVERGENCE HARD GATE ---
+    # This is the final guard against entering at the very top (BUY) or very bottom (SELL).
+    # All lagging indicators (EMA cross, PSAR flip, MACD cross) turn bullish/bearish exactly
+    # AT the peak/trough because that's when the move completes. These checks detect that the
+    # move has already peaked BEFORE committing to entry.
+    if signal.get("action") in {"BUY", "SELL"}:
+        _final_action = signal["action"]
+        _exhaust_block = False
+        _div_block = False
+        _rsi_block = False
+
+        # 1. Momentum exhaustion: ROC decelerating for 3 bars = move running out of steam
+        if _final_action == "BUY" and momentum_exhaustion == "BULL_EXHAUST":
+            _exhaust_block = True
+        elif _final_action == "SELL" and momentum_exhaustion == "BEAR_EXHAUST":
+            _exhaust_block = True
+
+        # 1b. MACD histogram dying: histogram in the right direction but declining 2 bars straight
+        # (buying positive-but-shrinking histogram = buying into an already fading move)
+        try:
+            _h0 = float(macd_diff)
+            _h1 = float(prev_macd_diff)
+            _h2 = float(prev2_macd_diff)
+            if _final_action == "BUY" and _h0 > 0 and _h1 > 0 and _h0 < _h1 < _h2:
+                _exhaust_block = True
+            elif _final_action == "SELL" and _h0 < 0 and _h1 < 0 and _h0 > _h1 > _h2:
+                _exhaust_block = True
+        except (TypeError, ValueError):
+            pass
+
+        # 2. Classic divergence: price making new high/low but MACD is not = top/bottom confirmation
+        if _final_action == "BUY" and bear_div:
+            _div_block = True
+        elif _final_action == "SELL" and bull_div:
+            _div_block = True
+
+        # 3. RSI extremes at entry: overbought longs and oversold shorts are chasing the move
+        _rsi_ob_gate = float(strategy_config.get("rsi_ob_entry_gate", 72) or 72)
+        _rsi_os_gate = float(strategy_config.get("rsi_os_entry_gate", 28) or 28)
+        if _final_action == "BUY" and rsi_14 > _rsi_ob_gate:
+            _rsi_block = True
+        elif _final_action == "SELL" and rsi_14 < _rsi_os_gate:
+            _rsi_block = True
+
+        if _exhaust_block and _div_block:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"ExhaustDiv Gate: {momentum_exhaustion} + divergence — top/bottom entry blocked"
+        elif _exhaust_block and _rsi_block:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"ExhaustRSI Gate: {momentum_exhaustion} + RSI {rsi_14:.0f} — top/bottom entry blocked"
+        elif _div_block and _rsi_block:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"DivRSI Gate: divergence + RSI {rsi_14:.0f} — top/bottom entry blocked"
+        elif _rsi_block and abs(total_score) < 0.70:
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"RSI Extreme Gate: RSI {rsi_14:.0f} — no entry without strong breakout score (>0.70)"
 
     # Final wall-rejection rescue:
     # If the system ended up HOLD because the long was rejected at resistance,

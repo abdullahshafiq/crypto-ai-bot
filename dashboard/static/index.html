@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quantum Bot | Command Center</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@100..900&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui'], mono: ['Geist Mono', 'monospace'] },
+          colors: { obsidian: '#020617', surface: '#0f172a', card: '#0b1120', panel: '#0d1526', accent: '#10b981' }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #020617; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em; margin: 0; padding: 0; min-height: 100vh; overflow-x: hidden; }
+    .terminal-card { background: linear-gradient(145deg, #0b1120 0%, #080d1a 100%); border: 1px solid rgba(71, 85, 105, 0.5); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.6); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; }
+    .card-collapsed { min-height: 0 !important; height: auto !important; }
+    .card-content { max-height: 2000px; transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; opacity: 1; padding: 0 1rem 1rem 1rem; }
+    @media (min-width: 768px) { .card-content { padding: 0 1.5rem 1.5rem 1.5rem; } }
+    .card-collapsed .card-content { max-height: 0 !important; min-height: 0 !important; height: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; opacity: 0; pointer-events: none; }
+    .chart-height { min-height: 300px !important; }
+    @media (min-width: 768px) { .chart-height { min-height: 450px !important; } }
+    .card-collapsed .chart-height { min-height: 0 !important; height: 0 !important; }
+    .card-header { padding: 1rem; display: flex; align-items: center; justify-content: space-between; width: 100%; }
+    @media (min-width: 768px) { .card-header { padding: 1.5rem; } }
+    .card-collapsed .card-header { padding-bottom: 1.5rem; }
+    .collapse-icon { transition: transform 0.3s ease; }
+    .card-collapsed .collapse-icon { transform: rotate(180deg); }
+    .inner-glow { box-shadow: inset 0 1px 1px 0 rgba(255,255,255,0.1); }
+    .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+    #statusLines { scrollbar-width: none; font-variant-ligatures: none; }
+    #statusLines::-webkit-scrollbar { display: none; }
+    .ticker-wrap { width: 100%; overflow: hidden; background: #0f172a; border-top: 1px solid #1e293b; padding: 6px 0; }
+    .ticker { display: inline-block; white-space: nowrap; animation: ticker 60s linear infinite; }
+    .ticker__item { display: inline-block; padding: 0 2rem; font-size: 11px; font-weight: 800; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.1em; }
+    @keyframes ticker { 0% { transform: translate3d(0, 0, 0); } 100% { transform: translate3d(-100%, 0, 0); } }
+    .app-container { min-height: 100vh; display: flex; flex-direction: column; }
+  </style>
+</head>
+<body class="text-slate-300 font-sans selection:bg-emerald-500/30">
+  <div class="app-container">
+    <header class="flex items-center justify-between px-3 md:px-6 py-2 md:py-4 border-b border-slate-800 bg-obsidian shrink-0 gap-2">
+      <div class="flex items-center gap-2 md:gap-3 overflow-hidden">
+        <div class="w-8 h-8 md:w-10 md:h-10 bg-emerald-500/10 border border-emerald-500/40 rounded-xl flex items-center justify-center inner-glow shrink-0">
+          <i data-lucide="zap" class="w-5 h-5 md:w-6 md:h-6 text-emerald-400"></i>
+        </div>
+        <div class="truncate">
+          <h1 class="text-sm md:text-xl font-black text-white tracking-tight uppercase leading-none truncate">Quantum Command <span class="hidden sm:inline text-[8px] text-slate-500 font-mono">v4.0.2</span></h1>
+          <div class="flex items-center gap-1.5 md:gap-2 mt-0.5 md:mt-1">
+            <span id="apiStatus" class="text-[8px] md:text-[9px] font-black px-1 md:px-1.5 py-0.5 rounded bg-slate-800 border border-slate-600 text-slate-400 uppercase">OFFLINE</span>
+            <div class="h-1 w-1 rounded-full bg-slate-600 shrink-0" id="connDot"></div>
+            <span id="uptime" class="text-[8px] md:text-[9px] font-mono font-bold text-slate-500 uppercase tracking-tighter truncate">00:00:00</span>
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center gap-1.5 md:gap-4 shrink-0">
+         <button id="pauseToggleBtn" class="h-8 md:h-10 px-2 md:px-4 rounded-lg md:rounded-xl bg-slate-900 border border-slate-700 flex items-center gap-1.5 md:gap-2 hover:bg-slate-800 transition-all shrink-0">
+           <div id="pauseIcon" class="w-2 h-2 md:w-2.5 md:h-2.5 rounded-full bg-slate-600"></div>
+           <span id="pauseText" class="text-[10px] md:text-xs font-black text-slate-200 uppercase tracking-widest whitespace-nowrap">BOT ON</span>
+         </button>
+         <button id="openSettings" class="w-8 h-8 md:w-10 md:h-10 rounded-lg md:rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center hover:bg-slate-800 transition-all shrink-0">
+           <i data-lucide="sliders-vertical" class="w-4 h-4 md:w-5 md:h-5 text-slate-300"></i>
+         </button>
+      </div>
+    </header>
+
+    <main class="p-4 md:p-6 bg-obsidian">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6 auto-rows-min">
+        
+        <!-- EQUITY CARD -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1" id="cardEquity">
+          <div class="card-header">
+            <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="wallet" class="w-4 h-4"></i> Total Equity</p>
+            <button onclick="toggleCard('cardEquity')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div class="card-content">
+            <div class="flex items-baseline gap-2"><span class="text-3xl md:text-4xl font-black text-white tracking-tighter" id="balance">0.00</span><span class="text-xs text-slate-500 font-mono font-bold">USDC</span></div>
+            <div class="mt-4 grid grid-cols-2 gap-4">
+               <div class="bg-black/20 p-3 rounded-xl border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Realized Profit</p><p class="text-sm font-black text-emerald-400" id="totalProfit">+$0.00</p></div>
+               <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-right"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Realized Loss</p><p class="text-sm font-black text-rose-500" id="totalLoss">-$0.00</p></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between bg-slate-900/60 p-3 rounded-xl border border-white/5"><span class="text-xs text-slate-400 font-black uppercase tracking-wider">Session PnL</span><span class="text-lg font-black tracking-tight" id="pnl">0.00%</span></div>
+            <div class="mt-3 flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/5"><span class="text-xs text-slate-400 font-black uppercase tracking-wider">Open PnL</span><span class="text-base font-black tracking-tight" id="openPnl">0.00 USDC</span></div>
+            <div class="mt-3 bg-black/30 p-3 rounded-2xl border border-white/5">
+              <div class="flex items-center justify-between gap-2">
+                <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">PnL Estimator</p>
+                <span id="estSide" class="text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase">FLAT</span>
+              </div>
+              <div class="mt-3 grid grid-cols-2 gap-2 text-[10px] font-mono">
+                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Entry</p><p id="estEntry" class="font-bold text-white">-</p></div>
+                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Current</p><p id="estCurrent" class="font-bold text-white">-</p></div>
+                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Leverage</p><p id="estLev" class="font-bold text-white">-</p></div>
+                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Notional</p><p id="estNotional" class="font-bold text-white">-</p></div>
+                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Gross</p><p id="estGross" class="font-bold text-emerald-400">-</p></div>
+                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Net</p><p id="estNet" class="font-bold text-emerald-400">-</p></div>
+              </div>
+              <div id="estFormula" class="mt-2 text-[10px] font-mono text-slate-500 leading-relaxed">LONG: notional × (price / entry - 1); SHORT: notional × (1 - price / entry)</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TACTICAL CARD -->
+        <div class="terminal-card rounded-3xl border-white/10 inner-glow col-span-1 transition-all duration-500" id="cardTactical">
+          <div class="card-header flex-wrap gap-y-3">
+            <div class="flex items-center gap-2 md:gap-3 flex-1 min-w-[150px]">
+              <p class="text-[10px] md:text-xs font-black text-white uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="crosshair" class="w-4 h-4 text-emerald-400"></i> <span id="symbolName">TACTICAL POSITION</span></p>
+              <span id="posSide" class="text-[8px] md:text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase whitespace-nowrap">FLAT</span>
+            </div>
+            <div class="flex items-center gap-2 ml-auto">
+              <button id="emergencyExit" class="px-2 py-1 rounded bg-rose-500/20 border border-rose-500/40 text-rose-500 text-[8px] font-black uppercase hover:bg-rose-500 hover:text-white transition-all shrink-0">Flatten</button>
+              <button onclick="toggleCard('cardTactical')" class="shrink-0"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+            </div>
+          </div>
+          <div class="card-content">
+            <div class="mb-6 bg-black/40 p-4 rounded-2xl border border-white/5 flex flex-col items-center">
+              <p class="text-[9px] font-black text-slate-500 uppercase tracking-[0.3em] mb-1">Live Price Vector</p>
+              <p class="text-2xl md:text-3xl font-mono font-black text-white tracking-tighter" id="livePrice">---.----</p>
+            </div>
+            <div class="grid grid-cols-3 gap-2 text-center">
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Entry</p><p class="text-sm font-mono font-bold text-white" id="posEntry">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-rose-500/70 uppercase mb-1">Risk SL</p><p class="text-sm font-mono font-bold text-rose-400" id="posSl">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-emerald-500/70 uppercase mb-1">Target TP</p><p class="text-sm font-mono font-bold text-emerald-400" id="posTp">-</p></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI DECISION MATRIX -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1 border-slate-500/20" id="cardDecision">
+          <div class="card-header">
+            <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
+              <i data-lucide="brain-circuit" class="w-4 h-4 text-slate-400"></i> AI Decision Matrix
+            </p>
+            <button onclick="toggleCard('cardDecision')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div class="card-content">
+            <div class="flex items-center justify-between mb-4">
+              <div class="flex flex-col">
+                <span id="signalText" class="text-xl font-black text-white uppercase tracking-tighter">-</span>
+                <div class="flex gap-1.5 mt-1">
+                  <span id="riskPill" class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase">NORMAL RISK</span>
+                  <span id="biasPill" class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase">NEUTRAL</span>
+                </div>
+              </div>
+              <div class="relative w-16 h-16 flex items-center justify-center">
+                <svg class="w-full h-full -rotate-90">
+                  <circle cx="32" cy="32" r="28" fill="none" stroke="#1e293b" stroke-width="4"></circle>
+                  <circle id="confCircle" cx="32" cy="32" r="28" fill="none" stroke="#475569" stroke-width="4" stroke-dasharray="176" stroke-dashoffset="176" class="transition-all duration-1000"></circle>
+                </svg>
+                <span id="signalConfVal" class="absolute inset-0 flex items-center justify-center text-[10px] font-mono font-bold text-white">0%</span>
+              </div>
+            </div>
+            
+            <div class="bg-black/40 p-4 rounded-2xl border border-white/5 relative overflow-hidden group">
+              <div class="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
+              <p id="aiRationale" class="text-xs font-mono text-slate-300 leading-relaxed relative z-10">Initializing neural vector...</p>
+              <p id="gateTrace" class="mt-2 text-[10px] font-mono text-amber-300 leading-relaxed relative z-10 uppercase tracking-wide">Gate: -</p>
+              <div class="mt-2 h-0.5 w-full bg-slate-800/50 rounded-full overflow-hidden">
+                <div id="signalConf" class="h-full bg-indigo-500 transition-all duration-700 w-0"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- LIVE MARKET CHART -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-3 flex flex-col" id="cardChart">
+          <div class="card-header items-start md:items-center gap-4">
+            <div class="flex flex-wrap items-center gap-3 md:gap-6 flex-1">
+              <p class="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 shrink-0"><i data-lucide="bar-chart-3" class="w-4 h-4"></i> Live Market Chart</p>
+              <div class="flex gap-1 bg-black/40 p-0.5 rounded-lg border border-white/5 shrink-0" id="tfSelector">
+                <button onclick="setChartTF('1m')" class="px-2 py-0.5 rounded text-[8px] font-black uppercase hover:bg-white/10 transition-colors text-slate-400" data-tf="1m">1m</button>
+                <button onclick="setChartTF('3m')" class="px-2 py-0.5 rounded text-[8px] font-black uppercase hover:bg-white/10 transition-colors text-slate-400" data-tf="3m">3m</button>
+                <button onclick="setChartTF('5m')" class="px-2 py-0.5 rounded text-[8px] font-black uppercase hover:bg-white/10 transition-colors text-slate-400" data-tf="5m">5m</button>
+                <button onclick="setChartTF('15m')" class="px-2 py-0.5 rounded text-[8px] font-black uppercase hover:bg-white/10 transition-colors text-slate-400" data-tf="15m">15m</button>
+                <button onclick="setChartTF('1h')" class="px-2 py-0.5 rounded text-[8px] font-black uppercase hover:bg-white/10 transition-colors text-slate-400" data-tf="1h">1h</button>
+              </div>
+              <div class="flex flex-wrap gap-2 text-[8px] font-black uppercase">
+                <span class="text-emerald-400 px-2 py-1 bg-emerald-500/10 rounded border border-emerald-500/20 whitespace-nowrap">Bull Strike: <span id="bullStrike">-</span></span>
+                <span class="text-rose-400 px-2 py-1 bg-rose-500/10 rounded border border-rose-500/20 whitespace-nowrap">Bear Strike: <span id="bearStrike">-</span></span>
+              </div>
+            </div>
+            <button onclick="toggleCard('cardChart')" class="p-1 hover:bg-white/5 rounded-lg transition-colors shrink-0"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div id="chartContainer" class="card-content chart-height flex-1 bg-black/20 rounded-2xl border border-white/5 overflow-hidden"></div>
+        </div>
+
+        <!-- LIVE EXECUTION LOG -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-2 flex flex-col max-h-[450px] overflow-hidden" id="cardTelemetry">
+           <div class="card-header border-b border-white/5 bg-black/20">
+              <div class="flex items-center justify-between w-full">
+                 <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="terminal" class="w-4 h-4"></i> Live Execution Log</p>
+                 <div class="flex items-center gap-4">
+                    <div id="indicatorsHUD" class="flex gap-4 text-xs font-mono"></div>
+                    <button onclick="toggleCard('cardTelemetry')" class="p-1 hover:bg-white/5 rounded-lg transition-colors"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+                 </div>
+              </div>
+           </div>
+           <div id="statusLines" class="card-content flex-1 p-6 font-mono text-xs text-slate-300 overflow-y-auto whitespace-pre-wrap leading-relaxed custom-scrollbar"></div>
+        </div>
+
+        <!-- MULTI-TIMEFRAME ANALYSIS -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1" id="cardMTF">
+          <div class="card-header">
+            <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="layers" class="w-4 h-4"></i> Multi-Timeframe Analysis</p>
+            <button onclick="toggleCard('cardMTF')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div id="mtfContainer" class="card-content space-y-1.5"></div>
+        </div>
+
+        <!-- PERFORMANCE STATS -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-3" id="cardPerf">
+          <div class="card-header">
+            <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="trophy" class="w-4 h-4"></i> Session Performance</p>
+            <button onclick="toggleCard('cardPerf')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div class="card-content">
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-center">
+                <p class="text-[10px] font-black text-slate-500 uppercase mb-1">Win Rate</p>
+                <p class="text-xl font-black text-white" id="perfWinRate">0%</p>
+                <p class="text-[9px] text-slate-600 font-mono mt-0.5" id="perfWL">0W / 0L</p>
+              </div>
+              <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-center">
+                <p class="text-[10px] font-black text-slate-500 uppercase mb-1">Profit Factor</p>
+                <p class="text-xl font-black text-white" id="perfPF">-</p>
+                <p class="text-[9px] text-slate-600 font-mono mt-0.5">gross wins / losses</p>
+              </div>
+              <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-center">
+                <p class="text-[10px] font-black text-slate-500 uppercase mb-1">Avg Win</p>
+                <p class="text-xl font-black text-emerald-400" id="perfAvgW">-</p>
+              </div>
+              <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-center">
+                <p class="text-[10px] font-black text-slate-500 uppercase mb-1">Avg Loss</p>
+                <p class="text-xl font-black text-rose-400" id="perfAvgL">-</p>
+              </div>
+              <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-center">
+                <p class="text-[10px] font-black text-slate-500 uppercase mb-1">Total Fees</p>
+                <p class="text-xl font-black text-amber-400" id="perfFees">-</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- EQUITY CURVE -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-2 flex flex-col" id="cardEquityCurve">
+          <div class="card-header">
+            <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="trending-up" class="w-4 h-4"></i> Equity Curve</p>
+            <button onclick="toggleCard('cardEquityCurve')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div id="equityChartContainer" class="card-content" style="min-height:220px;"></div>
+        </div>
+
+        <!-- TRADE HISTORY -->
+        <div class="terminal-card rounded-3xl inner-glow col-span-1 flex flex-col" id="cardTrades">
+          <div class="card-header border-b border-white/5">
+            <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="list" class="w-4 h-4"></i> Trade Log</p>
+            <button onclick="toggleCard('cardTrades')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+          </div>
+          <div class="card-content overflow-y-auto custom-scrollbar space-y-1 font-mono text-[10px]" style="max-height:220px;" id="tradeList"></div>
+        </div>
+
+      </div>
+    </main>
+
+    <div class="ticker-wrap shrink-0"><div class="ticker" id="newsTicker"><div class="ticker__item">Scanning Global Sentiment...</div><div class="ticker__item">Quantum Protocol Active.</div></div></div>
+  </div>
+
+  <!-- SETTINGS DRAWER -->
+  <div id="drawerOverlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] hidden transition-opacity duration-300"></div>
+  <div id="settingsDrawer" class="fixed top-0 right-0 h-full w-[90%] md:w-[400px] bg-slate-900 border-l border-slate-800 z-[70] shadow-2xl translate-x-full transition-transform duration-300 flex flex-col">
+      <div class="p-8 border-b border-slate-800 flex items-center justify-between">
+          <h2 class="text-lg font-black text-white uppercase tracking-tight">System Tuning</h2>
+          <button id="closeSettings" class="w-10 h-10 flex items-center justify-center transition-colors hover:bg-white/5 rounded-full"><i data-lucide="x" class="w-5 h-5 text-slate-500"></i></button>
+      </div>
+      <div id="settingsForm" class="flex-1 overflow-y-auto p-8 space-y-6 custom-scrollbar bg-black/20"></div>
+      <div class="p-8 border-t border-slate-800 bg-obsidian/40 space-y-4">
+          <button id="saveSettings" class="w-full py-4 rounded-xl bg-emerald-500 text-obsidian text-xs font-black uppercase tracking-widest shadow-lg shadow-emerald-500/20 hover:bg-emerald-400 transition-all active:scale-95">Commit Changes</button>
+      </div>
+  </div>
+
+  <script>
+    let STATE = {}, SCHEMA = [], CONFIG = {}, chart, candleSeries, volumeSeries;
+    let isSyncingPause = false, expectedPauseState = null;
+    let _pauseSyncTimeout = null;
+    let _chartFirstRender = true;
+    let _refreshIntervalId = null;
+    let _chartResizeObserver = null;
+    let _emergencyExiting = false;
+    let _lastChartKey = null;
+    let _equityChart = null, _equityLineSeries = null, _equityResizeObserver = null;
+    let _equityHistory = [];
+    let _srLines = { support: null, resistance: null, actionSupport: null, actionResistance: null };
+    let _lastTradeCount = 0;
+    const q = (id) => document.getElementById(id);
+    const fmt = (n, d=2) => { const v = Number(n); return Number.isFinite(v) ? v.toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d}) : '-'; };
+    const safeSet = (id, val, cls) => { const el = q(id); if (!el) return; if (val !== undefined) el.textContent = val; if (cls !== undefined) el.className = cls; };
+    const escHtml = (s) => { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+
+    function initChart() {
+      const container = q('chartContainer'); if (!container || chart) return;
+      chart = LightweightCharts.createChart(container, {
+        layout: { background: { color: '#09090b' }, textColor: '#64748b', fontSize: 10, fontFamily: 'monospace' },
+        grid: { vertLines: { color: 'rgba(255,255,255,0.03)' }, horzLines: { color: 'rgba(255,255,255,0.03)' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: false },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)', autoScale: true }
+      });
+      candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, { 
+        upColor: '#10b981', downColor: '#f43f5e', borderVisible: false, wickUpColor: '#10b981', wickDownColor: '#f43f5e' 
+      });
+      volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, { 
+        color: '#334155', priceFormat: { type: 'volume' }, priceScaleId: '' 
+      });
+      volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+      _chartResizeObserver = new ResizeObserver(entries => { if (entries.length && chart) chart.applyOptions({ width: entries[0].contentRect.width, height: entries[0].contentRect.height }); });
+      _chartResizeObserver.observe(container);
+    }
+
+    function initEquityChart() {
+      const container = q('equityChartContainer');
+      if (!container || _equityChart) return;
+      _equityChart = LightweightCharts.createChart(container, {
+        layout: { background: { color: 'transparent' }, textColor: '#64748b', fontSize: 10, fontFamily: 'monospace' },
+        grid: { vertLines: { color: 'rgba(255,255,255,0.02)' }, horzLines: { color: 'rgba(255,255,255,0.02)' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        timeScale: { borderColor: 'rgba(255,255,255,0.08)', timeVisible: true },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,0.08)' },
+        handleScroll: false, handleScale: false,
+      });
+      _equityLineSeries = _equityChart.addSeries(LightweightCharts.AreaSeries, {
+        lineColor: '#10b981', topColor: 'rgba(16,185,129,0.25)', bottomColor: 'rgba(16,185,129,0.0)',
+        lineWidth: 2, priceLineVisible: false,
+      });
+      _equityResizeObserver = new ResizeObserver(entries => {
+        if (entries.length && _equityChart) _equityChart.applyOptions({ width: entries[0].contentRect.width, height: entries[0].contentRect.height });
+      });
+      _equityResizeObserver.observe(container);
+    }
+
+    function updateEquityCurve(trades, initialBalance) {
+      if (!_equityLineSeries) return;
+      const now = Math.floor(Date.now() / 1000);
+      if (!_equityHistory.length) {
+        _equityHistory.push({ time: now - (trades.length + 1) * 60, value: Number(initialBalance || 1000) });
+      }
+      const lastLen = _lastTradeCount;
+      const newTrades = trades.slice(lastLen);
+      newTrades.forEach((t, i) => {
+        const last = _equityHistory[_equityHistory.length - 1];
+        const newVal = last.value + Number(t.pnl || 0);
+        _equityHistory.push({ time: last.time + 60 + i, value: parseFloat(newVal.toFixed(4)) });
+      });
+      _lastTradeCount = trades.length;
+      const lineColor = (_equityHistory.length > 1 && _equityHistory[_equityHistory.length-1].value >= _equityHistory[0].value) ? '#10b981' : '#f43f5e';
+      _equityLineSeries.applyOptions({ lineColor, topColor: lineColor.replace(')', ',0.25)').replace('rgb','rgba').replace('#10b981','rgba(16,185,129').replace('#f43f5e','rgba(244,63,94') });
+      if (_equityHistory.length > 1) {
+        try { _equityLineSeries.setData([..._equityHistory]); } catch(e) {}
+      }
+    }
+
+    function renderTradeList(trades) {
+      const el = q('tradeList'); if (!el) return;
+      const typeColor = {
+        'TRAIL_WIN': 'text-emerald-400', 'PSAR_EXIT': 'text-cyan-400', 'TRAIL_TP': 'text-emerald-400',
+        'TAKE_PROFIT': 'text-emerald-400', 'REVERSAL_BANK': 'text-blue-400', 'REVERSAL_WIN': 'text-blue-400',
+        'TTL_EXIT': 'text-amber-400', 'SCALP_EXIT': 'text-emerald-300',
+        'TRAIL_SL': 'text-rose-400', 'STOP_LOSS': 'text-rose-500', 'STOP_LOSS_LOSS': 'text-rose-500',
+        'TRAIL_SL_LOSS': 'text-rose-400',
+      };
+      const rows = [...trades].reverse().map(t => {
+        const pnl = Number(t.pnl || 0);
+        const type = String(t.type || '').toUpperCase();
+        const tc = typeColor[type] || (pnl >= 0 ? 'text-emerald-400' : 'text-rose-400');
+        const pnlStr = `${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)}`;
+        const side = String(t.side || '').toUpperCase();
+        const sideCls = side === 'LONG' ? 'text-emerald-300' : side === 'SHORT' ? 'text-rose-300' : 'text-slate-400';
+        return `<div class="flex items-center justify-between px-2 py-1 rounded border border-white/5 hover:bg-white/5 transition-colors">
+          <span class="${tc} font-black w-24 truncate">${escHtml(type)}</span>
+          <span class="${sideCls} w-12 text-center">${escHtml(side)}</span>
+          <span class="text-slate-500 flex-1 text-center">${fmt(t.entry,4)}→${fmt(t.exit,4)}</span>
+          <span class="${pnl>=0?'text-emerald-400':'text-rose-400'} font-black text-right w-16">${pnlStr}</span>
+        </div>`;
+      });
+      el.innerHTML = rows.join('') || '<div class="text-slate-600 text-center py-4">No trades yet</div>';
+    }
+
+    function renderPerfStats(pnl_stats, trades) {
+      if (!pnl_stats) return;
+      const wins = Number(pnl_stats.wins || 0);
+      const losses = Number(pnl_stats.losses || 0);
+      const total = wins + losses;
+      const wr = total > 0 ? (wins / total * 100) : 0;
+      const tp = Number(pnl_stats.total_profit || 0);
+      const tl = Number(pnl_stats.total_loss || 0);
+      const pf = tl > 0 ? (tp / tl) : (tp > 0 ? 999 : 0);
+      const avgW = wins > 0 ? tp / wins : 0;
+      const avgL = losses > 0 ? tl / losses : 0;
+      const fees = Number(pnl_stats.fees || 0);
+      const wrCls = wr >= 55 ? 'text-emerald-400' : wr >= 45 ? 'text-white' : 'text-rose-400';
+      const pfCls = pf >= 1.5 ? 'text-emerald-400' : pf >= 1.0 ? 'text-white' : 'text-rose-400';
+      safeSet('perfWinRate', `${wr.toFixed(1)}%`, `text-xl font-black ${wrCls}`);
+      safeSet('perfWL', `${wins}W / ${losses}L`);
+      safeSet('perfPF', pf > 0 ? fmt(pf, 2) : '-', `text-xl font-black ${pfCls}`);
+      safeSet('perfAvgW', wins > 0 ? `$${fmt(avgW, 2)}` : '-');
+      safeSet('perfAvgL', losses > 0 ? `-$${fmt(avgL, 2)}` : '-');
+      safeSet('perfFees', `$${fmt(fees, 2)}`);
+    }
+
+    function updateSRLines(signal, pos) {
+      if (!candleSeries) return;
+      const support = signal?.structure_support ? parseFloat(signal.structure_support) : null;
+      const resistance = signal?.structure_resistance ? parseFloat(signal.structure_resistance) : null;
+      const actionSup = signal?.action_support ? parseFloat(signal.action_support) : null;
+      const actionRes = signal?.action_resistance ? parseFloat(signal.action_resistance) : null;
+
+      const setLine = (key, price, opts) => {
+        try {
+          if (price && price > 0) {
+            if (!_srLines[key]) _srLines[key] = candleSeries.createPriceLine(opts);
+            else _srLines[key].applyOptions({ price, ...opts });
+          } else if (_srLines[key]) {
+            candleSeries.removePriceLine(_srLines[key]); _srLines[key] = null;
+          }
+        } catch(e) {}
+      };
+
+      setLine('support', support, { price: support, color: 'rgba(16,185,129,0.6)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'S' });
+      setLine('resistance', resistance, { price: resistance, color: 'rgba(244,63,94,0.6)', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'R' });
+      setLine('actionSupport', actionSup, { price: actionSup, color: 'rgba(16,185,129,0.25)', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: '' });
+      setLine('actionResistance', actionRes, { price: actionRes, color: 'rgba(244,63,94,0.25)', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: '' });
+    }
+
+    function setConnection(ok) {
+      const dot = q('connDot'), text = q('apiStatus');
+      if (dot) dot.className = ok ? 'h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'h-2 w-2 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]';
+      if (text) { text.textContent = ok ? 'CONNECTED' : 'OFFLINE'; text.className = ok ? 'text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 uppercase' : 'text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 border border-slate-600 text-slate-400 uppercase'; }
+    }
+
+    function toggleCard(id) {
+        const card = q(id); if (!card) return;
+        card.classList.toggle('card-collapsed');
+    }
+
+    function renderState(s) {
+      if (!s) return;
+      try {
+        if (!chart) initChart();
+        
+        const actualPaused = !!(s.config?.execution?.paused);
+        if (isSyncingPause) {
+          if (actualPaused === expectedPauseState) {
+            _resetPauseSync();
+          }
+        }
+
+        if (!isSyncingPause) {
+          const pIcon = q('pauseIcon'); if (pIcon) pIcon.className = `w-2.5 h-2.5 rounded-full ${actualPaused?'bg-rose-500':'bg-emerald-500'}`;
+          safeSet('pauseText', actualPaused ? 'BOT OFF' : 'BOT ON');
+        }
+        safeSet('symbolName', s.symbol ? s.symbol.toUpperCase() : 'TACTICAL POSITION');
+        safeSet('balance', fmt(s.balance, 2));
+        safeSet('totalProfit', `+$${fmt(s.pnl_stats?.total_profit || 0, 2)}`);
+        safeSet('totalLoss', `-$${fmt(Math.abs(s.pnl_stats?.total_loss || 0), 2)}`);
+        const openPnL = Number(s.unrealized_pnl || 0);
+        safeSet('openPnl', `${openPnL >= 0 ? '+' : '-'}$${fmt(Math.abs(openPnL), 2)} USDC`, `text-base font-black tracking-tight ${openPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
+        const curP = s.price || 0, lastC = s.last_close || curP, pColor = curP >= lastC ? 'text-emerald-400' : 'text-rose-400';
+        safeSet('livePrice', curP ? fmt(curP, 4) : '---.----', `text-3xl font-mono font-black tracking-tighter ${pColor}`);
+        const pnlV = s.pnl_pct || 0; safeSet('pnl', `${fmt(pnlV, 2)}%`, `text-base font-black tracking-tight ${pnlV>=0?'text-emerald-400':'text-rose-400'}`);
+        const uptime = s.uptime_sec || 0, h = Math.floor(uptime/3600).toString().padStart(2,'0'), m = Math.floor((uptime%3600)/60).toString().padStart(2,'0'), sec = Math.floor(uptime%60).toString().padStart(2,'0');
+        safeSet('uptime', `UP: ${h}:${m}:${sec}`);
+        const est = s.pnl_estimate || {};
+        const estSide = String(est.side || 'FLAT').toUpperCase();
+        const estActive = !!est.active || estSide === 'LONG' || estSide === 'SHORT' || estSide === 'BUY' || estSide === 'SELL';
+        const estLong = estSide === 'LONG' || estSide === 'BUY';
+        const estSideCls = estActive
+          ? (estLong ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30')
+          : 'bg-slate-800 text-slate-500 border-slate-700';
+        safeSet('estSide', estActive ? estSide : 'FLAT', `text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${estSideCls}`);
+        safeSet('estEntry', est.entry ? fmt(est.entry, 5) : '-');
+        safeSet('estCurrent', est.price ? fmt(est.price, 5) : '-');
+        safeSet('estLev', est.effective_leverage ? `${fmt(est.effective_leverage, 1)}x` : '-');
+        safeSet('estNotional', est.notional_usdt ? `$${fmt(est.notional_usdt, 2)}` : '-');
+        const estGross = Number(est.gross_pnl || 0);
+        const estNet = Number(est.net_pnl || 0);
+        safeSet('estGross', `${estGross >= 0 ? '+' : '-'}$${fmt(Math.abs(estGross), 2)}`, `font-bold ${estGross >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
+        safeSet('estNet', `${estNet >= 0 ? '+' : '-'}$${fmt(Math.abs(estNet), 2)}`, `font-bold ${estNet >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
+        safeSet('estFormula', est.formula || 'LONG: notional × (price / entry - 1); SHORT: notional × (1 - price / entry)');
+
+        const pos = (s.positions && s.positions[0]) || null;
+        
+        const sig = s.signal || {}, sColor = sig.action === 'BUY' ? 'text-emerald-400' : sig.action === 'SELL' ? 'text-rose-400' : 'text-white';
+        safeSet('signalText', sig.action || 'HOLD', `text-xl font-black uppercase tracking-tighter ${sColor}`);
+        
+        const conf = (sig.confidence || 0) * 100;
+        safeSet('signalConfVal', `${Math.round(conf)}%`);
+        const circle = q('confCircle');
+        if (circle) {
+          const offset = 176 - (176 * conf / 100);
+          circle.style.strokeDashoffset = offset;
+          circle.style.stroke = sig.action === 'BUY' ? '#10b981' : sig.action === 'SELL' ? '#f43f5e' : '#475569';
+        }
+        
+        const overlay = s.ai_overlay || {};
+        const b = (overlay.bias || 'NEUTRAL').toUpperCase();
+        const bCls = b === 'LONG_ONLY' || b === 'LONG' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 
+                     (b === 'SHORT_ONLY' || b === 'SHORT' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 
+                     'bg-slate-800 text-slate-500 border-slate-700');
+        safeSet('biasPill', b, `text-[10px] font-black px-1.5 py-0.5 rounded border uppercase ${bCls}`);
+        
+        safeSet('riskPill', `${overlay.risk_mode || 'NORMAL'} RISK`, `text-[10px] font-black px-1.5 py-0.5 rounded border uppercase ${overlay.risk_mode==='AGGRESSIVE'?'bg-amber-500/10 text-amber-400 border-amber-500/20':'bg-slate-800 text-slate-500 border-slate-700'}`);
+        
+        safeSet('aiRationale', overlay.rationale || sig.reason || 'Initializing neural vector...');
+        safeSet('gateTrace', sig.gate_trace ? `Gate: ${sig.gate_trace}` : (sig.hold_reason ? `Gate: ${sig.hold_reason}` : 'Gate: -'));
+        if (q('signalConf')) { 
+          q('signalConf').style.width = `${conf}%`; 
+          q('signalConf').className = `h-full transition-all duration-700 ${sig.action==='BUY'?'bg-emerald-500':sig.action==='SELL'?'bg-rose-500':'bg-slate-600'}`; 
+        }
+        if (q('posSide')) { q('posSide').textContent = pos?pos.side:'FLAT'; q('posSide').className = `text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${pos?(pos.side==='LONG'?'bg-emerald-500/20 text-emerald-400 border-emerald-500/30':'bg-rose-500/20 text-rose-400 border-rose-500/30'):'bg-slate-800 text-slate-500 border-slate-700'}`; }
+        
+        const cardTactical = q('cardTactical');
+        if (cardTactical) {
+          if (pos) {
+            if (pos.side === 'LONG') {
+              cardTactical.classList.add('border-emerald-500/50', 'bg-emerald-500/5');
+              cardTactical.classList.remove('border-rose-500/50', 'bg-rose-500/5', 'border-white/10');
+            } else if (pos.side === 'SHORT') {
+              cardTactical.classList.add('border-rose-500/50', 'bg-rose-500/5');
+              cardTactical.classList.remove('border-emerald-500/50', 'bg-emerald-500/5', 'border-white/10');
+            }
+          } else {
+            cardTactical.classList.add('border-white/10');
+            cardTactical.classList.remove('border-emerald-500/50', 'bg-emerald-500/5', 'border-rose-500/50', 'bg-rose-500/5');
+          }
+        }
+
+        safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-'); safeSet('posSl', pos ? fmt(pos.sl, 5) : '-'); safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
+        const mCtx = s.mtf_context || {}, m5 = mCtx['5m'] || {}, allLvls = [...(m5.support_levels || []), ...(m5.resistance_levels || [])].map(l => parseFloat(l)).filter(l => !isNaN(l)).sort((a,b)=>a-b);
+        safeSet('bullStrike', (allLvls.filter(l => l > curP)[0]) ? fmt(allLvls.filter(l => l > curP)[0], 5) : 'WAITING');
+        safeSet('bearStrike', (allLvls.filter(l => l < curP).reverse()[0]) ? fmt(allLvls.filter(l => l < curP).reverse()[0], 5) : 'WAITING');
+        if (q('mtfContainer')) { q('mtfContainer').innerHTML = Object.entries(mCtx).map(([tf, data]) => { const isBull = String(data.trend).includes('BULL'); const rsiVal = data.rsi_14 != null ? Number(data.rsi_14).toFixed(0) : null; const rsiCls = rsiVal != null ? (Number(rsiVal) > 65 ? 'text-rose-400' : Number(rsiVal) < 35 ? 'text-emerald-400' : 'text-slate-500') : 'text-slate-600'; return `<div class="flex items-center justify-between border-b border-white/5 pb-1"><span class="text-xs text-slate-500 font-black uppercase">${escHtml(tf)}</span><div class="flex items-center gap-2">${rsiVal!=null?`<span class="text-[10px] font-mono ${rsiCls}">RSI ${rsiVal}</span>`:''}<span class="text-xs font-black uppercase ${isBull?'text-emerald-400':'text-rose-400'}">${escHtml(data.trend)}</span></div></div>`; }).join(''); }
+        if (q('statusLines')) { q('statusLines').innerHTML = (s.status_lines || []).map(line => `<div class="mb-1 text-slate-300 border-l border-white/5 pl-2">${escHtml(line)}</div>`).join(''); }
+        if (q('indicatorsHUD')) { const ind = s.latest_indicators || {}; q('indicatorsHUD').innerHTML = `<span class="text-slate-500">RSI: <span class="text-white font-bold">${fmt(ind.rsi_14,1)}</span></span> <span class="text-slate-500 ml-2">ADX: <span class="text-white font-bold">${fmt(ind.adx,1)}</span></span>`; }
+        
+        if (candleSeries && s.chart && s.chart.length > 0) { 
+          const sorted = [...s.chart].sort((a,b) => a.time - b.time); 
+          const chartData = sorted.map(c => ({ 
+            time: Math.floor(c.time / 1000), 
+            open: parseFloat(c.open), 
+            high: parseFloat(c.high), 
+            low: parseFloat(c.low), 
+            close: parseFloat(c.close) 
+          }));
+          
+          const chartKey = sorted.length > 0 ? (sorted[sorted.length-1].time + '|' + sorted[sorted.length-1].close) : null;
+          if (chartKey !== _lastChartKey) {
+            candleSeries.setData(chartData);
+            if (volumeSeries) {
+              volumeSeries.setData(sorted.map(c => ({
+                time: Math.floor(c.time / 1000),
+                value: parseFloat(c.volume || 0),
+                color: parseFloat(c.close) >= parseFloat(c.open) ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)'
+              })));
+            }
+            _lastChartKey = chartKey;
+            if (_chartFirstRender) {
+              chart.timeScale().fitContent();
+              _chartFirstRender = false;
+            }
+          }
+
+          if (pos && pos.entry_price > 0) {
+            const entry = parseFloat(pos.entry_price);
+            const side = String(pos.side).toUpperCase();
+            const pnl = parseFloat(pos.unrealized_pnl || 0);
+            
+            if (!window.entryLine) window.entryLine = candleSeries.createPriceLine({ price: entry, color: '#06b6d4', lineWidth: 2, lineStyle: 0, axisLabelVisible: true, title: `ENTRY (${side}) PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}` });
+            else window.entryLine.applyOptions({ price: entry, title: `ENTRY (${side}) PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`, color: '#06b6d4' });
+
+            if (pos.stop_loss && pos.stop_loss > 0) {
+               if (!window.slLine) window.slLine = candleSeries.createPriceLine({ price: parseFloat(pos.stop_loss), color: '#f43f5e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' });
+               else window.slLine.applyOptions({ price: parseFloat(pos.stop_loss) });
+            } else if (window.slLine) { candleSeries.removePriceLine(window.slLine); window.slLine = null; }
+
+            if (pos.take_profit && pos.take_profit > 0) {
+               if (!window.tpLine) window.tpLine = candleSeries.createPriceLine({ price: parseFloat(pos.take_profit), color: '#10b981', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' });
+               else window.tpLine.applyOptions({ price: parseFloat(pos.take_profit) });
+            } else if (window.tpLine) { candleSeries.removePriceLine(window.tpLine); window.tpLine = null; }
+
+          } else {
+            if (window.entryLine) { candleSeries.removePriceLine(window.entryLine); window.entryLine = null; }
+            if (window.slLine) { candleSeries.removePriceLine(window.slLine); window.slLine = null; }
+            if (window.tpLine) { candleSeries.removePriceLine(window.tpLine); window.tpLine = null; }
+          }
+        }
+        if (q('newsTicker') && s.ai_overlay?.headlines) { q('newsTicker').innerHTML = s.ai_overlay.headlines.map(h => `<div class="ticker__item">${escHtml(h)}</div>`).join(''); }
+
+        // New panels
+        if (!_equityChart) initEquityChart();
+        const _netPnl = Number(s.pnl_stats?.total_profit || 0) - Math.abs(Number(s.pnl_stats?.total_loss || 0));
+        updateEquityCurve(s.closed_trades || [], Number(s.balance || 1000) - _netPnl);
+        renderTradeList(s.closed_trades || []);
+        renderPerfStats(s.pnl_stats, s.closed_trades || []);
+        updateSRLines(s.signal || {}, pos);
+      } catch (err) { console.error('RenderState Error:', err); }
+    }
+
+    async function fetchJson(p) { const r = await fetch(p, {cache:'no-store'}); if (!r.ok) throw new Error('Fetch failed'); const t = await r.text(); return JSON.parse(t.replace(/:\s*(NaN|Infinity|-Infinity)/g, ':null')); }
+    async function refresh() { try { STATE = await fetchJson('/api/state'); renderState(STATE); setConnection(true); } catch (e) { setConnection(false); } }
+    async function load() { try { const [sch, cfg] = await Promise.all([fetchJson('/api/schema'), fetchJson('/api/config')]); SCHEMA.splice(0, SCHEMA.length, ...sch); CONFIG = cfg; buildSettingsForm(cfg); lucide.createIcons(); } catch (e) { console.warn('Load failed', e); } refresh(); }
+
+    function _resetPauseSync() {
+      isSyncingPause = false;
+      if (_pauseSyncTimeout) { clearTimeout(_pauseSyncTimeout); _pauseSyncTimeout = null; }
+      const btn = q('pauseToggleBtn');
+      if (btn) btn.classList.remove('opacity-80', 'pointer-events-none');
+    }
+
+    function buildSettingsForm(cfg) {
+      const container = q('settingsForm'); if (!container) return;
+      
+      const categories = {};
+      SCHEMA.forEach(f => {
+        const cat = f.cat || 'General';
+        if (!categories[cat]) categories[cat] = [];
+        categories[cat].push(f);
+      });
+
+      container.innerHTML = '';
+      Object.entries(categories).forEach(([cat, fields]) => {
+        const section = document.createElement('div');
+        section.className = 'mb-8';
+        
+        const hdr = document.createElement('h3');
+        hdr.className = 'text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4 pb-2 border-b border-white/10 flex items-center gap-2';
+        hdr.innerHTML = `<span class="w-1 h-1 rounded-full bg-emerald-500/50"></span> ${escHtml(cat)}`;
+        section.appendChild(hdr);
+        
+        fields.forEach(f => {
+          const val = (cfg && f.key) ? f.key.split('.').reduce((o,i) => (o && typeof o === 'object') ? o[i] : undefined, cfg) : undefined;
+          const row = document.createElement('div');
+          row.className = 'mb-4 flex items-center justify-between gap-4 p-3 bg-white/5 rounded-2xl border border-white/5';
+          
+          const label = document.createElement('label');
+          label.className = 'block text-[11px] font-bold text-slate-400 uppercase tracking-tight';
+          label.textContent = f.label;
+          row.appendChild(label);
+          
+          const wrap = document.createElement('div');
+          wrap.className = 'min-w-[100px] flex justify-end';
+          
+          let input;
+          if (f.type === 'bool') {
+            const lbl = document.createElement('label');
+            lbl.className = 'relative inline-flex items-center cursor-pointer';
+            input = document.createElement('input');
+            input.type = 'checkbox';
+            input.name = f.key;
+            input.className = 'sr-only peer';
+            if (val) input.checked = true;
+            const div = document.createElement('div');
+            div.className = 'w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[""] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-500';
+            lbl.appendChild(input);
+            lbl.appendChild(div);
+            wrap.appendChild(lbl);
+          } else if (f.type === 'select') {
+            input = document.createElement('select');
+            input.name = f.key;
+            input.className = 'w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white outline-none focus:border-emerald-500/50';
+            (f.options || []).forEach(o => {
+              const opt = document.createElement('option');
+              opt.value = o;
+              opt.textContent = o.toUpperCase();
+              if (o === val) opt.selected = true;
+              input.appendChild(opt);
+            });
+            wrap.appendChild(input);
+          } else {
+            input = document.createElement('input');
+            input.type = 'number';
+            input.name = f.key;
+            input.step = f.step || 'any';
+            input.className = 'w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white outline-none focus:border-emerald-500/50';
+            input.value = (val !== undefined && val !== null) ? val : '';
+            if (f.min !== undefined) input.min = f.min;
+            if (f.max !== undefined) input.max = f.max;
+            wrap.appendChild(input);
+          }
+          row.appendChild(wrap);
+          section.appendChild(row);
+        });
+        
+        container.appendChild(section);
+      });
+    }
+
+    q('saveSettings').onclick = async () => {
+      const data = {}; q('settingsForm').querySelectorAll('input, select').forEach(el => data[el.name] = el.type === 'checkbox' ? el.checked : el.value);
+      try {
+        const r = await fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ values: data }) });
+        if ((await r.json()).ok) { q('settingsDrawer').classList.add('translate-x-full'); q('drawerOverlay').classList.add('hidden'); load(); }
+      } catch (err) { console.error('Save failed', err); }
+    };
+
+    q('openSettings').onclick = () => { q('settingsDrawer').classList.remove('translate-x-full'); q('drawerOverlay').classList.remove('hidden'); };
+    q('closeSettings').onclick = () => { q('settingsDrawer').classList.add('translate-x-full'); q('drawerOverlay').classList.add('hidden'); };
+    
+    q('pauseToggleBtn').onclick = () => {
+      const btn = q('pauseToggleBtn'), textEl = q('pauseText'), iconEl = q('pauseIcon');
+      if (!btn || !textEl || !iconEl || isSyncingPause) return;
+      
+      const isPaused = !!(STATE.config?.execution?.paused);
+      expectedPauseState = !isPaused;
+      isSyncingPause = true;
+
+      textEl.textContent = 'SYNCING...';
+      iconEl.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
+      btn.classList.add('opacity-80', 'pointer-events-none');
+
+      _pauseSyncTimeout = setTimeout(() => {
+        _resetPauseSync();
+        if (STATE) renderState(STATE);
+      }, 8000);
+
+      fetch('/api/toggle-pause', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+        .then(r => r.json())
+        .then(() => setTimeout(refresh, 200))
+        .catch(() => {
+          _resetPauseSync();
+          if (STATE) renderState(STATE);
+        });
+    };
+
+    q('emergencyExit').onclick = async () => {
+      if (_emergencyExiting) return;
+      if (confirm('EMERGENCY: FLATTEN ALL POSITIONS?')) {
+        _emergencyExiting = true;
+        q('emergencyExit').disabled = true;
+        try {
+          const r = await fetch('/api/emergency-exit', { method: 'POST', headers: {'Content-Type': 'application/json'} });
+          if ((await r.json()).ok) { refresh(); }
+        } catch (err) { console.error('Emergency exit failed', err); }
+        setTimeout(() => { _emergencyExiting = false; q('emergencyExit').disabled = false; }, 5000);
+      }
+    };
+
+    async function setChartTF(tf) {
+      document.querySelectorAll('#tfSelector button').forEach(btn => {
+        if (btn.getAttribute('data-tf') === tf) {
+          btn.classList.add('bg-white/20', 'text-white');
+          btn.classList.remove('text-slate-400');
+        } else {
+          btn.classList.remove('bg-white/20', 'text-white');
+          btn.classList.add('text-slate-400');
+        }
+      });
+      try {
+        const r = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cmd: 'set_tf', tf: tf })
+        });
+        if (r.ok) {
+          setTimeout(refresh, 500);
+        }
+      } catch (err) { console.error('Command Error:', err); }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => { 
+      await load(); 
+      lucide.createIcons();
+      _refreshIntervalId = setInterval(refresh, 1000);
+    });
+  </script>
+</body>
+</html>
