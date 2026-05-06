@@ -1,16 +1,56 @@
+import atexit
 import os
 import sys
-import socket
+from pathlib import Path
 
 
-_SINGLETON_SOCKET = None
-def _enforce_single_instance(port=45678):
-    global _SINGLETON_SOCKET
+def _lock_path_for_port(port: int) -> Path:
+    return Path(f"bot_{port}.lock")
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
     try:
-        _SINGLETON_SOCKET = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        _SINGLETON_SOCKET.bind(("127.0.0.1", port))
+        os.kill(pid, 0)
     except OSError:
-        print(f"ERROR: Another instance of the bot is already running. Please close it first.")
+        return False
+    return True
+
+
+def _release_instance_lock(lock_path: Path):
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except OSError:
+        pass
+
+
+def _enforce_single_instance(port=45678):
+    lock_path = _lock_path_for_port(int(port))
+
+    current_pid = os.getpid()
+    if lock_path.exists():
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+            locked_pid = int(raw)
+        except Exception:
+            locked_pid = None
+
+        if locked_pid and locked_pid != current_pid and _pid_is_running(locked_pid):
+            print(
+                "ERROR: Another instance of the bot is already running "
+                f"for port {int(port)} (pid {locked_pid}). Please close it first."
+            )
+            sys.exit(1)
+
+        _release_instance_lock(lock_path)
+
+    try:
+        lock_path.write_text(str(current_pid), encoding="utf-8")
+        atexit.register(_release_instance_lock, lock_path)
+    except OSError:
+        print("ERROR: Unable to create instance lock file. Please check file permissions.")
         sys.exit(1)
 
 
