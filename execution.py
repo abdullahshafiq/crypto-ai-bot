@@ -452,6 +452,8 @@ class BinanceFuturesExecution:
         self.stats_fees = 0.0
         self.trade_count = 0
         self._next_trade_id = 1
+        self._last_closed_trade_id = 0
+        self._last_closed_trade_ts = 0.0
         self.pending_entry = None
         self.pending_exit = None
         self.pending_entry_ttl_seconds = 20
@@ -1432,7 +1434,18 @@ class BinanceFuturesExecution:
         # replacement orders can be rebuilt for the remaining size.
         self._cleanup_trade_orders(self.symbol, pos)
 
-        stop_like_exit = str(exit_type or "").upper() in {
+        exit_type_u = str(exit_type or "").upper()
+        profit_exit = exit_type_u in {
+            "TAKE_PROFIT",
+            "TRAIL_TP",
+            "SCALP_EXIT",
+            "SCALP_EXIT_PARTIAL",
+            "SCALP_FADE",
+            "TTL_EXIT",
+            "TRAIL_WIN",
+        }
+        emergency_exit = exit_type_u in {"STOP_LOSS", "TRAIL_SL"}
+        stop_like_exit = exit_type_u in {
             "STOP_LOSS",
             "TRAIL_WIN",
             "TRAIL_SL",
@@ -1447,25 +1460,51 @@ class BinanceFuturesExecution:
             try:
                 exit_limit = _maker_entry_price(self.exchange, self.symbol, order_side, float(current_price))
                 price_s = self.exchange.price_to_precision(self.symbol, exit_limit)
+                maker_price = float(price_s)
+                projected_profit_pct = (maker_price - entry) / entry if side == "LONG" else (entry - maker_price) / entry
+                required_profit_pct = (
+                    (2.0 * float(getattr(self, "fee_rate", 0.0) or 0.0))
+                    + float(getattr(self, "fee_slippage_buffer_pct", 0.0) or 0.0)
+                    + float(pos.get("min_profit_after_fees", getattr(self, "min_profit_after_fees", 0.0)) or 0.0)
+                )
+                if profit_exit and projected_profit_pct < required_profit_pct:
+                    self.last_status = (
+                        f"{exit_type_u}: maker exit skipped; net edge "
+                        f"{projected_profit_pct:+.2%} < {required_profit_pct:.2%}"
+                    )
+                    logger.info(
+                        "[MAKER_EXIT] Skipped %s for %s: projected edge %.4f < required %.4f",
+                        exit_type_u,
+                        side,
+                        projected_profit_pct,
+                        required_profit_pct,
+                    )
+                    self._ensure_exchange_stop_loss(pos)
+                    self._ensure_exchange_take_profit(pos)
+                    self._ensure_native_trailing_stop(pos)
+                    return True
                 order_resp = self.exchange.create_order(
                     symbol=self.symbol,
                     type="LIMIT",
                     side=order_side,
                     amount=close_amount,
-                    price=float(price_s),
+                    price=maker_price,
                     params={"reduceOnly": True, "postOnly": True, "timeInForce": "GTX"},
                 )
-                ttl_seconds = 3.0 if stop_like_exit else float(getattr(self, "pending_exit_ttl_seconds", 20) or 20)
+                ttl_seconds = 1.0 if profit_exit else (3.0 if stop_like_exit else float(getattr(self, "pending_exit_ttl_seconds", 20) or 20))
                 self.pending_exit = {
                     "order_id": str(order_resp.get("id") or (order_resp.get("info", {}) or {}).get("orderId") or ""),
                     "ts": time.time(),
-                    "price": float(price_s),
+                    "price": maker_price,
                     "amount": close_amount,
                     "side": order_side,
                     "exit_type": exit_type,
                     "ttl_seconds": ttl_seconds,
-                    "fallback_market": bool(getattr(self, "market_fallback_on_timeout", False)) or stop_like_exit,
+                    "fallback_market": bool(emergency_exit or (getattr(self, "market_fallback_on_timeout", False) and not profit_exit)),
                 }
+                if profit_exit:
+                    self._ensure_exchange_stop_loss(pos)
+                    self._ensure_native_trailing_stop(pos)
                 self.last_status = f"Maker exit placed @ {price_s}"
                 logger.info(f"[MAKER_EXIT] {order_side} placed @ {price_s} | ttl={ttl_seconds:.1f}s")
                 return True
@@ -1619,6 +1658,8 @@ class BinanceFuturesExecution:
         self._last_trade_ts = time.time()
         self._recently_closed_ts = time.time()
         self._last_closed_side = side
+        self._last_closed_trade_id = int(trade_id or 0)
+        self._last_closed_trade_ts = time.time()
         if profit_pct > 0:
             self._last_profitable_exit_side = side
             self._last_profitable_exit_ts = time.time()
@@ -1799,6 +1840,8 @@ class BinanceFuturesExecution:
                         self._post_close_cleanup_needed = True
                         self.active_positions = []
                         self.pending_exit = None
+                        self._last_closed_trade_id = int(pos.get("trade_id", 0) or 0)
+                        self._last_closed_trade_ts = time.time()
                         self.last_status = f"{exit_type}: {side} @ ${fill_price:.5f} Net ${net_pnl:+,.2f}"
                         logger.info(f"[ORDER] Maker exit FILLED: {side} {amount:.4f} @ {fill_price:.5f} | Net: {net_pnl:+.4f} ({profit_pct:+.2%})")
                         return
@@ -1816,6 +1859,11 @@ class BinanceFuturesExecution:
                         pending_exit.get("fallback_market", getattr(self, "market_fallback_on_timeout", False))
                     )
                     if not fallback_market:
+                        pos = self.active_positions[0] if self.active_positions else None
+                        if pos:
+                            self._ensure_exchange_stop_loss(pos)
+                            self._ensure_exchange_take_profit(pos)
+                            self._ensure_native_trailing_stop(pos)
                         self.pending_exit = None
                         self.last_status = "Maker exit expired; reprice"
                         return
@@ -1876,6 +1924,8 @@ class BinanceFuturesExecution:
                             f"Net ${net_pnl:+,.2f}; falling back"
                         )
                     self.pending_exit = None
+                    self._last_closed_trade_id = int(pos.get("trade_id", 0) or 0)
+                    self._last_closed_trade_ts = time.time()
                     return self._finalize_reduce_only_market_exit(
                         pos,
                         current_price,
@@ -1904,16 +1954,18 @@ class BinanceFuturesExecution:
                 # orders left behind by a completed/externally closed position.
                 try:
                     open_orders = self.exchange.fetch_open_orders(self.symbol) or []
-                    if open_orders:
+                    protection_orders = self._fetch_open_protection_orders(self.symbol)
+                    order_count = max(len(open_orders), len(protection_orders))
+                    if order_count:
                         if self.active_positions or getattr(self, "pending_exit", None):
-                            logger.info(f"[SYNC] Exchange flat with {len(open_orders)} open order(s); purging closed-position orders for {self.symbol}.")
+                            logger.info(f"[SYNC] Exchange flat with {order_count} open order(s); purging closed-position orders for {self.symbol}.")
                             self._cleanup_trade_orders(self.symbol, self.active_positions[0] if self.active_positions else None)
                             self._wipe_all_orphans(self.symbol)
                         elif getattr(self, "pending_entry", None):
                             logger.info(f"[SYNC] Exchange flat with pending entry; preserving entry and clearing stale protection for {self.symbol}.")
                             self._cleanup_flat_protection_orders(self.symbol)
                         else:
-                            logger.info(f"[SYNC] Exchange flat with {len(open_orders)} open orphan order(s); clearing stale orders for {self.symbol}.")
+                            logger.info(f"[SYNC] Exchange flat with {order_count} open orphan order(s); clearing stale orders for {self.symbol}.")
                             self._cleanup_trade_orders(self.symbol)
                             self._wipe_all_orphans(self.symbol)
                 except Exception as e:
@@ -1923,11 +1975,23 @@ class BinanceFuturesExecution:
                     logger.info(f"[SYNC] No position on exchange for {self.symbol}, clearing local state.")
                     if self.active_positions:
                         pos = self.active_positions[0]
+                        trade_id = int(pos.get("trade_id", 0) or 0)
+                        recent_closed_id = int(getattr(self, "_last_closed_trade_id", 0) or 0)
+                        recent_closed_ts = float(getattr(self, "_last_closed_trade_ts", 0.0) or 0.0)
+                        if trade_id and trade_id == recent_closed_id and (time.time() - recent_closed_ts) < 30:
+                            logger.info(
+                                f"[SYNC] Suppressing duplicate close record for trade_id={trade_id}; already finalized locally."
+                            )
+                            self.active_positions = []
+                            self.pending_exit = None
+                            self._post_close_cleanup_needed = True
+                            if getattr(self, "pending_entry", None):
+                                self.last_status = "Flat; preserving pending entry"
+                            return
                         self._log_exchange_close_diagnostics(pos, current_price)
                         entry = float(pos.get("entry", current_price) or current_price)
                         amount = float(pos.get("amount", 0.0) or 0.0)
                         side = str(pos.get("side", "LONG") or "LONG").upper()
-                        trade_id = int(pos.get("trade_id", 0) or 0)
                         pnl = (current_price - entry) * amount if side == "LONG" else (entry - current_price) * amount
                         profit_pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
                         fees = (amount * entry * self.fee_rate) + (amount * current_price * self.fee_rate)
@@ -1941,6 +2005,8 @@ class BinanceFuturesExecution:
                         self._last_trade_ts = time.time()
                         self._recently_closed_ts = time.time()
                         self._last_closed_side = side
+                        self._last_closed_trade_id = trade_id
+                        self._last_closed_trade_ts = time.time()
                     try:
                         self._cleanup_trade_orders(self.symbol, self.active_positions[0] if self.active_positions else None)
                     except Exception as e:
@@ -2214,15 +2280,15 @@ class BinanceFuturesExecution:
                         closed = True
                         exit_type = "TTL_EXIT"
 
-                    # DIAMOND HANDS: Trailing stop now follows market structure.
-                    new_sl = _compute_trailing_stop(pos, current_price)
-                    if new_sl > float(pos['sl']):
-                        old_sl = float(pos['sl'])
-                        pos['sl'] = new_sl
-                        logger.info(f"[STRUCTURAL_TRAIL] SL moved {old_sl:.4f} -> {new_sl:.4f} (Support Lock)")
-                        self._ensure_exchange_stop_loss(pos)
-                    
-                    if current_price <= pos['sl']:
+                    if not closed:
+                        new_sl = _compute_trailing_stop(pos, current_price)
+                        if new_sl > float(pos['sl']):
+                            old_sl = float(pos['sl'])
+                            pos['sl'] = new_sl
+                            logger.info(f"[STRUCTURAL_TRAIL] SL moved {old_sl:.4f} -> {new_sl:.4f} (Support Lock)")
+                            self._ensure_exchange_stop_loss(pos)
+
+                    if not closed and current_price <= pos['sl']:
                         closed = True
                         exit_type = "STOP_LOSS"
                 
@@ -2309,15 +2375,15 @@ class BinanceFuturesExecution:
                         closed = True
                         exit_type = "TTL_EXIT"
 
-                    # DIAMOND HANDS: Trailing stop now follows market structure.
-                    new_sl = _compute_trailing_stop(pos, current_price)
-                    if new_sl < float(pos['sl']):
-                        old_sl = float(pos['sl'])
-                        pos['sl'] = new_sl
-                        logger.info(f"[STRUCTURAL_TRAIL] SL moved {old_sl:.4f} -> {new_sl:.4f} (Resistance Lock)")
-                        self._ensure_exchange_stop_loss(pos)
+                    if not closed:
+                        new_sl = _compute_trailing_stop(pos, current_price)
+                        if new_sl < float(pos['sl']):
+                            old_sl = float(pos['sl'])
+                            pos['sl'] = new_sl
+                            logger.info(f"[STRUCTURAL_TRAIL] SL moved {old_sl:.4f} -> {new_sl:.4f} (Resistance Lock)")
+                            self._ensure_exchange_stop_loss(pos)
 
-                    if current_price >= pos['sl']:
+                    if not closed and current_price >= pos['sl']:
                         closed = True
                         exit_type = "STOP_LOSS"
                 

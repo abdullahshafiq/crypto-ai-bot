@@ -1106,6 +1106,127 @@ def _compute_wall_state(
         "resistance_state": resistance_state,
     }
 
+def _apply_rejection_confirmation_gate(
+    signal: dict,
+    df_indicators: pd.DataFrame,
+    strategy_config: dict,
+    support: float = None,
+    resistance: float = None,
+) -> tuple[dict, bool]:
+    """
+    Final entry filter for reversal-style entries.
+
+    This gate keeps the existing structure engine intact, but requires a
+    confirmation candle before reversal entries are allowed to execute.
+    """
+    cfg = dict((strategy_config or {}).get("rejection_confirmation", {}) or {})
+    if not bool(cfg.get("enabled", False)):
+        return signal, False
+
+    action = str(signal.get("action", "HOLD") or "HOLD").upper()
+    if action not in {"BUY", "SELL"}:
+        return signal, False
+
+    reason = str(signal.get("reason", "") or "")
+    entry_mode = "TREND"
+    if "[Mode:" in reason:
+        try:
+            entry_mode = reason.split("[Mode:")[-1].split("]")[0].strip().upper() or "TREND"
+        except Exception:
+            entry_mode = "TREND"
+
+    if "REVERSAL" not in entry_mode:
+        return signal, False
+
+    if df_indicators is None or len(df_indicators) < 3:
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = "RejectionGate: insufficient candles for confirmation"
+        signal["reason"] = f"{reason} [RejectionGate: insufficient candles]"
+        return signal, True
+
+    min_bars_away = max(1, int(cfg.get("min_bars_away", 2) or 2))
+    macd_threshold = float(cfg.get("macd_threshold", 0.0) or 0.0)
+    pullback_pct = float(cfg.get("pullback_pct", 0.002) or 0.002)
+    require_psar_flip = bool(cfg.get("require_psar_flip", True))
+
+    last = df_indicators.iloc[-1]
+    prev = df_indicators.iloc[-2]
+    current_price = float(last["close"])
+    current_open = float(last["open"])
+    current_macd = float(last["macd"]) if "macd" in df_indicators.columns else 0.0
+    current_macd_diff = float(last["macd_diff"]) if "macd_diff" in df_indicators.columns else 0.0
+    prev_macd_diff = float(prev["macd_diff"]) if "macd_diff" in df_indicators.columns else 0.0
+    current_psar = float(last["psar"]) if "psar" in df_indicators.columns else current_price
+    recent = df_indicators.tail(min_bars_away)
+
+    if action == "BUY":
+        support_level = float(support) if support is not None else None
+        macd_confirmed = current_macd > macd_threshold and current_macd_diff > 0 and prev_macd_diff <= 0
+        psar_confirmed = (current_price > current_psar) if require_psar_flip else True
+        candle_confirmed = current_price >= current_open
+        pullback_confirmed = True
+        if support_level and support_level > 0:
+            pullback_confirmed = bool((recent["low"] > support_level * (1 + pullback_pct)).all())
+        confirmed = macd_confirmed and psar_confirmed and candle_confirmed and pullback_confirmed
+        if not confirmed:
+            reasons = []
+            if not macd_confirmed:
+                reasons.append("MACD not yet bullish")
+            if not psar_confirmed:
+                reasons.append("PSAR has not flipped bullish")
+            if not candle_confirmed:
+                reasons.append("Candle not bullish")
+            if not pullback_confirmed:
+                reasons.append("Price still too close to support")
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"RejectionGate: {' | '.join(reasons)}"
+            signal["reason"] = f"{reason} [RejectionGate: {' | '.join(reasons)}]"
+            signal["rejection_confirmation"] = {
+                "confirmed": False,
+                "mode": entry_mode,
+                "action": action,
+                "reason": " | ".join(reasons),
+            }
+            return signal, True
+    else:
+        resistance_level = float(resistance) if resistance is not None else None
+        macd_confirmed = current_macd < macd_threshold and current_macd_diff < 0 and prev_macd_diff >= 0
+        psar_confirmed = (current_price < current_psar) if require_psar_flip else True
+        candle_confirmed = current_price <= current_open
+        pullback_confirmed = True
+        if resistance_level and resistance_level > 0:
+            pullback_confirmed = bool((recent["high"] < resistance_level * (1 - pullback_pct)).all())
+        confirmed = macd_confirmed and psar_confirmed and candle_confirmed and pullback_confirmed
+        if not confirmed:
+            reasons = []
+            if not macd_confirmed:
+                reasons.append("MACD not yet bearish")
+            if not psar_confirmed:
+                reasons.append("PSAR has not flipped bearish")
+            if not candle_confirmed:
+                reasons.append("Candle not bearish")
+            if not pullback_confirmed:
+                reasons.append("Price still too close to resistance")
+            signal["action"] = "HOLD"
+            signal["hold_reason"] = f"RejectionGate: {' | '.join(reasons)}"
+            signal["reason"] = f"{reason} [RejectionGate: {' | '.join(reasons)}]"
+            signal["rejection_confirmation"] = {
+                "confirmed": False,
+                "mode": entry_mode,
+                "action": action,
+                "reason": " | ".join(reasons),
+            }
+            return signal, True
+
+    signal["reason"] = f"{reason} [RejectionGate: Confirmed]"
+    signal["rejection_confirmation"] = {
+        "confirmed": True,
+        "mode": entry_mode,
+        "action": action,
+        "reason": "Confirmed",
+    }
+    return signal, True
+
 def generate_quant_signal(state, latest_indicators, strategy_config, df_indicators, latest_macro, mtf_context=None, mtf_config=None, pivot_data=None) -> dict:
     """
     MASTER RECONSTRUCTION: The 725-Line Institutional Sniper Signal Engine.
@@ -1263,14 +1384,16 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     
     mr_score = 0.0
     if current_price < ema_21 * 0.998:
-        if z_score <= -2.0 or rsi_14 < 30:
-            mr_score = 1.0   # Strong bullish reversion
-        elif z_score <= -1.0:
+        # FIX 8: Require BOTH z_score AND rsi for strong reversion — rsi alone fires
+        # during mid-downtrend momentum candles and generates premature longs.
+        if z_score <= -2.0 and rsi_14 < 35:
+            mr_score = 1.0   # Strong bullish reversion (both conditions)
+        elif z_score <= -1.5 or (z_score <= -1.0 and rsi_14 < 38):
             mr_score = 0.5   # Moderate stretch
     elif current_price > ema_21 * 1.002:
-        if z_score >= 2.0 or rsi_14 > 70:
-            mr_score = -1.0  # Strong bearish reversion
-        elif z_score >= 1.0:
+        if z_score >= 2.0 and rsi_14 > 65:
+            mr_score = -1.0  # Strong bearish reversion (both conditions)
+        elif z_score >= 1.5 or (z_score >= 1.0 and rsi_14 > 62):
             mr_score = -0.5  # Moderate stretch
     
     # Volume Weighted Average Price (VWAP)
@@ -1281,7 +1404,10 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     elif mtf_fast_bias == "SHORT_ONLY":
         vwap_score = -1.0 if current_price >= vwap else 1.0
     else:
-        vwap_score = 1.0 if current_price < vwap else -1.0
+        # FIX 6: In neutral MTF, use trend-following VWAP (above = bullish, below = bearish).
+        # The old mean-reversion logic (below vwap = bullish) was causing longs near tops
+        # when price was pulling back to VWAP from above during a downtrend.
+        vwap_score = 1.0 if current_price >= vwap else -1.0
     
     # Bollinger Bands (BB)
     # Detecting exhaustion at the 2-sigma deviations.
@@ -1523,14 +1649,15 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # SR walls must block counter-direction entries regardless of how the score landed.
     # sr_score > 0 means price is near support → veto SELL.
     # sr_score < 0 means price is near resistance → veto BUY.
-    if sr_score >= 1.0 and action == "SELL":
-        action = "HOLD"
-        hold_reason = f"SR Wall Veto: price near support (sr={sr_score:.1f}) — no SHORT"
-        sr_wall_locked = True
-    elif sr_score <= -1.0 and action == "BUY":
-        action = "HOLD"
-        hold_reason = f"SR Wall Veto: price near resistance (sr={sr_score:.1f}) — no LONG"
-        sr_wall_locked = True
+    if bool(strategy_config.get("sr_wall_veto_enabled", True)):
+        if sr_score >= 1.0 and action == "SELL":
+            action = "HOLD"
+            hold_reason = f"SR Wall Veto: price near support (sr={sr_score:.1f}) — no SHORT"
+            sr_wall_locked = True
+        elif sr_score <= -1.0 and action == "BUY":
+            action = "HOLD"
+            hold_reason = f"SR Wall Veto: price near resistance (sr={sr_score:.1f}) — no LONG"
+            sr_wall_locked = True
 
     # --- RANGE POSITION VETO ---
     # Blocks weak BUY entries near the top of the recent range and weak SELL entries
@@ -1598,7 +1725,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # 3. Ignore crossovers inside the "Noise Channel"
     ema_9_val = float(latest_indicators.get('ema_9', current_price) or current_price)
     ema_21_val = float(latest_indicators.get('ema_21', current_price) or current_price)
-    psar_val = latest_indicators.get('psar')
+    psar_closed_val = latest_indicators.get('psar')
+    psar_live_val = float(df_indicators['psar'].iloc[-1]) if "psar" in df_indicators.columns and len(df_indicators) else psar_closed_val
     macd_val = float(latest_indicators.get('macd', 0) or 0)
     macd_diff_val = float(latest_indicators.get('macd_diff', 0) or 0)
     price_above_ema9 = current_price > ema_9_val
@@ -1608,14 +1736,26 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # For DOGE at $0.11, 0.0001 is a meaningful filter (similar to 0.5 on Forex)
     macd_noise_threshold = float(strategy_config.get('macd_noise_threshold', 0.0001) or 0.0001)
 
+    psar_state_note = ""
+    article_sl_override = None
+
     if action in {"BUY", "SELL"}:
         ema_bull = ema_9_val > ema_21_val
-        psar_bull = True  # default if PSAR unavailable
-        if psar_val is not None:
+        psar_closed_bull = True  # default if PSAR unavailable
+        psar_live_bull = True
+        if psar_closed_val is not None:
             try:
-                psar_bull = float(psar_val) < current_price
+                psar_closed_bull = float(psar_closed_val) < current_price
             except (TypeError, ValueError):
                 pass
+        if psar_live_val is not None:
+            try:
+                psar_live_bull = float(psar_live_val) < current_price
+            except (TypeError, ValueError):
+                pass
+        # Backward-compatible alias used by the rest of the signal engine.
+        psar_bull = psar_closed_bull
+        psar_state_note = f"PSAR(C:{'BULL' if psar_closed_bull else 'BEAR'} L:{'BULL' if psar_live_bull else 'BEAR'})"
         
         # MACD Strategy from Screenshots:
         # Rule 1: Zero Line Bias (macd > 0 for Long, macd < 0 for Short)
@@ -1712,31 +1852,77 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             elif sup_touch and not sup_broken and action == "BUY":
                 entry_mode = "REVERSAL_LONG"
             elif res_touch and not res_broken and action == "BUY":
-                # Only hard veto: buying INTO an intact ceiling
-                action = "HOLD"
-                hold_reason = (
-                    f"Wall Veto: BUY blocked — price at resistance "
-                    f"(${current_price:.3f} / wall ${float(resistance):.3f}). "
-                    f"Wait for break>${float(wall_state.get('resistance_break_level', resistance)):.3f}."
+                # If the long is being rejected at resistance, optionally flip into
+                # a short when the rejection is confirmed by momentum/structure.
+                wall_reversal_gate = float(strategy_config.get("wall_reversal_score_gate", 0.12) or 0.12)
+                resistance_rejection_ready = (
+                    bool(strategy_config.get("wall_reversal_assist", True))
+                    and total_score <= -wall_reversal_gate
+                    and (
+                        (macd_final_bear and not psar_bull)
+                        or (
+                            current_price < float(df_indicators["open"].iloc[-1])
+                            and (
+                                macd_diff_val <= 0
+                                or not psar_bull
+                                or current_price < ema_9_val
+                            )
+                        )
+                    )
                 )
-                sr_wall_locked = True
-            elif sup_touch and not sup_broken and action == "SELL":
-                # Shorting into an intact floor: only allow with strong breakdown evidence
-                breakdown_likely = (
-                    (macd_diff_val < 0)
-                    and (mtf_fast_bias == "SHORT_ONLY")
-                    and (total_score < -0.25)
-                )
-                if not breakdown_likely:
+                if resistance_rejection_ready:
+                    action = "SELL"
+                    entry_mode = "REVERSAL_SHORT"
+                    signal_reason_suffix += " [Wall Rejection Short]"
+                else:
+                    # Only hard veto: buying INTO an intact ceiling
                     action = "HOLD"
                     hold_reason = (
-                        f"Wall Veto: SELL near intact support (${current_price:.3f} / floor ${float(support):.3f}). "
-                        f"Need SHORT_ONLY MTF + score<-0.25 for breakdown entry."
+                        f"Wall Veto: BUY blocked — price at resistance "
+                        f"(${current_price:.3f} / wall ${float(resistance):.3f}). "
+                        f"Wait for break>${float(wall_state.get('resistance_break_level', resistance)):.3f}."
                     )
                     sr_wall_locked = True
+            elif sup_touch and not sup_broken and action == "SELL":
+                # If a short is being rejected at support, optionally flip into a
+                # long when the reclaim is confirmed by momentum/structure.
+                wall_reversal_gate = float(strategy_config.get("wall_reversal_score_gate", 0.12) or 0.12)
+                support_rejection_ready = (
+                    bool(strategy_config.get("wall_reversal_assist", True))
+                    and total_score >= wall_reversal_gate
+                    and (
+                        (macd_final_bull and psar_bull)
+                        or (
+                            current_price > float(df_indicators["open"].iloc[-1])
+                            and (
+                                macd_diff_val >= 0
+                                or psar_bull
+                                or current_price > ema_9_val
+                            )
+                        )
+                    )
+                )
+                if support_rejection_ready:
+                    action = "BUY"
+                    entry_mode = "REVERSAL_LONG"
+                    signal_reason_suffix += " [Wall Reclaim Long]"
                 else:
-                    entry_mode = "BREAKDOWN_SHORT"
-                    signal_reason_suffix += " [Breakdown Short]"
+                    # Shorting into an intact floor: only allow with strong breakdown evidence
+                    breakdown_likely = (
+                        (macd_diff_val < 0)
+                        and (mtf_fast_bias == "SHORT_ONLY")
+                        and (total_score < -0.25)
+                    )
+                    if not breakdown_likely:
+                        action = "HOLD"
+                        hold_reason = (
+                            f"Wall Veto: SELL near intact support (${current_price:.3f} / floor ${float(support):.3f}). "
+                            f"Need SHORT_ONLY MTF + score<-0.25 for breakdown entry."
+                        )
+                        sr_wall_locked = True
+                    else:
+                        entry_mode = "BREAKDOWN_SHORT"
+                        signal_reason_suffix += " [Breakdown Short]"
 
         signal_reason_suffix += f" [Mode:{entry_mode}]"
 
@@ -1828,8 +2014,56 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             elif action == "SELL" and mtf_macd_bull and mtf_structure_bull:
                 action = "HOLD"
                 hold_reason = "MTF Gate: 15m/10m MACD bullish with higher-low structure"
-        
+
+        orb_breakout_setup = _detect_orb_breakout_setup(
+            df_indicators,
+            current_price,
+            latest_indicators=latest_indicators,
+            strategy_config=strategy_config,
+            mtf_fast_bias=mtf_fast_bias,
+        )
+        vwap_bounce_setup = _detect_vwap_bounce_setup(
+            df_indicators,
+            current_price,
+            latest_indicators=latest_indicators,
+            strategy_config=strategy_config,
+            anchored_vwap=anchored_vwap,
+            mtf_fast_bias=mtf_fast_bias,
+        )
+        article_notes = []
+        article_override = None
+        article_sl_override = None
+
+        if orb_breakout_setup.get("triggered"):
+            orb_dir = str(orb_breakout_setup.get("direction", "NEUTRAL") or "NEUTRAL").upper()
+            if action == "HOLD" or (action == "BUY" and orb_dir == "LONG") or (action == "SELL" and orb_dir == "SHORT"):
+                action = "BUY" if orb_dir == "LONG" else "SELL"
+                article_override = "ORB_BREAKOUT"
+                article_notes.append(f"ORB:{orb_breakout_setup.get('reason','')}")
+                if orb_breakout_setup.get("score") is not None:
+                    total_score = float(np.clip(float(total_score) + float(orb_breakout_setup.get("score", 0.0) or 0.0), -1.0, 1.0))
+                if orb_breakout_setup.get("sl") is not None:
+                    article_sl_override = float(orb_breakout_setup.get("sl"))
+
+        if vwap_bounce_setup.get("triggered"):
+            vwap_dir = str(vwap_bounce_setup.get("direction", "NEUTRAL") or "NEUTRAL").upper()
+            if action == "HOLD" or (action == "BUY" and vwap_dir == "LONG") or (action == "SELL" and vwap_dir == "SHORT"):
+                action = "BUY" if vwap_dir == "LONG" else "SELL"
+                article_override = article_override or "VWAP_BOUNCE"
+                article_notes.append(f"VWAP:{vwap_bounce_setup.get('reason','')}")
+                if vwap_bounce_setup.get("score") is not None:
+                    total_score = float(np.clip(float(total_score) + float(vwap_bounce_setup.get("score", 0.0) or 0.0), -1.0, 1.0))
+                if vwap_bounce_setup.get("sl") is not None and article_sl_override is None:
+                    article_sl_override = float(vwap_bounce_setup.get("sl"))
+
         signal_reason_suffix = " [Strike Override]" if in_action_zone and action != "HOLD" else (" [Indicators OK]" if action != "HOLD" else " [Waiting for alignment]")
+        if article_override:
+            signal_reason_suffix += f" [{article_override}]"
+        if article_notes:
+            article_note_text = " | ".join(article_notes)
+            if len(article_note_text) > 120:
+                article_note_text = article_note_text[:117] + "..."
+            signal_reason_suffix += f" [{article_note_text}]"
         
         # --- SNIPER CHECKLIST (Direction-Aware) ---
         is_bearish_attempt = total_score < 0
@@ -1838,11 +2072,13 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if is_bearish_attempt:
             checklist.append(f"EMA:{'OK' if not ema_bull else 'Wait'}")
             checklist.append(f"MACD:{'OK' if macd_inst_bear else 'Wait'}")
-            checklist.append(f"SAR:{'OK' if not psar_bull else 'Wait'}")
+            checklist.append(f"SAR:C={'OK' if not psar_closed_bull else 'Wait'}")
+            checklist.append(f"L={'OK' if not psar_live_bull else 'Wait'}")
         else:
             checklist.append(f"EMA:{'OK' if ema_bull else 'Wait'}")
             checklist.append(f"MACD:{'OK' if macd_inst_bull else 'Wait'}")
-            checklist.append(f"SAR:{'OK' if psar_bull else 'Wait'}")
+            checklist.append(f"SAR:C={'OK' if psar_closed_bull else 'Wait'}")
+            checklist.append(f"L={'OK' if psar_live_bull else 'Wait'}")
             
         checklist.append(f"Vol:{'OK' if vol_spike else 'Low'}")
         
@@ -1854,10 +2090,25 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             if abs(div_bonus) > 0: status_msg += " +DIV"
             
         signal_reason_suffix = f" {status_msg}"
-    
+    else:
+        psar_closed_bull = True
+        psar_live_bull = True
+        if psar_closed_val is not None:
+            try:
+                psar_closed_bull = float(psar_closed_val) < current_price
+            except (TypeError, ValueError):
+                pass
+        if psar_live_val is not None:
+            try:
+                psar_live_bull = float(psar_live_val) < current_price
+            except (TypeError, ValueError):
+                pass
+        psar_state_note = f"PSAR(C:{'BULL' if psar_closed_bull else 'BEAR'} L:{'BULL' if psar_live_bull else 'BEAR'})"
+        signal_reason_suffix = f" [Waiting for alignment | {psar_state_note}]"
+
     # The reason string used for the professional dashboard.
     reason = (
-        f"{signal_reason_suffix} | Score:{total_score:.3f} SMC:{smc_label} Pivot:{pivot_msg} MTF:{mtf_fast_bias} "
+        f"{signal_reason_suffix} | {psar_state_note} | Score:{total_score:.3f} SMC:{smc_label} Pivot:{pivot_msg} MTF:{mtf_fast_bias} "
         f"(MR:{mr_score:.1f} OB:{smc_score:.1f} SR:{sr_score:.1f} VWAP:{vwap_score:.1f} ADX:{adx_score:.1f} "
         f"LOC:{location_score:.1f} VOL:{volume_delta:.1f} OBV:{obv_score:.1f} BB:{bb_score:.1f} MACD:{macd_score:.1f} PA:{pa_score:.1f} "
         f"KDJ:{kdj_score:.1f} ST:{st_score:.1f} DIV:{divergence_state} CVD:{cvd_state} EXH:{momentum_exhaustion} "
@@ -1874,6 +2125,10 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         "reason": reason,
         "psar_streak": psar_streak,
         "psar_exit": True if psar_streak != 0 else False, # will be used by main loop for exit
+        "psar_closed_bull": bool(psar_closed_bull) if 'psar_closed_bull' in locals() else None,
+        "psar_live_bull": bool(psar_live_bull) if 'psar_live_bull' in locals() else None,
+        "psar_state_note": psar_state_note,
+        "article_sl_override": float(article_sl_override) if article_sl_override is not None else None,
         "market_bias": mtf_fast_bias if mtf_fast_bias != "NEUTRAL" else "NEUTRAL",
         "mtf_fast_bias": mtf_fast_bias,
         "mtf_rsi_bias": mtf_rsi_bias,
@@ -1947,7 +2202,10 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # Place SL at structural level, but cap at max_structural_sl_pct
     stop_buffer = 0.0005
     final_action = signal["action"]
-    if final_action == "BUY" and support is not None:
+    article_sl_override = signal.get("article_sl_override")
+    if article_sl_override and final_action in {"BUY", "SELL"}:
+        signal["sl"] = float(article_sl_override)
+    elif final_action == "BUY" and support is not None:
         signal["sl"] = float(support) * (1 - stop_buffer)  # just below support
     elif final_action == "SELL" and resistance is not None:
         signal["sl"] = float(resistance) * (1 + stop_buffer)  # just above resistance
@@ -2078,7 +2336,22 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     f"Midrange Gate: score {float(signal.get('score', 0)):.3f} < {mid_min_score:.2f}. "
                     f"Need stronger signal for midrange trend entry."
                 )
-            # else: TREND entry in midrange approved — proceed.
+            # else: TREND entry in midrange approved — but only if SR wall allows it.
+            # A BUY in midrange with sr_score <= -1.0 (near resistance) must be blocked.
+            elif final_action == "BUY" and sr_score <= -1.0:
+                signal["action"]      = "HOLD"
+                signal["hold_reason"] = (
+                    f"Midrange SR Block: BUY near resistance wall (sr={sr_score:.1f}) "
+                    f"even with TREND mode — no long into ceiling."
+                )
+                signal["sr_wall_locked"] = True
+            elif final_action == "SELL" and sr_score >= 1.0:
+                signal["action"]      = "HOLD"
+                signal["hold_reason"] = (
+                    f"Midrange SR Block: SELL near support wall (sr={sr_score:.1f}) "
+                    f"even with TREND mode — no short into floor."
+                )
+                signal["sr_wall_locked"] = True
 
         signal["top_action_zone"]    = float(top_action_zone)
         signal["bottom_action_zone"] = float(bottom_action_zone)
@@ -2090,7 +2363,82 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         if "REVERSAL" in entry_mode:
             signal["action"]      = "HOLD"
             signal["hold_reason"] = "Range Gate: No S/R boundaries — reversal entry skipped."
-        # TREND and BREAKOUT entries proceed freely when S/R is unavailable.
+        # FIX 4: Even with no structural S/R, respect the SMC wall score.
+        # sr_score is set from the swing-based wall detection in detect_smc_and_sr,
+        # so it can fire even when no clean S/R zones were found.
+        elif signal.get("action") == "BUY" and sr_score <= -1.0:
+            signal["action"]      = "HOLD"
+            signal["hold_reason"] = f"No-SR fallback SR block: BUY near resistance (sr={sr_score:.1f})"
+            signal["sr_wall_locked"] = True
+        elif signal.get("action") == "SELL" and sr_score >= 1.0:
+            signal["action"]      = "HOLD"
+            signal["hold_reason"] = f"No-SR fallback SR block: SELL near support (sr={sr_score:.1f})"
+            signal["sr_wall_locked"] = True
+
+    signal, _rejection_applied = _apply_rejection_confirmation_gate(
+        signal,
+        df_indicators,
+        strategy_config,
+        support=support,
+        resistance=resistance,
+    )
+
+    # Final wall-rejection rescue:
+    # If the system ended up HOLD because the long was rejected at resistance,
+    # promote it into a short when the rejection is already confirmed by candle
+    # structure and momentum. This keeps the bot from sitting idle at tops.
+    # Wall reversal assist: only fire if the underlying score is actually bearish.
+    # A wall veto on a bullish signal should NOT flip to SELL unless we have genuine
+    # bearish evidence (negative total_score) plus the candle/MACD confirmation below.
+    _reversal_assist_score_ok = total_score < -0.10  # score must have a bearish lean
+    if (
+        signal.get("action") == "HOLD"
+        and bool(strategy_config.get("wall_reversal_assist", True))
+        and support is not None
+        and resistance is not None
+        and _reversal_assist_score_ok
+    ):
+        res_touch = bool(wall_state.get("resistance_touching"))
+        res_broken = bool(wall_state.get("resistance_broken"))
+        if res_touch and not res_broken:
+            reject_cfg = dict((strategy_config or {}).get("rejection_confirmation", {}) or {})
+            min_bars_away = max(1, int(reject_cfg.get("min_bars_away", 2) or 2))
+            pullback_pct = float(reject_cfg.get("pullback_pct", 0.002) or 0.002)
+            require_psar_flip = bool(reject_cfg.get("require_psar_flip", True))
+            macd_threshold = float(reject_cfg.get("macd_threshold", 0.0) or 0.0)
+            last = df_indicators.iloc[-1]
+            prev = df_indicators.iloc[-2]
+            current_macd = float(last["macd"]) if "macd" in df_indicators.columns else 0.0
+            current_macd_diff = float(last["macd_diff"]) if "macd_diff" in df_indicators.columns else 0.0
+            prev_macd_diff = float(prev["macd_diff"]) if "macd_diff" in df_indicators.columns else 0.0
+            current_psar = float(last["psar"]) if "psar" in df_indicators.columns else current_price
+            recent = df_indicators.tail(min_bars_away)
+            macd_confirmed = current_macd < macd_threshold and current_macd_diff < 0 and prev_macd_diff >= 0
+            psar_confirmed = (current_price < current_psar) if require_psar_flip else True
+            candle_confirmed = current_price <= float(last["open"])
+            pullback_confirmed = bool((recent["high"] < resistance * (1 - pullback_pct)).all())
+            rejection_confirmed = macd_confirmed and psar_confirmed and candle_confirmed and pullback_confirmed
+
+            if rejection_confirmed:
+                signal["action"] = "SELL"
+                signal["hold_reason"] = ""
+                signal["reason"] = f"{signal.get('reason','')} [Wall Rejection Short]"
+                signal["score"] = float(total_score)
+                signal["confidence"] = min(abs(float(total_score)), 1.0)
+                signal["sr_wall_locked"] = False
+                signal["rejection_confirmation"] = {
+                    "confirmed": True,
+                    "mode": "REVERSAL_SHORT",
+                    "action": "SELL",
+                    "reason": "Wall rejection short confirmed",
+                }
+            else:
+                signal["rejection_confirmation"] = {
+                    "confirmed": False,
+                    "mode": "REVERSAL_SHORT",
+                    "action": "SELL",
+                    "reason": "Wall rejection not yet confirmed",
+                }
 
     return signal
 
@@ -2418,6 +2766,202 @@ def _detect_wick_sweep_setup(
         }
 
     return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False}
+
+def _detect_vwap_bounce_setup(
+    df: pd.DataFrame,
+    current_price: float,
+    latest_indicators: dict = None,
+    strategy_config: dict = None,
+    anchored_vwap: float = None,
+    mtf_fast_bias: str = "NEUTRAL",
+) -> dict:
+    """
+    Detect a VWAP bounce/reclaim setup aligned with the article:
+    - Trend context
+    - Pullback to VWAP
+    - Rejection candle
+    - Volume confirmation
+    """
+    if df is None or len(df) < 5:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "VWAP_BOUNCE"}
+
+    cfg = strategy_config or {}
+    if not bool(cfg.get("vwap_bounce_enabled", True)):
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "VWAP_BOUNCE"}
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    latest_indicators = latest_indicators or {}
+
+    vwap_ref = float(anchored_vwap or 0.0)
+    if vwap_ref <= 0:
+        try:
+            vwap_ref = float(last["vwap"]) if "vwap" in df.columns else 0.0
+        except (TypeError, ValueError):
+            vwap_ref = 0.0
+    if vwap_ref <= 0 or current_price <= 0:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "VWAP_BOUNCE"}
+
+    near_pct = float(cfg.get("vwap_bounce_near_pct", 0.0015) or 0.0015)
+    reclaim_pct = float(cfg.get("vwap_bounce_reclaim_pct", 0.0002) or 0.0002)
+    vol_mult = float(cfg.get("vwap_bounce_vol_mult", 1.15) or 1.15)
+    slope_ok = True
+    try:
+        if "ema_9" in df.columns and "ema_21" in df.columns:
+            slope_ok = bool(float(last["ema_9"]) > float(last["ema_21"]))
+    except Exception:
+        slope_ok = True
+
+    current_vol = float(last["volume"]) if "volume" in df.columns else 0.0
+    avg_vol = float(df["volume"].rolling(window=min(20, len(df))).mean().iloc[-1]) if "volume" in df.columns else 0.0
+    volume_ok = avg_vol > 0 and current_vol >= avg_vol * vol_mult
+    candle_bull = float(last["close"]) >= float(last["open"])
+    candle_bear = float(last["close"]) <= float(last["open"])
+    price_vs_vwap = (current_price - vwap_ref) / vwap_ref
+    recent = df.tail(3)
+
+    long_touch = bool((recent["low"] <= vwap_ref * (1 + near_pct)).any()) if "low" in recent.columns else False
+    short_touch = bool((recent["high"] >= vwap_ref * (1 - near_pct)).any()) if "high" in recent.columns else False
+
+    long_confirmed = (
+        price_vs_vwap >= -near_pct
+        and long_touch
+        and current_price > vwap_ref * (1 + reclaim_pct)
+        and candle_bull
+        and volume_ok
+        and slope_ok
+        and mtf_fast_bias != "SHORT_ONLY"
+    )
+    short_confirmed = (
+        price_vs_vwap <= near_pct
+        and short_touch
+        and current_price < vwap_ref * (1 - reclaim_pct)
+        and candle_bear
+        and volume_ok
+        and (not slope_ok or mtf_fast_bias != "LONG_ONLY")
+    )
+
+    if long_confirmed and not short_confirmed:
+        sl = float(vwap_ref) * (1 - max(near_pct, 0.001))
+        return {
+            "triggered": True,
+            "mode": "VWAP_BOUNCE",
+            "direction": "LONG",
+            "score": 0.30,
+            "reason": f"VWAP bounce above {vwap_ref:.5f}",
+            "sl": sl,
+        }
+
+    if short_confirmed and not long_confirmed:
+        sl = float(vwap_ref) * (1 + max(near_pct, 0.001))
+        return {
+            "triggered": True,
+            "mode": "VWAP_BOUNCE",
+            "direction": "SHORT",
+            "score": -0.30,
+            "reason": f"VWAP rejection below {vwap_ref:.5f}",
+            "sl": sl,
+        }
+
+    return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "VWAP_BOUNCE"}
+
+def _detect_orb_breakout_setup(
+    df: pd.DataFrame,
+    current_price: float,
+    latest_indicators: dict = None,
+    strategy_config: dict = None,
+    mtf_fast_bias: str = "NEUTRAL",
+) -> dict:
+    """
+    Detect a rolling opening-range breakout setup.
+    Uses the first N minutes of the current UTC day as the opening range.
+    """
+    if df is None or len(df) < 10:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    cfg = strategy_config or {}
+    if not bool(cfg.get("orb_enabled", True)):
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    if "timestamp" not in df.columns:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    latest_indicators = latest_indicators or {}
+    last = df.iloc[-1]
+    try:
+        last_ts = pd.to_datetime(last["timestamp"], utc=True, errors="coerce")
+    except Exception:
+        last_ts = pd.NaT
+    if pd.isna(last_ts):
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    orb_minutes = int(cfg.get("orb_minutes", 15) or 15)
+    orb_minutes = max(5, min(60, orb_minutes))
+    breakout_buffer_pct = float(cfg.get("orb_breakout_buffer_pct", 0.0005) or 0.0005)
+    volume_mult = float(cfg.get("orb_volume_mult", 1.25) or 1.25)
+
+    day_start = last_ts.floor("D")
+    day_mask = pd.to_datetime(df["timestamp"], utc=True, errors="coerce") >= day_start
+    day_df = df.loc[day_mask].copy()
+    if len(day_df) < 3:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    orb_end = day_start + pd.Timedelta(minutes=orb_minutes)
+    orb_df = day_df[pd.to_datetime(day_df["timestamp"], utc=True, errors="coerce") < orb_end]
+    if len(orb_df) < 2:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    orb_high = float(orb_df["high"].max())
+    orb_low = float(orb_df["low"].min())
+    if orb_high <= 0 or orb_low <= 0 or current_price <= 0:
+        return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
+
+    current_vol = float(last["volume"]) if "volume" in df.columns else 0.0
+    avg_vol = float(day_df["volume"].rolling(window=min(20, len(day_df))).mean().iloc[-1]) if "volume" in df.columns else 0.0
+    volume_ok = avg_vol > 0 and current_vol >= avg_vol * volume_mult
+    candle_bull = float(last["close"]) >= float(last["open"])
+    candle_bear = float(last["close"]) <= float(last["open"])
+    macd_up = float(latest_indicators.get("macd_diff", 0.0) or 0.0) > 0
+    macd_down = float(latest_indicators.get("macd_diff", 0.0) or 0.0) < 0
+
+    breakout_long = (
+        current_price >= orb_high * (1 + breakout_buffer_pct)
+        and volume_ok
+        and candle_bull
+        and (mtf_fast_bias != "SHORT_ONLY")
+        and (macd_up or float(last.get("ema_9", current_price)) > float(last.get("ema_21", current_price)))
+    )
+    breakout_short = (
+        current_price <= orb_low * (1 - breakout_buffer_pct)
+        and volume_ok
+        and candle_bear
+        and (mtf_fast_bias != "LONG_ONLY")
+        and (macd_down or float(last.get("ema_9", current_price)) < float(last.get("ema_21", current_price)))
+    )
+
+    if breakout_long and not breakout_short:
+        sl = orb_high * (1 - max(breakout_buffer_pct, 0.001))
+        return {
+            "triggered": True,
+            "mode": "ORB_BREAKOUT",
+            "direction": "LONG",
+            "score": 0.40,
+            "reason": f"ORB breakout above {orb_high:.5f}",
+            "sl": sl,
+        }
+
+    if breakout_short and not breakout_long:
+        sl = orb_low * (1 + max(breakout_buffer_pct, 0.001))
+        return {
+            "triggered": True,
+            "mode": "ORB_BREAKOUT",
+            "direction": "SHORT",
+            "score": -0.40,
+            "reason": f"ORB breakdown below {orb_low:.5f}",
+            "sl": sl,
+        }
+
+    return {"direction": "NEUTRAL", "score": 0.0, "reason": "", "sl": None, "triggered": False, "mode": "ORB_BREAKOUT"}
 
 def _confirm_breakout_momentum(df: pd.DataFrame, action: str, current_price: float, level: float) -> bool:
     """
