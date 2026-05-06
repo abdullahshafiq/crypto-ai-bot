@@ -21,16 +21,14 @@ def generate_alpha_overlay(df: pd.DataFrame, smc_score: float, macro_bias: str) 
     """
     MASTER RECONSTRUCTION: Alpha Overlay Engine.
     Synthesizes structural bias with momentum to find 'The Edge'.
-    This is the 'Secret Sauce' that confirms structural breaks with
-    volume-supported momentum crosses.
+    Uses EMA 50/200 golden/death cross for swing-speed trend confirmation.
     """
-    if len(df) < 50: return 0.0
+    if len(df) < 200: return 0.0
 
-    # 1. Momentum Cross Check (EMA 9/21)
-    # Rapid trend confirmation for scalpers.
-    ema_9 = df['ema_9'].iloc[-1]
-    ema_21 = df['ema_21'].iloc[-1]
-    mom_bias = 1.0 if ema_9 > ema_21 else -1.0
+    # 1. Momentum Cross Check (EMA 50/200) — swing-speed trend filter
+    ema_50 = df['ema_50'].iloc[-1]
+    ema_200 = df['ema_200'].iloc[-1]
+    mom_bias = 1.0 if ema_50 > ema_200 else -1.0
 
     # 2. Relative Volume Spike
     # Confirms if the move is backed by real money.
@@ -54,15 +52,9 @@ def validate_signal_integrity(signal: dict, vol_context: dict) -> dict:
     MASTER RECONSTRUCTION: Signal Integrity Validation.
     Final filter to ensure we aren't trading in 'Dangerous' conditions.
     """
-    # For scalping, a squeeze is a warning, not an automatic veto.
-    # Only very weak signals are blocked; stronger setups are allowed through.
+    # For swing trading, a volatility squeeze is a potential breakout setup — not a veto.
     if vol_context.get('squeeze'):
-        squeeze_score = abs(signal.get('score', 0))
-        if squeeze_score < 0.05:
-            signal['action'] = "HOLD"
-            signal['hold_reason'] = "Volatility Squeeze: High Fakeout Risk"
-        else:
-            signal['squeeze_warning'] = "Volatility Squeeze: Trade Allowed"
+        signal['squeeze_warning'] = "Volatility Squeeze: Potential Breakout Setup"
 
     # Block signals if ATR is too low (not enough movement to cover fees)
     if vol_context.get('atr_rank', 1.0) < 0.05:

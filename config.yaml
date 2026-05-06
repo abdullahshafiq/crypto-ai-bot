@@ -1,12 +1,12 @@
 # =============================================================================
-# LIVE SCALPING CONFIG
+# LIVE SWING TRADING CONFIG
 # =============================================================================
-# Purpose: Live trading with all AI overlays active.
+# Purpose: Swing trading on 1h chart, targeting 3-8% moves over hours/days.
 # =============================================================================
 
 symbol: "AVAX/USDC:USDC"
-timeframe: "3m"
-macro_timeframe: "5m"
+timeframe: "1h"
+macro_timeframe: "4h"
 
 # Market data source (spot vs futures)
 data:
@@ -19,7 +19,7 @@ execution:
   paused: false
   close_positions_on_pause: false
   panic_exit: false
-  leverage: 4
+  leverage: 2
   spot_balance_pct: 0.35
   spot_reserve_pct: 0.30
   spot_max_layers: 3
@@ -27,73 +27,72 @@ execution:
   fee_rate: 0.0006
   fee_slippage_buffer_pct: 0.0002
   fee_edge_multiplier: 1.2
-  min_seconds_between_trades: 60
-  min_seconds_before_reversal: 60
-  reversal_min_confidence: 0.45     # slightly above entry min_conf
-  reversal_min_score: 0.25
-  reversal_min_net_edge_pct: 0.0020
-  break_even_trigger_pct: 0.0030
-  break_even_buffer_pct: 0.0008
+  min_seconds_between_trades: 3600    # 1h minimum between entries
+  min_seconds_before_reversal: 3600
+  reversal_min_confidence: 0.55
+  reversal_min_score: 0.35
+  reversal_min_net_edge_pct: 0.0100   # need 1% net edge before reversing
+  break_even_trigger_pct: 0.0150      # move BE after +1.5% profit
+  break_even_buffer_pct: 0.0030
   profit_trailing_enabled: true
-  profit_trailing_activation_pct: 0.0030 # arm trailing only after +0.30% profit
+  profit_trailing_activation_pct: 0.0200  # arm trailing after +2% profit
   trailing_tp_enabled: true
-  trailing_tp_giveback_pct: 0.35      # allow more room for trend continuation
-  trailing_tp_min_peak_pct: 0.0060    # needs at least +0.60% peak profit first
-  trail_tighten_1_pct: 0.0050       # T1 trigger: start trailing at 0.50% profit
-  trail_tighten_2_pct: 0.0100       # T2 trigger: tighten at 1.00% profit
-  trail_t1_gap_pct: 0.0040          # T1 trails 0.40% behind best price
-  trail_t2_gap_pct: 0.0030          # T2 trails 0.30% behind best price
-  min_profit_after_fees: 0.0010
+  trailing_tp_giveback_pct: 0.25          # lock in 75% of peak gain
+  trailing_tp_min_peak_pct: 0.0300        # needs at least +3% peak profit first
+  trail_tighten_1_pct: 0.0250       # T1 trigger: start trailing at 2.5% profit
+  trail_tighten_2_pct: 0.0500       # T2 trigger: tighten at 5% profit
+  trail_t1_gap_pct: 0.0150          # T1 trails 1.5% behind best price
+  trail_t2_gap_pct: 0.0100          # T2 trails 1.0% behind best price
+  min_profit_after_fees: 0.0050      # 0.5% min net profit to count as a win
   exit_on_reversal_only_in_profit: true
   use_limit_orders: true
   use_native_trailing_stop: true
   use_exchange_stop_loss: true
   use_exchange_take_profit: true
   market_fallback_on_timeout: true
-  pending_entry_ttl_seconds: 10
+  pending_entry_ttl_seconds: 60      # give limit orders 60s to fill
   use_resting_support_orders: true
-  resting_entry_ttl_seconds: 120
-  resting_entry_min_conf: 0.50
-  resting_entry_offset_pct: 0.0002
-  resting_entry_max_distance_pct: 0.0125
+  resting_entry_ttl_seconds: 7200    # 2h resting orders
+  resting_entry_min_conf: 0.55
+  resting_entry_offset_pct: 0.0005
+  resting_entry_max_distance_pct: 0.0300  # allow entries up to 3% away
   trailing_callback_pct: 0.65
-  same_side_reentry_cooldown_seconds: 300
-  same_side_reentry_strong_confidence: 0.85
-  scalp_min_hold_seconds: 20
+  same_side_reentry_cooldown_seconds: 7200   # 2h cooldown before re-entering same side
+  same_side_reentry_strong_confidence: 0.90
+  scalp_min_hold_seconds: 3600       # hold at least 1h before exit pressure
   scalp_runner_enabled: true
-  scalp_runner_pullback_pct: 0.0020
-  scalp_runner_min_lock_pct: 0.0040
-  scalp_runner_exchange_tp_multiplier: 4.0
+  scalp_runner_pullback_pct: 0.0100
+  scalp_runner_min_lock_pct: 0.0200
+  scalp_runner_exchange_tp_multiplier: 3.0
   scalp_runner_partial_exit_pct: 0.45
-  ttl_exit_seconds: 1800             # let winning trades live longer before TTL pressure
+  ttl_exit_seconds: 86400            # 24h TTL — swing trades get a full day
 
 # Dynamic Leverage (confidence-based)
 leverage:
   enabled: true
-  min_leverage: 2
-  max_leverage: 4
+  min_leverage: 1
+  max_leverage: 2
   confidence_levels:
-    0.10: 2.0                  # floor: 2x even at minimum entry confidence
-    0.15: 2.0                  # matches min_conf so all entries start at 2x
-    0.35: 3.0                  # moderate
-    0.50: 4.0                  # strong (Cap at 4x)
-    0.75: 4.0                  # max conviction
+    0.30: 1.0                  # floor: 1x at minimum entry confidence
+    0.50: 1.5                  # moderate
+    0.65: 2.0                  # strong conviction
+    0.80: 2.0                  # max (cap at 2x for swing)
   use_score_multiplier: true
   score_weight: 0.2
   atr_volatility_scaling: true
-  atr_reference_pct: 0.02     # target ATR% before scaling — ~2% is typical AVAX volatility
+  atr_reference_pct: 0.04     # swing targets ~4% ATR moves
   atr_min_multiplier: 0.5
 
 # Multi-Timeframe Trend + S/R
 mtf:
   enabled: true
-  timeframes: ["1m", "3m", "5m", "10m", "15m", "1h", "4h"]
-  min_agree: 2                    # 2-of-5 fast TFs (1m/3m/5m/10m/15m)
-  require_full_confirmation: false # keep MTF as confirmation, not a hard entry gate
-  strict_veto_on_missing: false    # missing higher-TF data falls back to base signal
+  timeframes: ["15m", "1h", "4h", "1d"]
+  min_agree: 2
+  require_full_confirmation: false
+  strict_veto_on_missing: false
   veto_on_missing: false
-  max_age_seconds: 300
-  sr_buffer_pct: 0.0015
+  max_age_seconds: 3600        # 1h max age on swing — daily candles update slowly
+  sr_buffer_pct: 0.0030        # wider S/R buffer for swing
   mode: "hard"
 
 # Terminal UI
@@ -114,10 +113,10 @@ logging:
 # Auto-learning from session trades (no historical data)
 auto_learning:
   enabled: true
-  min_completed_trades: 5      # start learning after just 5 trades in this session
-  refresh_closed_trades: 3     # retrain every 3 new closed trades
-  max_recent_trades: 200       # (unused in session mode, kept for compat)
-  shrinkage: 0.45              # higher = more weight to session-learned weights
+  min_completed_trades: 5
+  refresh_closed_trades: 3
+  max_recent_trades: 200
+  shrinkage: 0.45
   ai_advisor:
     enabled: true
     model: "deepseek-chat"
@@ -125,68 +124,68 @@ auto_learning:
 
 # Quant Strategy Parameters
 strategy:
-  max_spread: 0.0005
-  min_conf: 0.15              # keep some selectivity, but allow more live entries
-  signal_smoothing_ticks: 3
-  max_ret_30s: 0.0040
-  max_ret_5s: 0.0018
+  max_spread: 0.0010            # wider spread tolerance for hourly candles
+  min_conf: 0.30                # higher baseline confidence required
+  signal_smoothing_ticks: 5     # more smoothing to avoid hourly whipsaws
+  max_ret_30s: 0.0200
+  max_ret_5s: 0.0100
   block_on_volume_spike: false
   fixed_trade_usdt: 25
-  tp_pct: 0.0060              # allow trend runners more room before arming
-  sl_pct: 0.0025              # tighter default SL to cut failed calls sooner
-  max_structural_sl_pct: 0.0060  # cap structural SL at 0.6%
-  min_reward_risk: 0.65
+  tp_pct: 0.0500                # 5% primary TP target
+  sl_pct: 0.0200                # 2% SL — wider room for swing noise
+  max_structural_sl_pct: 0.0300 # cap structural SL at 3%
+  min_reward_risk: 1.5          # at least 1.5R required for swing entries
   range_action_zone_pct: 0.20
   wall_veto_zone_pct: 0.12
-  support_veto_pct: 0.0010
-  resistance_veto_pct: 0.0010
-  support_break_pct: 0.0010
-  resistance_break_pct: 0.0010
-  max_chase_pct: 0.0030       # tighter chase guard
-  mtf_neutral_allow_score: 0.35
-  entry_min_confidence_hard: 0.20
-  midrange_min_score: 0.28
+  support_veto_pct: 0.0020
+  resistance_veto_pct: 0.0020
+  support_break_pct: 0.0020
+  resistance_break_pct: 0.0020
+  max_chase_pct: 0.0100         # allow chasing up to 1% from signal price
+  mtf_neutral_allow_score: 0.45
+  entry_min_confidence_hard: 0.35
+  midrange_min_score: 0.35
   mtf_rsi_bull_level: 55
   mtf_rsi_bear_level: 45
   mtf_rsi_min_agree: 2
-  vpoc_near_pct: 0.0010
-  vpoc_break_pct: 0.0015
+  vpoc_near_pct: 0.0020
+  vpoc_break_pct: 0.0030
   session_filter_enabled: true
   session_block_hours_utc: []
-  session_block_min_score: 0.35
-  entry_near_resistance_block_pct: 0.0030
-  entry_near_support_block_pct: 0.0030
-  macd_noise_threshold: 0.00005  # MACD noise floor (code caps at 0.00002 for scalp)
-  vol_filter_atr_pct: 0.0001
-  vol_filter_atr_max_pct: 0.08
-  low_vol_min_score: 0.45
+  session_block_min_score: 0.40
+  entry_near_resistance_block_pct: 0.0100  # block entries within 1% of resistance
+  entry_near_support_block_pct: 0.0100
+  macd_noise_threshold: 0.0002   # higher floor filters more noise on hourly
+  vol_filter_atr_pct: 0.0005
+  vol_filter_atr_max_pct: 0.10
+  low_vol_min_score: 0.50
   wick_sweep_enabled: true
-  wick_sweep_buffer_pct: 0.0008
-  wick_sweep_reclaim_pct: 0.0002
-  wick_sweep_wick_ratio: 1.6
+  wick_sweep_buffer_pct: 0.0020
+  wick_sweep_reclaim_pct: 0.0005
+  wick_sweep_wick_ratio: 2.0     # swing wicks are larger
   wall_reversal_assist: true
-  wall_reversal_score_gate: 0.12
-  wall_breakout_score_gate: 0.15
+  wall_reversal_score_gate: 0.15
+  wall_breakout_score_gate: 0.20
   range_position_veto_enabled: true
-  range_veto_top_pct: 0.75
-  range_veto_bottom_pct: 0.25
-  range_veto_escape_score: 0.90
-  rsi_ob_entry_gate: 72
-  rsi_os_entry_gate: 28
+  range_veto_top_pct: 0.80
+  range_veto_bottom_pct: 0.20
+  range_veto_escape_score: 0.80  # breakout confirmation easier to trigger
+  rsi_ob_entry_gate: 78          # stricter OB/OS gates for swing
+  rsi_os_entry_gate: 22
   orb_volume_mult: 1.5
   spread_atr_ratio_max: 0.15
-  ob_midpoint_tolerance_pct: 0.0015
-  anchored_vwap_near_pct: 0.0010
+  ob_midpoint_tolerance_pct: 0.0030
+  anchored_vwap_near_pct: 0.0020
   loss_tilt_min_losses: 3
   loss_tilt_pause_losses: 5
-  loss_tilt_pause_minutes: 15
+  loss_tilt_pause_minutes: 60    # 1h pause after loss streak
 
 # Rejection confirmation gate
 rejection_confirmation:
   enabled: true
-  min_bars_away: 2
+  min_bars_away: 3               # 3 hourly bars = 3h confirmation
   macd_threshold: 0.0
-  pullback_pct: 0.002
+  pullback_pct: 0.010            # require 1% pullback before entry
   require_psar_flip: true
 
 # Spot settings
@@ -195,11 +194,11 @@ spot:
   max_layers: 3
   layer_quote_pct: 0.20
   reserve_quote_pct: 0.30
-  buy_near_support_pct: 0.0150
-  sell_near_resistance_pct: 0.0020
-  layer_spacing_pct: 0.0030
-  emergency_break_pct: 0.0040
-  min_take_profit_pct: 0.0035
+  buy_near_support_pct: 0.0300
+  sell_near_resistance_pct: 0.0050
+  layer_spacing_pct: 0.0080
+  emergency_break_pct: 0.0100
+  min_take_profit_pct: 0.0150
   min_trail_profit_quote: 0.10
 
 # Risk Limits
@@ -209,20 +208,20 @@ risk:
   max_open_positions: 1
   min_balance_floor: 0.0
 
-# Refresh Intervals (in ticks, 1 tick ≈ 1 second)
+# Refresh Intervals (in ticks, 1 tick ≈ 5 seconds on swing)
 intervals:
-  indicator_refresh: 10       # full indicator recalc every 5s (was 2 = 1s — too heavy)
-  regime_refresh: 300         # macro regime every 5 min
-  tick_delay_seconds: 0.5     # tick loop at 500ms
+  indicator_refresh: 30        # recalc every 30 ticks (~150s) on hourly charts
+  regime_refresh: 1800         # macro regime every 30 min
+  tick_delay_seconds: 5.0      # slower loop — hourly candles don't need 500ms polling
 
 # AI Settings (consolidated)
 ai:
   enabled: true
   model: "gpt-4o-mini"
-  overlay_enabled: true          # tactical MTF overlay (rules-based by default)
-  overlay_refresh_seconds: 60
-  trade_gate_enabled: false      # per-trade AI gate (slow, disabled for scalp)
-  trade_gate_min_interval: 30
+  overlay_enabled: true
+  overlay_refresh_seconds: 300   # refresh overlay every 5 min
+  trade_gate_enabled: true       # enable AI gate — fewer trades, worth the latency
+  trade_gate_min_interval: 300
   trade_gate_on_error: "allow"
 
 # Local web dashboard
