@@ -120,7 +120,7 @@ def _realized_exit_type(exit_type: str, net_pnl: float) -> str:
     base = str(exit_type or "EXIT").upper()
     if base in {"TRAIL_WIN", "TRAIL_SL"}:
         return "TRAIL_WIN" if float(net_pnl) > 0 else "TRAIL_SL"
-    if base in {"TAKE_PROFIT", "SCALP_EXIT", "REVERSAL_BANK", "REVERSAL", "REVERSAL_WIN", "REVERSAL_CUT"}:
+    if base in {"TAKE_PROFIT", "TRAIL_TP", "SCALP_EXIT", "SCALP_EXIT_PARTIAL", "REVERSAL_BANK", "REVERSAL", "REVERSAL_WIN", "REVERSAL_CUT"}:
         return base if float(net_pnl) > 0 else f"{base}_LOSS"
     return base if float(net_pnl) > 0 else f"{base}_LOSS"
 
@@ -264,6 +264,25 @@ def _runner_emergency_tp_price(side: str, entry: float, base_tp: float, scalp_cf
     return min(base_tp, emergency_tp)
 
 
+def _trailing_tp_hit(pos: dict, profit_pct: float, min_net_profit: float) -> bool:
+    """Close when current profit gives back enough from the best profit seen."""
+    if not bool(pos.get("trailing_tp_enabled", True)):
+        return False
+    peak_profit = float(pos.get("highest_profit_pct", 0.0) or 0.0)
+    min_peak = max(
+        float(pos.get("trailing_tp_min_peak_pct", 0.0020) or 0.0020),
+        float(pos.get("profit_trailing_activation_pct", 0.0) or 0.0),
+        float(min_net_profit),
+    )
+    if peak_profit < min_peak:
+        return False
+
+    giveback_pct = max(0.01, min(0.95, float(pos.get("trailing_tp_giveback_pct", 0.12) or 0.12)))
+    floor_profit = peak_profit * (1.0 - giveback_pct)
+    pos["trailing_tp_floor_pct"] = floor_profit
+    return float(profit_pct) >= float(min_net_profit) and float(profit_pct) <= floor_profit
+
+
 def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float = None) -> float:
     """
     Progressive trailing stop with 4 stages. Stores 'trail_stage' on pos dict.
@@ -281,6 +300,10 @@ def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float 
     base_dist = float(pos.get("sl_pct_dist", 0.005) or 0.005)
     be_pct = float(pos.get("break_even_trigger_pct", 0.0015) or 0.0015)
     be_buffer = float(pos.get("break_even_buffer_pct", 0.0004) or 0.0004)
+    profit_only = bool(pos.get("profit_trailing_enabled", True))
+    profit_activation = float(pos.get("profit_trailing_activation_pct", be_pct) or be_pct)
+    if profit_only:
+        profit_activation = max(0.0, profit_activation, be_pct)
     t1_pct = float(pos.get("trail_tighten_1_pct", 0.0025) or 0.0025)
     t2_pct = float(pos.get("trail_tighten_2_pct", 0.0035) or 0.0035)
     fee_rate = float(pos.get("fee_rate", 0.0004) or 0.0004)
@@ -297,6 +320,10 @@ def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float 
         # Stage 0: BASE — initial fixed SL
         trail_sl = entry * (1 - base_dist)
         stage = "BASE"
+
+        if profit_only and profit_pct < profit_activation:
+            pos["trail_stage"] = "WAIT_PROFIT"
+            return float(pos.get("sl", trail_sl) or trail_sl)
 
         # Stage 1: BE+ — lock to break-even
         if profit_pct >= be_pct:
@@ -327,6 +354,10 @@ def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float 
 
     trail_sl = entry * (1 + base_dist)
     stage = "BASE"
+
+    if profit_only and profit_pct < profit_activation:
+        pos["trail_stage"] = "WAIT_PROFIT"
+        return float(pos.get("sl", trail_sl) or trail_sl)
 
     if profit_pct >= be_pct:
         be_sl = entry * (1 - (2.0 * fee_rate) - min_profit)
@@ -365,6 +396,11 @@ class BinanceFuturesExecution:
         self.reversal_min_net_edge_pct = 0.0
         self.break_even_trigger_pct = 0.0010
         self.break_even_buffer_pct = 0.0002
+        self.profit_trailing_enabled = True
+        self.profit_trailing_activation_pct = self.break_even_trigger_pct
+        self.trailing_tp_enabled = True
+        self.trailing_tp_giveback_pct = 0.12
+        self.trailing_tp_min_peak_pct = 0.0020
         self.trail_tighten_1_pct = 0.0025
         self.trail_tighten_2_pct = 0.0050
         self.trail_t1_gap_pct = 0.0025
@@ -457,6 +493,7 @@ class BinanceFuturesExecution:
             'runner_pullback_pct': 0.0012,
             'runner_min_lock_pct': 0.0018,
             'runner_exchange_tp_multiplier': 3.0,
+            'runner_partial_exit_pct': 0.45,
             'fade_trigger_pct': 0.0050,
             'fade_exit_pct': 0.0020
         }
@@ -523,16 +560,19 @@ class BinanceFuturesExecution:
         leverage = max(self.leverage_min, min(self.leverage_max, leverage))
         return leverage
 
-    def _record_closed_trade(self, t_type: str, entry: float, exit_price: float, pnl: float, pnl_pct: float, fees: float):
+    def _record_closed_trade(self, t_type: str, entry: float, exit_price: float, pnl: float, pnl_pct: float, fees: float, side: str = "", reason: str = ""):
         net_pnl = float(pnl) - float(fees)
-        self.closed_trades.append({
+        trade_record = {
             "type": t_type,
             "entry": float(entry),
             "exit": float(exit_price),
             "pnl": float(net_pnl),
             "pnl_pct": float(pnl_pct),
             "fees": float(fees),
-        })
+            "side": str(side).upper(),
+            "reason": str(reason),
+        }
+        self.closed_trades.append(trade_record)
         self.stats_trades += 1
         if net_pnl > 0:
             self.stats_wins += 1
@@ -540,6 +580,23 @@ class BinanceFuturesExecution:
             self.stats_losses += 1
         self.stats_gross += float(pnl)
         self.stats_fees += float(fees)
+
+    def get_session_trades(self) -> list[dict]:
+        """Return completed trades with side/reason for session-based ML learning."""
+        entry_info = getattr(self, "_entry_info", {})
+        trades = []
+        for t in self.closed_trades:
+            trade_id = int(t.get("trade_id", 0) or 0)
+            info = entry_info.get(trade_id, {})
+            trades.append({
+                "side": t.get("side", "") or info.get("side", ""),
+                "reason": t.get("reason", "") or info.get("reason", ""),
+                "net_pnl": float(t.get("pnl", 0.0)),
+                "entry_price": float(t.get("entry", 0.0)),
+                "exit_price": float(t.get("exit", 0.0)),
+                "profitable": 1 if float(t.get("pnl", 0.0)) > 0 else 0,
+            })
+        return trades
 
     def observe_signal_cycle(self, signal: dict):
         """Remember when the market gives an opposite reset after a profitable exit."""
@@ -643,6 +700,10 @@ class BinanceFuturesExecution:
         reason: str = "",
         t_type: str = "",
     ):
+        if event.upper() == "ENTRY":
+            if not hasattr(self, "_entry_info"):
+                self._entry_info = {}
+            self._entry_info[int(trade_id)] = {"side": str(side).upper(), "reason": str(reason or "")}
         try:
             log_file = getattr(self, "trade_log_file", TRADE_LOG_FILE)
             with open(log_file, 'a', newline='') as f:
@@ -803,6 +864,73 @@ class BinanceFuturesExecution:
             except Exception as e:
                 logger.debug(f"Protection order cancel skipped ({order_type} {order_id}): {e}")
         return cancelled
+
+    def _reset_excess_protection_orders(self, pos: dict, threshold: int = 6) -> bool:
+        """
+        Hard reset protection orders if the stack has clearly drifted out of sync.
+        This prevents repeated stop/TP refreshes from leaving many orphan orders behind.
+        """
+        if not isinstance(pos, dict):
+            return False
+
+        side = str(pos.get("side", "")).upper()
+        if side not in {"LONG", "SHORT"}:
+            return False
+
+        order_side = "SELL" if side == "LONG" else "BUY"
+        orders = self._fetch_open_protection_orders(self.symbol)
+        protect_types = {"STOP_MARKET", "TAKE_PROFIT_MARKET", "TRAILING_STOP_MARKET"}
+        protect_orders = []
+        for order in orders:
+            info = order.get("info", {}) or {}
+            reduce_only = _exchange_flag_true(order.get("reduceOnly")) or _exchange_flag_true(info.get("reduceOnly"))
+            if not reduce_only:
+                continue
+            if str(order.get("side") or info.get("side") or "").upper() != order_side:
+                continue
+            if _order_type(order) not in protect_types:
+                continue
+            protect_orders.append(order)
+
+        if len(protect_orders) <= int(threshold or 0):
+            return False
+
+        logger.warning(
+            f"[CLEANUP] Protection stack bloated for {self.symbol} ({len(protect_orders)} orders). "
+            "Resetting stop/TP/trailing orders."
+        )
+
+        for order in protect_orders:
+            order_id = _order_id(order)
+            if not order_id:
+                continue
+            try:
+                self.exchange.cancel_order(order_id, self.symbol)
+            except Exception as e:
+                logger.debug(f"Excess protection cancel skipped ({order_id}): {e}")
+
+        if order_side == "SELL":
+            pos.pop("exchange_stop_order_id", None)
+            pos.pop("exchange_stop_price", None)
+            pos.pop("exchange_stop_order_ts", None)
+            pos.pop("exchange_tp_order_id", None)
+            pos.pop("exchange_tp_price", None)
+            pos.pop("exchange_tp_order_ts", None)
+            pos.pop("native_trailing_order_id", None)
+            pos.pop("native_trailing_activation_price", None)
+            pos.pop("native_trailing_callback_pct", None)
+        else:
+            pos.pop("exchange_stop_order_id", None)
+            pos.pop("exchange_stop_price", None)
+            pos.pop("exchange_stop_order_ts", None)
+            pos.pop("exchange_tp_order_id", None)
+            pos.pop("exchange_tp_price", None)
+            pos.pop("exchange_tp_order_ts", None)
+            pos.pop("native_trailing_order_id", None)
+            pos.pop("native_trailing_activation_price", None)
+            pos.pop("native_trailing_callback_pct", None)
+
+        return True
 
     def _fetch_open_protection_orders(self, symbol: str = None) -> list[dict]:
         """
@@ -1108,6 +1236,100 @@ class BinanceFuturesExecution:
             logger.warning(f"Failed to place take-profit: {e}")
             return False
 
+    def _log_exchange_close_diagnostics(self, pos: dict, current_price: float) -> None:
+        """
+        Capture recent Binance fills/orders when a locally tracked position is gone
+        from the exchange. This turns EXCHANGE_CLOSED into an auditable event.
+        """
+        if not isinstance(pos, dict):
+            return
+
+        try:
+            entry_ts = float(pos.get("entry_ts", time.time()) or time.time())
+        except (TypeError, ValueError):
+            entry_ts = time.time()
+        since_ms = max(0, int((entry_ts - 300) * 1000))
+
+        side = str(pos.get("side", "") or "").upper()
+        close_side = "sell" if side == "LONG" else "buy"
+        expected_amount = float(pos.get("amount", 0.0) or 0.0)
+        tracked_ids = {
+            str(pos.get("exchange_stop_order_id") or ""),
+            str(pos.get("exchange_tp_order_id") or ""),
+            str(pos.get("native_trailing_order_id") or ""),
+        }
+        tracked_ids.discard("")
+
+        logger.warning(
+            "[SYNC_DIAG] Exchange flat for %s while local %s %.8f @ %.5f remained. "
+            "Tracked reduce-only ids=%s current=%.5f",
+            self.symbol,
+            side or "?",
+            expected_amount,
+            float(pos.get("entry", 0.0) or 0.0),
+            ",".join(sorted(tracked_ids)) or "-",
+            float(current_price or 0.0),
+        )
+
+        try:
+            trades = self.exchange.fetch_my_trades(self.symbol, since=since_ms, limit=20) or []
+            recent_trades = sorted(trades, key=lambda t: int(t.get("timestamp") or 0))[-8:]
+            for trade in recent_trades:
+                info = trade.get("info", {}) or {}
+                ts = int(trade.get("timestamp") or 0)
+                ts_s = datetime.utcfromtimestamp(ts / 1000).isoformat() if ts > 0 else "-"
+                logger.warning(
+                    "[SYNC_DIAG] recent_fill ts=%s id=%s order=%s side=%s price=%s amount=%s cost=%s fee=%s maker=%s",
+                    ts_s,
+                    trade.get("id") or info.get("id") or "-",
+                    trade.get("order") or info.get("orderId") or "-",
+                    str(trade.get("side") or info.get("side") or "").lower() or "-",
+                    trade.get("price") or info.get("price") or "-",
+                    trade.get("amount") or info.get("qty") or "-",
+                    trade.get("cost") or info.get("quoteQty") or "-",
+                    trade.get("fee") or "-",
+                    trade.get("takerOrMaker") or "-",
+                )
+        except Exception as e:
+            logger.warning(f"[SYNC_DIAG] fetch_my_trades failed: {e}")
+
+        for fetcher_name in ("fetch_closed_orders", "fetch_orders"):
+            fetcher = getattr(self.exchange, fetcher_name, None)
+            if not callable(fetcher):
+                continue
+            try:
+                orders = fetcher(self.symbol, since=since_ms, limit=20) or []
+                recent_orders = sorted(orders, key=lambda o: int(o.get("timestamp") or 0))[-8:]
+                for order in recent_orders:
+                    info = order.get("info", {}) or {}
+                    oid = _order_id(order)
+                    order_side = str(order.get("side") or info.get("side") or "").lower()
+                    reduce_only = order.get("reduceOnly") if order.get("reduceOnly") is not None else info.get("reduceOnly")
+                    if oid not in tracked_ids and order_side != close_side and not _exchange_flag_true(reduce_only):
+                        continue
+                    ts = int(order.get("timestamp") or 0)
+                    ts_s = datetime.utcfromtimestamp(ts / 1000).isoformat() if ts > 0 else "-"
+                    logger.warning(
+                        "[SYNC_DIAG] recent_order source=%s ts=%s id=%s client=%s type=%s side=%s status=%s "
+                        "filled=%s amount=%s avg=%s price=%s stop=%s reduceOnly=%s closePosition=%s",
+                        fetcher_name,
+                        ts_s,
+                        oid or "-",
+                        order.get("clientOrderId") or info.get("clientOrderId") or "-",
+                        _order_type(order) or "-",
+                        order_side or "-",
+                        order.get("status") or info.get("status") or "-",
+                        order.get("filled") or info.get("executedQty") or "-",
+                        order.get("amount") or info.get("origQty") or "-",
+                        order.get("average") or info.get("avgPrice") or "-",
+                        order.get("price") or info.get("price") or "-",
+                        _order_trigger_price(order) or "-",
+                        reduce_only,
+                        info.get("closePosition"),
+                    )
+            except Exception as e:
+                logger.warning(f"[SYNC_DIAG] {fetcher_name} failed: {e}")
+
     def _cleanup_trade_orders(self, symbol: str = None, pos: dict = None):
         """
         Cancel all open trade-related orders and clear local pending order state.
@@ -1171,6 +1393,240 @@ class BinanceFuturesExecution:
             self.pending_entry = None
         if getattr(self, "pending_exit", None):
             self.pending_exit = None
+
+    def _execute_futures_reduce_only_exit(self, pos: dict, current_price: float, exit_type: str, trade_id: int) -> bool:
+        """
+        Execute a futures close. Returns True when the position should remain open
+        after the call, and False when it has been fully closed.
+        """
+        if not isinstance(pos, dict):
+            return False
+
+        side = str(pos.get("side", "")).upper()
+        amount = float(pos.get("amount", 0.0) or 0.0)
+        entry = float(pos.get("entry", current_price) or current_price)
+        if side not in {"LONG", "SHORT"} or amount <= 0 or entry <= 0:
+            return False
+
+        order_side = "SELL" if side == "LONG" else "BUY"
+        scalp_cfg = getattr(self, "scalp_config", {}) or {}
+        partial_pct = float(scalp_cfg.get("runner_partial_exit_pct", 0.0) or 0.0)
+        use_scale_out = (
+            str(exit_type or "").upper() == "SCALP_EXIT"
+            and not bool(pos.get("runner_scale_out_taken", False))
+            and 0.0 < partial_pct < 1.0
+        )
+
+        close_amount = amount * partial_pct if use_scale_out else amount
+        try:
+            close_amount = float(self.exchange.amount_to_precision(self.symbol, close_amount))
+        except Exception:
+            close_amount = float(close_amount)
+        if close_amount <= 0:
+            return False
+        if close_amount >= amount * 0.999:
+            use_scale_out = False
+            close_amount = amount
+
+        # Remove stale protection before the reduce-only close so the
+        # replacement orders can be rebuilt for the remaining size.
+        self._cleanup_trade_orders(self.symbol, pos)
+
+        stop_like_exit = str(exit_type or "").upper() in {
+            "STOP_LOSS",
+            "TRAIL_WIN",
+            "TRAIL_SL",
+            "TAKE_PROFIT",
+            "TRAIL_TP",
+            "SCALP_EXIT",
+            "SCALP_EXIT_PARTIAL",
+            "SCALP_FADE",
+            "TTL_EXIT",
+        }
+        if getattr(self, "use_limit_orders", False):
+            try:
+                exit_limit = _maker_entry_price(self.exchange, self.symbol, order_side, float(current_price))
+                price_s = self.exchange.price_to_precision(self.symbol, exit_limit)
+                order_resp = self.exchange.create_order(
+                    symbol=self.symbol,
+                    type="LIMIT",
+                    side=order_side,
+                    amount=close_amount,
+                    price=float(price_s),
+                    params={"reduceOnly": True, "postOnly": True, "timeInForce": "GTX"},
+                )
+                ttl_seconds = 3.0 if stop_like_exit else float(getattr(self, "pending_exit_ttl_seconds", 20) or 20)
+                self.pending_exit = {
+                    "order_id": str(order_resp.get("id") or (order_resp.get("info", {}) or {}).get("orderId") or ""),
+                    "ts": time.time(),
+                    "price": float(price_s),
+                    "amount": close_amount,
+                    "side": order_side,
+                    "exit_type": exit_type,
+                    "ttl_seconds": ttl_seconds,
+                    "fallback_market": bool(getattr(self, "market_fallback_on_timeout", False)) or stop_like_exit,
+                }
+                self.last_status = f"Maker exit placed @ {price_s}"
+                logger.info(f"[MAKER_EXIT] {order_side} placed @ {price_s} | ttl={ttl_seconds:.1f}s")
+                return True
+            except Exception as e:
+                logger.warning(f"Maker exit placement failed: {e}")
+                if stop_like_exit or getattr(self, "market_fallback_on_timeout", False):
+                    logger.warning("Maker exit placement failed; falling back to market close")
+                    return self._finalize_reduce_only_market_exit(
+                        pos,
+                        current_price,
+                        exit_type,
+                        trade_id,
+                        amount=close_amount,
+                        use_scale_out=use_scale_out,
+                    )
+                self.last_status = "Maker exit failed; still tracking position"
+                self._ensure_exchange_stop_loss(pos)
+                self._ensure_exchange_take_profit(pos)
+                self._ensure_native_trailing_stop(pos)
+                return True
+
+        return self._finalize_reduce_only_market_exit(
+            pos,
+            current_price,
+            exit_type,
+            trade_id,
+            amount=close_amount,
+            use_scale_out=use_scale_out,
+        )
+
+    def _finalize_reduce_only_market_exit(
+        self,
+        pos: dict,
+        current_price: float,
+        exit_type: str,
+        trade_id: int,
+        amount: float | None = None,
+        use_scale_out: bool | None = None,
+    ) -> bool:
+        if not isinstance(pos, dict):
+            return False
+
+        side = str(pos.get("side", "")).upper()
+        pos_amount = float(pos.get("amount", 0.0) or 0.0)
+        entry = float(pos.get("entry", current_price) or current_price)
+        if side not in {"LONG", "SHORT"} or pos_amount <= 0 or entry <= 0:
+            return False
+
+        order_side = "SELL" if side == "LONG" else "BUY"
+        scalp_cfg = getattr(self, "scalp_config", {}) or {}
+        partial_pct = float(scalp_cfg.get("runner_partial_exit_pct", 0.0) or 0.0)
+        if use_scale_out is None:
+            use_scale_out = (
+                str(exit_type or "").upper() == "SCALP_EXIT"
+                and not bool(pos.get("runner_scale_out_taken", False))
+                and 0.0 < partial_pct < 1.0
+            )
+
+        close_amount = float(amount if amount is not None else (pos_amount * partial_pct if use_scale_out else pos_amount))
+        try:
+            close_amount = float(self.exchange.amount_to_precision(self.symbol, close_amount))
+        except Exception:
+            close_amount = float(close_amount)
+        if close_amount <= 0:
+            return False
+        if close_amount >= pos_amount * 0.999:
+            use_scale_out = False
+            close_amount = pos_amount
+
+        try:
+            order_resp = self.exchange.create_market_order(
+                self.symbol,
+                order_side,
+                close_amount,
+                params={"reduceOnly": True},
+            )
+            fill_price = _order_fill_price(order_resp, current_price)
+            filled_amount = close_amount
+            try:
+                filled_amount = float(
+                    order_resp.get("filled")
+                    or (order_resp.get("info", {}) or {}).get("executedQty")
+                    or close_amount
+                )
+            except Exception:
+                filled_amount = close_amount
+            filled_amount = max(0.0, min(pos_amount, filled_amount))
+        except Exception as e:
+            logger.warning(f"Market exit failed; keeping position active: {e}")
+            self.last_status = "Market exit failed; still tracking position"
+            self._ensure_exchange_stop_loss(pos)
+            self._ensure_exchange_take_profit(pos)
+            self._ensure_native_trailing_stop(pos)
+            return True
+
+        pnl = (fill_price - entry) * filled_amount if side == "LONG" else (entry - fill_price) * filled_amount
+        profit_pct = (fill_price - entry) / entry if side == "LONG" else (entry - fill_price) / entry
+        fees = (filled_amount * entry * self.fee_rate) + (filled_amount * fill_price * self.fee_rate)
+        exit_fee = filled_amount * fill_price * self.fee_rate
+        net_pnl = pnl - fees
+        realized_type = _realized_exit_type(exit_type or "TRAIL_WIN", net_pnl)
+
+        if use_scale_out:
+            remaining_amount = max(0.0, pos_amount - filled_amount)
+            try:
+                remaining_amount = float(self.exchange.amount_to_precision(self.symbol, remaining_amount))
+            except Exception:
+                remaining_amount = float(remaining_amount)
+
+            if remaining_amount > 0 and remaining_amount < pos_amount:
+                pos["amount"] = remaining_amount
+                pos["runner_scale_out_taken"] = True
+                pos["profit_runner_armed"] = False
+                pos["trail_armed"] = True
+                new_sl = _compute_trailing_stop(pos, current_price)
+                if side == "LONG":
+                    pos["sl"] = max(float(pos.get("sl", 0.0) or 0.0), new_sl)
+                else:
+                    pos["sl"] = min(float(pos.get("sl", 0.0) or 0.0), new_sl)
+                pos["sl_pct_dist"] = abs(entry - float(pos.get("sl", entry) or entry)) / entry if entry else float(pos.get("sl_pct_dist", 0.0) or 0.0)
+                self._log_trade(
+                    trade_id,
+                    "PARTIAL_EXIT",
+                    order_side,
+                    fill_price,
+                    filled_amount,
+                    pnl,
+                    exit_fee,
+                    t_type=realized_type,
+                    reason="runner scale-out",
+                )
+                self._ensure_exchange_stop_loss(pos)
+                self._ensure_exchange_take_profit(pos)
+                self._ensure_native_trailing_stop(pos)
+                self._last_trade_ts = time.time()
+                self.last_status = (
+                    f"{realized_type}: {side} scale-out {filled_amount:.4f} @ ${fill_price:.5f} "
+                    f"Net ${net_pnl:+,.2f} | Rem {remaining_amount:.4f}"
+                )
+                logger.info(
+                    f"[PARTIAL_EXIT] {side} scale-out filled: {filled_amount:.4f}/{pos_amount:.4f} @ {fill_price:.5f} "
+                    f"| Net: {net_pnl:+.4f} ({profit_pct:+.2%}) | Remaining: {remaining_amount:.4f}"
+                )
+                return True
+
+            use_scale_out = False
+
+        self._record_closed_trade(realized_type, entry, fill_price, pnl, profit_pct * 100, fees)
+        self._log_trade(trade_id, "EXIT", order_side, fill_price, filled_amount, pnl, exit_fee, t_type=realized_type)
+        self.trade_count += 1
+        self._last_trade_ts = time.time()
+        self._recently_closed_ts = time.time()
+        self._last_closed_side = side
+        if profit_pct > 0:
+            self._last_profitable_exit_side = side
+            self._last_profitable_exit_ts = time.time()
+            self._opposite_reset_seen_after_profit = False
+        self._cleanup_trade_orders(self.symbol, pos)
+        self.last_status = f"{realized_type}: {side} @ ${fill_price:.5f} Net ${net_pnl:+,.2f}"
+        logger.info(f"[MARKET_EXIT] {side} {filled_amount:.4f} @ {fill_price:.5f} | Net: {net_pnl:+.4f} ({profit_pct:+.2%})")
+        return False
 
     def _cleanup_flat_protection_orders(self, symbol: str = None):
         """
@@ -1346,18 +1802,88 @@ class BinanceFuturesExecution:
                         self.last_status = f"{exit_type}: {side} @ ${fill_price:.5f} Net ${net_pnl:+,.2f}"
                         logger.info(f"[ORDER] Maker exit FILLED: {side} {amount:.4f} @ {fill_price:.5f} | Net: {net_pnl:+.4f} ({profit_pct:+.2%})")
                         return
-                elif age < float(getattr(self, "pending_exit_ttl_seconds", 20) or 20):
-                    self.last_status = f"Waiting maker exit fill @ ${float(pending_exit.get('price', current_price) or current_price):.5f}"
-                    return
                 else:
+                    ttl_seconds = float(pending_exit.get("ttl_seconds", getattr(self, "pending_exit_ttl_seconds", 20)) or 20)
+                    if age < ttl_seconds:
+                        self.last_status = f"Waiting maker exit fill @ ${float(pending_exit.get('price', current_price) or current_price):.5f}"
+                        return
                     if order_id:
                         try:
                             self.exchange.cancel_order(order_id, self.symbol)
                         except Exception:
                             pass
+                    fallback_market = _exchange_flag_true(
+                        pending_exit.get("fallback_market", getattr(self, "market_fallback_on_timeout", False))
+                    )
+                    if not fallback_market:
+                        self.pending_exit = None
+                        self.last_status = "Maker exit expired; reprice"
+                        return
+                    pos = self.active_positions[0] if self.active_positions else None
+                    refreshed_amount = None
+                    if pos:
+                        try:
+                            positions = self.exchange.fetch_positions()
+                            for p in positions:
+                                if p["symbol"] == self.symbol and float(p.get("contracts", 0)) != 0:
+                                    exch_amount = abs(float(p.get("contracts", 0)))
+                                    if exch_amount > 0:
+                                        refreshed_amount = exch_amount
+                                        pos = dict(pos)
+                                        pos["amount"] = exch_amount
+                                        pos["side"] = "LONG" if float(p.get("contracts", 0)) > 0 else "SHORT"
+                                        try:
+                                            pos["entry"] = float(p.get("entryPrice", pos.get("entry", current_price)) or pos.get("entry", current_price))
+                                        except Exception:
+                                            pass
+                                    break
+                        except Exception as refresh_err:
+                            logger.debug(f"Exit fallback position refresh skipped: {refresh_err}")
+                    if not pos:
+                        self.pending_exit = None
+                        self.last_status = "Maker exit expired; no open position"
+                        return
+                    filled = float(order.get("filled", 0.0) or 0.0)
+                    expected_amount = float(pending_exit.get("amount", 0.0) or 0.0)
+                    partial_amount = min(expected_amount, filled) if filled > 0 else 0.0
+                    if refreshed_amount is None and partial_amount > 0:
+                        pos = dict(pos)
+                        pos["amount"] = max(0.0, expected_amount - partial_amount)
+                    if partial_amount > 0:
+                        side = str(pos.get("side", "LONG"))
+                        entry = float(pos.get("entry", current_price) or current_price)
+                        fill_price = _order_fill_price(order, float(pending_exit.get("price", current_price) or current_price))
+                        pnl = (fill_price - entry) * partial_amount if side == "LONG" else (entry - fill_price) * partial_amount
+                        profit_pct = (fill_price - entry) / entry if side == "LONG" else (entry - fill_price) / entry
+                        fees = (partial_amount * entry * self.fee_rate) + (partial_amount * fill_price * self.fee_rate)
+                        exit_fee = partial_amount * fill_price * self.fee_rate
+                        net_pnl = pnl - fees
+                        exit_type = _realized_exit_type(str(pending_exit.get("exit_type", "TRAIL_WIN") or "TRAIL_WIN"), net_pnl)
+                        self._log_trade(
+                            pos.get("trade_id", 0),
+                            "PARTIAL_EXIT",
+                            pending_exit.get("side", "SELL"),
+                            fill_price,
+                            partial_amount,
+                            pnl,
+                            exit_fee,
+                            t_type=exit_type,
+                            reason="maker exit partial fill before market fallback",
+                        )
+                        self._last_trade_ts = time.time()
+                        self.last_status = (
+                            f"{exit_type}: {side} partial maker fill {partial_amount:.4f} @ ${fill_price:.5f} "
+                            f"Net ${net_pnl:+,.2f}; falling back"
+                        )
                     self.pending_exit = None
-                    self.last_status = "Maker exit expired; reprice"
-                    return
+                    return self._finalize_reduce_only_market_exit(
+                        pos,
+                        current_price,
+                        str(pending_exit.get("exit_type", "TRAIL_WIN") or "TRAIL_WIN"),
+                        int(pos.get("trade_id", 0) or 0),
+                        amount=None,
+                        use_scale_out=False,
+                    )
             except Exception as e:
                 logger.debug(f"Pending exit check skipped: {e}")
         
@@ -1373,14 +1899,23 @@ class BinanceFuturesExecution:
                     break
 
             if exch_pos is None:
-                # No position on exchange. Keep pending maker entries alive so they
-                # can fill within TTL; cleanup only real stale position/exit state.
+                # No position on exchange. Preserve live maker entries while they
+                # are still within TTL, but remove stale reduce-only protection
+                # orders left behind by a completed/externally closed position.
                 try:
                     open_orders = self.exchange.fetch_open_orders(self.symbol) or []
                     if open_orders:
-                        logger.info(f"[SYNC] Exchange flat with {len(open_orders)} open order(s); purging orphans for {self.symbol}.")
-                        self._cleanup_trade_orders(self.symbol, self.active_positions[0] if self.active_positions else None)
-                        self._wipe_all_orphans(self.symbol)
+                        if self.active_positions or getattr(self, "pending_exit", None):
+                            logger.info(f"[SYNC] Exchange flat with {len(open_orders)} open order(s); purging closed-position orders for {self.symbol}.")
+                            self._cleanup_trade_orders(self.symbol, self.active_positions[0] if self.active_positions else None)
+                            self._wipe_all_orphans(self.symbol)
+                        elif getattr(self, "pending_entry", None):
+                            logger.info(f"[SYNC] Exchange flat with pending entry; preserving entry and clearing stale protection for {self.symbol}.")
+                            self._cleanup_flat_protection_orders(self.symbol)
+                        else:
+                            logger.info(f"[SYNC] Exchange flat with {len(open_orders)} open orphan order(s); clearing stale orders for {self.symbol}.")
+                            self._cleanup_trade_orders(self.symbol)
+                            self._wipe_all_orphans(self.symbol)
                 except Exception as e:
                     logger.debug(f"[SYNC] Pre-clean flat orphan purge skipped: {e}")
 
@@ -1388,6 +1923,7 @@ class BinanceFuturesExecution:
                     logger.info(f"[SYNC] No position on exchange for {self.symbol}, clearing local state.")
                     if self.active_positions:
                         pos = self.active_positions[0]
+                        self._log_exchange_close_diagnostics(pos, current_price)
                         entry = float(pos.get("entry", current_price) or current_price)
                         amount = float(pos.get("amount", 0.0) or 0.0)
                         side = str(pos.get("side", "LONG") or "LONG").upper()
@@ -1517,6 +2053,11 @@ class BinanceFuturesExecution:
                         'min_profit_after_fees': getattr(self, 'min_profit_after_fees', 0.0005),
                         'break_even_trigger_pct': float(getattr(self, 'break_even_trigger_pct', 0.0010)),
                         'break_even_buffer_pct': float(getattr(self, 'break_even_buffer_pct', 0.0002)),
+                        'profit_trailing_enabled': bool(getattr(self, 'profit_trailing_enabled', True)),
+                        'profit_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', getattr(self, 'break_even_trigger_pct', 0.0010))),
+                        'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
+                        'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
+                        'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
                         'trail_tighten_1_pct': float(getattr(self, 'trail_tighten_1_pct', 0.0030)),
                         'trail_tighten_2_pct': float(getattr(self, 'trail_tighten_2_pct', 0.0060)),
                         'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),
@@ -1524,7 +2065,7 @@ class BinanceFuturesExecution:
                         'trail_armed': False,
                         'structure_support': pending_support,
                         'structure_resistance': pending_resistance,
-                        'native_trailing_activation_pct': float(getattr(self, 'break_even_trigger_pct', 0.0010)),
+                        'native_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', getattr(self, 'break_even_trigger_pct', 0.0010))),
                     }
                     logger.warning(f"[ADOPT] Found existing {exch_side} position. Adopting with safety SL at {initial_sl:.4f}")
                     self.active_positions.append(adopted_pos)
@@ -1582,6 +2123,7 @@ class BinanceFuturesExecution:
                 amount = pos['amount']
                 trade_id = pos.get("trade_id", 0)
 
+                self._reset_excess_protection_orders(pos)
                 self._ensure_exchange_stop_loss(pos)
                 self._ensure_exchange_take_profit(pos)
                 if getattr(self, 'use_native_trailing_stop', False):
@@ -1600,9 +2142,16 @@ class BinanceFuturesExecution:
                     hold_time = time.time() - float(pos.get('entry_ts', time.time()))
                     min_net_profit = (2.0 * fee_rate) + min_profit
                     tp_price = float(pos.get('tp_price', 0.0) or 0.0)
-                    if not bool(pos.get("trail_armed", False)) and profit_pct >= float(pos.get("break_even_trigger_pct", 0.0020) or 0.0020):
+                    trail_activation = float(pos.get("profit_trailing_activation_pct", pos.get("break_even_trigger_pct", 0.0020)) or 0.0020)
+                    if bool(pos.get("profit_trailing_enabled", True)):
+                        trail_activation = max(trail_activation, float(pos.get("break_even_trigger_pct", 0.0020) or 0.0020))
+                    if not bool(pos.get("trail_armed", False)) and profit_pct >= trail_activation:
                         pos["trail_armed"] = True
                         self._ensure_native_trailing_stop(pos)
+
+                    if not closed and _trailing_tp_hit(pos, profit_pct, min_net_profit):
+                        closed = True
+                        exit_type = "TRAIL_TP"
 
                     if not closed and bool(pos.get("fixed_take_profit_enabled", True)) and tp_price > 0 and current_price >= tp_price and profit_pct >= min_net_profit:
                         closed = True
@@ -1639,8 +2188,14 @@ class BinanceFuturesExecution:
                                 macd_diff_now < 0 or (psar_now is not None and float(psar_now) > current_price)
                             )
                             if runner_enabled and bool(pos.get("profit_runner_armed")) and profit_pct >= runner_lock and (runner_pullback_hit or runner_reversal_hit):
-                                closed = True
-                                exit_type = "SCALP_EXIT"
+                                if bool(pos.get("trailing_tp_enabled", True)):
+                                    pos["trail_armed"] = True
+                                    if not bool(pos.get("scalp_signal_trail_seen", False)):
+                                        pos["scalp_signal_trail_seen"] = True
+                                        logger.info("[PROFIT_RUNNER] LONG scalp signal tightened protection; trailing TP remains primary.")
+                                else:
+                                    closed = True
+                                    exit_type = "SCALP_EXIT"
                             elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
                                 exit_type = "SCALP_FADE"
@@ -1682,9 +2237,16 @@ class BinanceFuturesExecution:
                     hold_time = time.time() - float(pos.get('entry_ts', time.time()))
                     min_net_profit = (2.0 * fee_rate) + min_profit
                     tp_price = float(pos.get('tp_price', 0.0) or 0.0)
-                    if not bool(pos.get("trail_armed", False)) and profit_pct >= float(pos.get("break_even_trigger_pct", 0.0020) or 0.0020):
+                    trail_activation = float(pos.get("profit_trailing_activation_pct", pos.get("break_even_trigger_pct", 0.0020)) or 0.0020)
+                    if bool(pos.get("profit_trailing_enabled", True)):
+                        trail_activation = max(trail_activation, float(pos.get("break_even_trigger_pct", 0.0020) or 0.0020))
+                    if not bool(pos.get("trail_armed", False)) and profit_pct >= trail_activation:
                         pos["trail_armed"] = True
                         self._ensure_native_trailing_stop(pos)
+
+                    if not closed and _trailing_tp_hit(pos, profit_pct, min_net_profit):
+                        closed = True
+                        exit_type = "TRAIL_TP"
 
                     if not closed and bool(pos.get("fixed_take_profit_enabled", True)) and tp_price > 0 and current_price <= tp_price and profit_pct >= min_net_profit:
                         closed = True
@@ -1721,8 +2283,14 @@ class BinanceFuturesExecution:
                                 macd_diff_now > 0 or (psar_now is not None and float(psar_now) < current_price)
                             )
                             if runner_enabled and bool(pos.get("profit_runner_armed")) and profit_pct >= runner_lock and (runner_pullback_hit or runner_reversal_hit):
-                                closed = True
-                                exit_type = "SCALP_EXIT"
+                                if bool(pos.get("trailing_tp_enabled", True)):
+                                    pos["trail_armed"] = True
+                                    if not bool(pos.get("scalp_signal_trail_seen", False)):
+                                        pos["scalp_signal_trail_seen"] = True
+                                        logger.info("[PROFIT_RUNNER] SHORT scalp signal tightened protection; trailing TP remains primary.")
+                                else:
+                                    closed = True
+                                    exit_type = "SCALP_EXIT"
                             elif float(pos.get('highest_profit_pct', 0)) >= float(scalp_cfg.get('fade_trigger_pct', 0.005)) and profit_pct < float(scalp_cfg.get('fade_exit_pct', 0.002)) and hold_time >= 15 and profit_pct >= min_net_profit:
                                 closed = True
                                 exit_type = "SCALP_FADE"
@@ -1754,70 +2322,10 @@ class BinanceFuturesExecution:
                         exit_type = "STOP_LOSS"
                 
                 if closed:
-                    profit_pct = (current_price - entry) / entry if side == 'LONG' else (entry - current_price) / entry
                     logger.info(f"[FUTURES] Exit {side} @ {current_price:.2f}")
-
-                    order_side = 'SELL' if side == 'LONG' else 'BUY'
-                    self._cleanup_trade_orders(self.symbol, pos)
-
-                    stop_like_exit = exit_type in {"STOP_LOSS", "TRAIL_WIN", "TRAIL_SL", "TAKE_PROFIT", "SCALP_EXIT", "SCALP_FADE", "TTL_EXIT"}
-                    if getattr(self, 'use_limit_orders', False) and not stop_like_exit:
-                        try:
-                            exit_limit = _maker_entry_price(self.exchange, self.symbol, order_side, float(current_price))
-                            price_s = self.exchange.price_to_precision(self.symbol, exit_limit)
-                            order_resp = self.exchange.create_order(
-                                symbol=self.symbol,
-                                type='LIMIT',
-                                side=order_side,
-                                amount=amount,
-                                price=float(price_s),
-                                params={'reduceOnly': True, 'postOnly': True, 'timeInForce': 'GTX'}
-                            )
-                            self.pending_exit = {
-                                'order_id': str(order_resp.get('id') or (order_resp.get('info', {}) or {}).get('orderId') or ''),
-                                'ts': time.time(),
-                                'price': float(price_s),
-                                'amount': amount,
-                                'side': order_side,
-                                'exit_type': exit_type,
-                            }
-                            self.last_status = f"Maker exit placed @ {price_s}"
-                        except Exception as e:
-                            logger.warning(f"Maker exit placement failed: {e}")
-                            self.last_status = "Maker exit failed; still tracking position"
+                    keep_position = self._execute_futures_reduce_only_exit(pos, current_price, exit_type, trade_id)
+                    if keep_position:
                         remaining.append(pos)
-                        continue
-                    if stop_like_exit:
-                        logger.info("[EXIT] Using market reduce-only close for stop/trail protection.")
-                    try:
-                        order_resp = self.exchange.create_market_order(self.symbol, order_side, amount, params={'reduceOnly': True})
-                        current_price = _order_fill_price(order_resp, current_price)
-                        logger.info(f"[MARKET_EXIT] {order_side} filled at {current_price:.5f}")
-                    except Exception as e:
-                        logger.warning(f"Market exit failed; keeping position active: {e}")
-                        self.last_status = "Market exit failed; still tracking position"
-                        remaining.append(pos)
-                        continue
-
-                    pnl = (current_price - entry) * amount if side == 'LONG' else (entry - current_price) * amount
-                    profit_pct = (current_price - entry) / entry if side == 'LONG' else (entry - current_price) / entry
-                    fees = (amount * entry * self.fee_rate) + (amount * current_price * self.fee_rate)
-                    exit_fee = amount * current_price * self.fee_rate
-                    net_pnl = pnl - fees
-                    exit_type = _realized_exit_type(exit_type or "TRAIL_WIN", net_pnl)
-
-                    self._record_closed_trade(exit_type, entry, current_price, pnl, profit_pct * 100, fees)
-                    self._log_trade(trade_id, "EXIT", order_side, current_price, amount, pnl, exit_fee, t_type=exit_type)
-                    self.trade_count += 1
-                    self._last_trade_ts = time.time()
-                    self._recently_closed_ts = time.time()
-                    self._last_closed_side = side
-                    if profit_pct > 0:
-                        self._last_profitable_exit_side = side
-                        self._last_profitable_exit_ts = time.time()
-                        self._opposite_reset_seen_after_profit = False
-                    self._cleanup_trade_orders(self.symbol, pos)
-                    self.last_status = f"{exit_type}: {side} @ ${current_price:.5f} Net ${net_pnl:+,.2f}"
                 else:
                     remaining.append(pos)
             self.active_positions = remaining
@@ -1917,6 +2425,12 @@ class BinanceFuturesExecution:
                                 existing['fixed_take_profit_enabled'] = not runner_enabled
                                 existing['structure_support'] = pending_entry.get('structure_support')
                                 existing['structure_resistance'] = pending_entry.get('structure_resistance')
+                                existing['profit_trailing_enabled'] = bool(getattr(self, 'profit_trailing_enabled', True))
+                                existing['profit_trailing_activation_pct'] = float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct))
+                                existing['trailing_tp_enabled'] = bool(getattr(self, 'trailing_tp_enabled', True))
+                                existing['trailing_tp_giveback_pct'] = float(getattr(self, 'trailing_tp_giveback_pct', 0.12))
+                                existing['trailing_tp_min_peak_pct'] = float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020)))
+                                existing['native_trailing_activation_pct'] = float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct))
                                 existing['trail_armed'] = bool(existing.get('trail_armed', False))
                                 self._ensure_exchange_stop_loss(existing)
                                 self._ensure_exchange_take_profit(existing)
@@ -1941,6 +2455,11 @@ class BinanceFuturesExecution:
                             'min_profit_after_fees': float(getattr(self, 'min_profit_after_fees', 0.0001)),
                             'break_even_trigger_pct': float(self.break_even_trigger_pct),
                             'break_even_buffer_pct': float(self.break_even_buffer_pct),
+                            'profit_trailing_enabled': bool(getattr(self, 'profit_trailing_enabled', True)),
+                            'profit_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct)),
+                            'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
+                            'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
+                            'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
                             'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
                             'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
                             'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),
@@ -1951,7 +2470,7 @@ class BinanceFuturesExecution:
                             'fixed_take_profit_enabled': not runner_enabled,
                             'structure_support': pending_entry.get('structure_support'),
                             'structure_resistance': pending_entry.get('structure_resistance'),
-                            'native_trailing_activation_pct': float(getattr(self, 'break_even_trigger_pct', 0.0020)),
+                            'native_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', getattr(self, 'break_even_trigger_pct', 0.0020))),
                         }
                         self.active_positions.append(filled_pos)
                         self._ensure_exchange_stop_loss(filled_pos)
@@ -2066,6 +2585,8 @@ class BinanceFuturesExecution:
                         self._last_profitable_exit_side = current_pos['side']
                         self._last_profitable_exit_ts = now
                         self._opposite_reset_seen_after_profit = False
+                        self._cleanup_trade_orders(self.symbol, current_pos)
+                        self._post_close_cleanup_needed = True
                         self.last_status = f"REVERSAL_BANK: {current_pos['side']} @ ${current_price:.5f} Net ${net_pnl:+,.2f}"
                         # Stays flat as per dynamic bank logic
                         return
@@ -2091,6 +2612,9 @@ class BinanceFuturesExecution:
                         self._log_trade(current_pos.get("trade_id", 0), "EXIT", order_side, current_price, current_pos['amount'], pnl, exit_fee, t_type="REVERSAL")
                         self.active_positions = []
                         self._last_trade_ts = now
+                        self._last_closed_side = current_pos['side']
+                        self._cleanup_trade_orders(self.symbol, current_pos)
+                        self._post_close_cleanup_needed = True
 
             # DCA / Position Check
             is_dca = False
@@ -2194,12 +2718,18 @@ class BinanceFuturesExecution:
             )
             side = 'BUY' if action == "BUY" else 'SELL'
             
-            # PURGE OLD ORDERS: Before we place the new one, wipe any "orphaned" orders 
-            # left over from previous ticks or duplicate signals.
-            try:
-                self.exchange.cancel_all_orders(self.symbol)
-            except Exception as e:
-                logger.debug(f"Order Purge Note: {e}")
+            # PURGE OLD ORDERS: before a fresh position, remove stale pending
+            # entries and reduce-only SL/TP/TS orders from the previous position.
+            if not self.active_positions and not is_dca:
+                try:
+                    self._cleanup_trade_orders(self.symbol)
+                except Exception as e:
+                    logger.debug(f"Pre-entry stale order cleanup skipped: {e}")
+            else:
+                try:
+                    self._cancel_non_reduce_open_orders(self.symbol)
+                except Exception as e:
+                    logger.debug(f"Pre-entry non-reduce cleanup skipped: {e}")
 
             try:
                 use_limit = bool(getattr(self, 'use_limit_orders', False))
@@ -2320,6 +2850,11 @@ class BinanceFuturesExecution:
                 'min_profit_after_fees': float(getattr(self, 'min_profit_after_fees', 0.0001)),
                 'break_even_trigger_pct': float(self.break_even_trigger_pct),
                 'break_even_buffer_pct': float(self.break_even_buffer_pct),
+                'profit_trailing_enabled': bool(getattr(self, 'profit_trailing_enabled', True)),
+                'profit_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct)),
+                'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
+                'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
+                'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
                 'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
                 'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
                 'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),
@@ -2330,7 +2865,7 @@ class BinanceFuturesExecution:
                 'fixed_take_profit_enabled': not runner_enabled,
                 'structure_support': signal.get('structure_support'),
                 'structure_resistance': signal.get('structure_resistance'),
-                'native_trailing_activation_pct': float(getattr(self, 'break_even_trigger_pct', 0.0020)),
+                'native_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', getattr(self, 'break_even_trigger_pct', 0.0020))),
             }
             self.active_positions.append(filled_pos)
             self._ensure_exchange_stop_loss(filled_pos)
@@ -2357,12 +2892,13 @@ class BinanceFuturesExecution:
             logger.error(f"Placement Error: {e}")
             self.last_status = f"Placement error: {e}"
 
-    def close_all_positions(self, symbol: str):
+    def close_all_positions(self, symbol: str, reason: str = "close_all_positions"):
         """Liquidate everything on shutdown with Deep Trace and Global Wipe."""
         # Ensure we have the right symbol formats
         raw_symbol = symbol or self.symbol
         target_symbol = _normalize_futures_symbol(raw_symbol)
         target_id = _market_id_from_symbol(target_symbol).upper()
+        logger.warning(f"[LIQUIDATE] close_all_positions reason={reason} target={target_symbol}")
         
         print(f"\n[SHUTDOWN] Starting Deep Trace Cleanup...")
         print(f"  - Target Symbol: {target_symbol}")
@@ -2415,6 +2951,10 @@ class BinanceFuturesExecution:
                             if abs(amt) > 0.0:
                                 side = 'SELL' if amt > 0 else 'BUY'
                                 print(f"  - FOUND POSITION: {amt} units. LIQUIDATING NOW...")
+                                logger.warning(
+                                    f"[LIQUIDATE] Sending reduce-only MARKET {side} {abs(amt):.8f} {target_symbol} "
+                                    f"reason={reason}"
+                                )
                                 self.exchange.create_market_order(target_symbol, side, abs(amt), params={'reduceOnly': True})
                                 print(f"    + Liquidation order sent.")
                                 try:
@@ -2469,6 +3009,11 @@ class BinanceSpotExecution(BinanceFuturesExecution):
         self.reversal_min_net_edge_pct = 0.0
         self.break_even_trigger_pct = 0.0010
         self.break_even_buffer_pct = 0.0002
+        self.profit_trailing_enabled = True
+        self.profit_trailing_activation_pct = self.break_even_trigger_pct
+        self.trailing_tp_enabled = True
+        self.trailing_tp_giveback_pct = 0.12
+        self.trailing_tp_min_peak_pct = 0.0020
         self.trail_tighten_1_pct = 0.0025
         self.trail_tighten_2_pct = 0.0050
         self.trail_t1_gap_pct = 0.0025
@@ -2690,8 +3235,11 @@ class BinanceSpotExecution(BinanceFuturesExecution):
         pos["lowest_profit_pct"] = min(float(pos.get("lowest_profit_pct", 0.0) or 0.0), profit_pct)
 
         break_even_trigger = float(pos.get("break_even_trigger_pct", self.break_even_trigger_pct) or self.break_even_trigger_pct)
+        trail_activation = float(pos.get("profit_trailing_activation_pct", break_even_trigger) or break_even_trigger)
+        if bool(pos.get("profit_trailing_enabled", True)):
+            trail_activation = max(trail_activation, break_even_trigger)
         break_even_buffer = float(pos.get("break_even_buffer_pct", self.break_even_buffer_pct) or self.break_even_buffer_pct)
-        if not bool(pos.get("trail_armed", False)) and profit_pct >= break_even_trigger and profit_pct > 0:
+        if not bool(pos.get("trail_armed", False)) and profit_pct >= trail_activation and profit_pct > 0:
             pos["trail_armed"] = True
 
         if not bool(pos.get("trail_armed", False)):
@@ -2769,6 +3317,11 @@ class BinanceSpotExecution(BinanceFuturesExecution):
                         'min_profit_after_fees': float(self.min_profit_after_fees),
                         'break_even_trigger_pct': float(self.break_even_trigger_pct),
                         'break_even_buffer_pct': float(self.break_even_buffer_pct),
+                        'profit_trailing_enabled': bool(getattr(self, 'profit_trailing_enabled', True)),
+                        'profit_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct)),
+                        'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
+                        'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
+                        'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
                         'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
                         'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
                         'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),
@@ -2993,10 +3546,15 @@ class BinanceSpotExecution(BinanceFuturesExecution):
             'lowest_profit_pct': 0.0,
             'sl_pct_dist': abs(fill_price - sl_price) / fill_price if fill_price else self.default_sl_pct,
             'fee_rate': float(self.fee_rate),
-            'min_profit_after_fees': float(self.min_profit_after_fees),
-            'break_even_trigger_pct': float(self.break_even_trigger_pct),
-            'break_even_buffer_pct': float(self.break_even_buffer_pct),
-            'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
+                'min_profit_after_fees': float(self.min_profit_after_fees),
+                'break_even_trigger_pct': float(self.break_even_trigger_pct),
+                'break_even_buffer_pct': float(self.break_even_buffer_pct),
+                'profit_trailing_enabled': bool(getattr(self, 'profit_trailing_enabled', True)),
+                'profit_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct)),
+                'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
+                'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
+                'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
+                'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
             'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
             'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),
             'trail_t2_gap_pct': float(getattr(self, 'trail_t2_gap_pct', 0.0020)),
@@ -3054,6 +3612,11 @@ class PaperFuturesExecution:
         self.reversal_min_net_edge_pct = 0.0
         self.break_even_trigger_pct = 0.0010
         self.break_even_buffer_pct = 0.0003
+        self.profit_trailing_enabled = True
+        self.profit_trailing_activation_pct = self.break_even_trigger_pct
+        self.trailing_tp_enabled = True
+        self.trailing_tp_giveback_pct = 0.12
+        self.trailing_tp_min_peak_pct = 0.0020
         self.trail_tighten_1_pct = 0.0025
         self.trail_tighten_2_pct = 0.0050
         self.trail_t1_gap_pct = 0.0025
@@ -3090,16 +3653,19 @@ class PaperFuturesExecution:
     def get_open_orders(self, symbol: str = None) -> list:
         return []
 
-    def _record_closed_trade(self, t_type: str, entry: float, exit_price: float, pnl: float, pnl_pct: float, fees: float):
+    def _record_closed_trade(self, t_type: str, entry: float, exit_price: float, pnl: float, pnl_pct: float, fees: float, side: str = "", reason: str = ""):
         net_pnl = float(pnl) - float(fees)
-        self.closed_trades.append({
+        trade_record = {
             "type": t_type,
             "entry": float(entry),
             "exit": float(exit_price),
             "pnl": float(net_pnl),
             "pnl_pct": float(pnl_pct),
             "fees": float(fees),
-        })
+            "side": str(side).upper(),
+            "reason": str(reason),
+        }
+        self.closed_trades.append(trade_record)
         self.stats_trades += 1
         if net_pnl > 0:
             self.stats_wins += 1
@@ -3107,6 +3673,23 @@ class PaperFuturesExecution:
             self.stats_losses += 1
         self.stats_gross += float(pnl)
         self.stats_fees += float(fees)
+
+    def get_session_trades(self) -> list[dict]:
+        """Return completed trades with side/reason for session-based ML learning."""
+        entry_info = getattr(self, "_entry_info", {})
+        trades = []
+        for t in self.closed_trades:
+            trade_id = int(t.get("trade_id", 0) or 0)
+            info = entry_info.get(trade_id, {})
+            trades.append({
+                "side": t.get("side", "") or info.get("side", ""),
+                "reason": t.get("reason", "") or info.get("reason", ""),
+                "net_pnl": float(t.get("pnl", 0.0)),
+                "entry_price": float(t.get("entry", 0.0)),
+                "exit_price": float(t.get("exit", 0.0)),
+                "profitable": 1 if float(t.get("pnl", 0.0)) > 0 else 0,
+            })
+        return trades
 
     def _fetch_free_usdt(self):
         return float(self.cash_usdt)
@@ -3175,6 +3758,10 @@ class PaperFuturesExecution:
         reason: str = "",
         t_type: str = "",
     ):
+        if event.upper() == "ENTRY":
+            if not hasattr(self, "_entry_info"):
+                self._entry_info = {}
+            self._entry_info[int(trade_id)] = {"side": str(side).upper(), "reason": str(reason or "")}
         try:
             log_file = getattr(self, "trade_log_file", TRADE_LOG_FILE)
             with open(log_file, 'a', newline='') as f:
@@ -3245,6 +3832,13 @@ class PaperFuturesExecution:
                     min_profit = float(pos.get('min_profit_after_fees', getattr(self, 'min_profit_after_fees', 0.0002)))
                     hold_time = time.time() - float(pos.get('entry_ts', time.time()))
                     min_net_profit = (2.0 * fee_rate) + min_profit
+                    trail_activation = float(pos.get('profit_trailing_activation_pct', pos.get('break_even_trigger_pct', 0.0030)) or 0.0030)
+                    if bool(pos.get("profit_trailing_enabled", True)):
+                        trail_activation = max(trail_activation, float(pos.get('break_even_trigger_pct', 0.0030) or 0.0030))
+
+                    if not closed and _trailing_tp_hit(pos, profit_pct, min_net_profit):
+                        closed = True
+                        exit_type = "TRAIL_TP"
                     
                     # PRIMARY EXIT: Parabolic SAR flip (SAR moves ABOVE price = trend reversal)
                     if not closed and psar is not None and hold_time > 10:
@@ -3260,7 +3854,7 @@ class PaperFuturesExecution:
                                 pos['sl'] = tight_sl
 
                     # TRAILING STOP via PSAR: when in profit, trail SL to PSAR
-                    if not closed and psar is not None and psar < current_price and profit_pct > 0:
+                    if not closed and psar is not None and psar < current_price and profit_pct >= trail_activation:
                         # PSAR is below price (bullish) — use it as dynamic trailing stop
                         if psar > float(pos['sl']):
                             pos['sl'] = psar
@@ -3288,6 +3882,13 @@ class PaperFuturesExecution:
                     min_profit = float(pos.get('min_profit_after_fees', getattr(self, 'min_profit_after_fees', 0.0002)))
                     hold_time = time.time() - float(pos.get('entry_ts', time.time()))
                     min_net_profit = (2.0 * fee_rate) + min_profit
+                    trail_activation = float(pos.get('profit_trailing_activation_pct', pos.get('break_even_trigger_pct', 0.0030)) or 0.0030)
+                    if bool(pos.get("profit_trailing_enabled", True)):
+                        trail_activation = max(trail_activation, float(pos.get('break_even_trigger_pct', 0.0030) or 0.0030))
+
+                    if not closed and _trailing_tp_hit(pos, profit_pct, min_net_profit):
+                        closed = True
+                        exit_type = "TRAIL_TP"
 
                     # PRIMARY EXIT: Parabolic SAR flip (SAR moves BELOW price = trend reversal for short)
                     if not closed and psar is not None and hold_time > 10:
@@ -3302,7 +3903,7 @@ class PaperFuturesExecution:
                                 pos['sl'] = tight_sl
 
                     # TRAILING STOP via PSAR: when in profit, trail SL to PSAR
-                    if not closed and psar is not None and psar > current_price and profit_pct > 0:
+                    if not closed and psar is not None and psar > current_price and profit_pct >= trail_activation:
                         # PSAR is above price (bearish) — use it as dynamic trailing stop
                         if psar < float(pos['sl']):
                             pos['sl'] = psar
@@ -3489,6 +4090,11 @@ class PaperFuturesExecution:
                 'min_profit_after_fees': float(getattr(self, 'min_profit_after_fees', 0.0002)),
                 'break_even_trigger_pct': float(self.break_even_trigger_pct),
                 'break_even_buffer_pct': float(self.break_even_buffer_pct),
+                'profit_trailing_enabled': bool(getattr(self, 'profit_trailing_enabled', True)),
+                'profit_trailing_activation_pct': float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct)),
+                'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
+                'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
+                'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
                 'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
                 'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
                 'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),

@@ -1,11 +1,12 @@
 # =============================================================================
 # PAPER CLONE CONFIG
 # =============================================================================
-# Purpose: local paper trading with the same logic and settings as live.
+# Purpose: local paper trading with live-like settings for execution validation.
 # Differences from live:
 #   - execution.mode is paper
-#   - dashboard stays on localhost / alternate port
-#   - paused is false so paper mode can actually trade
+#   - timeframe stays on 1m
+#   - leverage stays higher for paper stress-testing
+#   - dashboard stays local
 # =============================================================================
 
 symbol: "AVAX/USDC:USDC"
@@ -20,10 +21,16 @@ execution:
   market: "usdm"
   paper_futures_mode: "exchange_demo"
   trade_log_file: "trade_log_demo_futures.csv"
-  leverage: 3
+  leverage: 10
   paused: false
+  close_positions_on_pause: false
+  panic_exit: false
+  spot_balance_pct: 0.35
+  spot_reserve_pct: 0.30
+  spot_max_layers: 3
+  dynamic_leverage: true
   paper_starting_balance_usdt: 1000
-  fee_rate: 0.0005
+  fee_rate: 0.0006
   fee_slippage_buffer_pct: 0.0002
   fee_edge_multiplier: 1.2
   min_seconds_between_trades: 60
@@ -31,17 +38,24 @@ execution:
   reversal_min_confidence: 0.45
   reversal_min_score: 0.25
   reversal_min_net_edge_pct: 0.0020
-  break_even_trigger_pct: 0.0010
+  break_even_trigger_pct: 0.0015
   break_even_buffer_pct: 0.0004
+  profit_trailing_enabled: true
+  profit_trailing_activation_pct: 0.0015
+  trailing_tp_enabled: true
+  trailing_tp_giveback_pct: 0.12
+  trailing_tp_min_peak_pct: 0.0020
   trail_tighten_1_pct: 0.0020
-  trail_tighten_2_pct: 0.0024
-  min_profit_after_fees: 0.0007
+  trail_tighten_2_pct: 0.0040
+  trail_t1_gap_pct: 0.0025
+  trail_t2_gap_pct: 0.0020
+  min_profit_after_fees: 0.0005
   exit_on_reversal_only_in_profit: true
   use_limit_orders: true
   use_native_trailing_stop: true
   use_exchange_stop_loss: true
   use_exchange_take_profit: true
-  market_fallback_on_timeout: false
+  market_fallback_on_timeout: true
   pending_entry_ttl_seconds: 10
   use_resting_support_orders: true
   resting_entry_ttl_seconds: 120
@@ -56,18 +70,19 @@ execution:
   scalp_runner_pullback_pct: 0.0012
   scalp_runner_min_lock_pct: 0.0025
   scalp_runner_exchange_tp_multiplier: 3.0
+  scalp_runner_partial_exit_pct: 0.45
   ttl_exit_seconds: 600
 
 leverage:
   enabled: true
   min_leverage: 1
-  max_leverage: 8
+  max_leverage: 20
   confidence_levels:
-    0.10: 1.0
-    0.20: 2.0
-    0.35: 4.0
-    0.50: 6.0
-    0.75: 8.0
+    0.02: 2.0
+    0.20: 5.0
+    0.35: 10.0
+    0.50: 15.0
+    0.75: 20.0
   use_score_multiplier: true
   score_weight: 0.2
   atr_volatility_scaling: true
@@ -100,13 +115,13 @@ logging:
 
 auto_learning:
   enabled: true
-  min_completed_trades: 50
-  refresh_closed_trades: 10
-  max_recent_trades: 300
-  shrinkage: 0.35
+  min_completed_trades: 5
+  refresh_closed_trades: 3
+  max_recent_trades: 200
+  shrinkage: 0.45
   ai_advisor:
     enabled: true
-    model: "gpt-4o-mini"
+    model: "deepseek-chat"
     max_weight_shift: 0.12
 
 strategy:
@@ -116,7 +131,7 @@ strategy:
   max_ret_30s: 0.0040
   max_ret_5s: 0.0018
   block_on_volume_spike: false
-  fixed_trade_usdt: 50
+  fixed_trade_usdt: 25
   tp_pct: 0.0035
   sl_pct: 0.0025
   max_structural_sl_pct: 0.0060
@@ -150,14 +165,26 @@ strategy:
   wick_sweep_reclaim_pct: 0.0002
   wick_sweep_wick_ratio: 1.6
   wall_reversal_assist: true
-  wall_reversal_score_gate: 0.10
+  wall_reversal_score_gate: 0.12
   wall_breakout_score_gate: 0.15
+  range_position_veto_enabled: true
+  range_veto_top_pct: 0.75
+  range_veto_bottom_pct: 0.25
+  range_veto_escape_score: 0.80
+  sr_wall_veto_enabled: false
   spread_atr_ratio_max: 0.15
   ob_midpoint_tolerance_pct: 0.0015
   anchored_vwap_near_pct: 0.0010
   loss_tilt_min_losses: 3
   loss_tilt_pause_losses: 5
   loss_tilt_pause_minutes: 15
+
+rejection_confirmation:
+  enabled: true
+  min_bars_away: 2
+  macd_threshold: 0.0
+  pullback_pct: 0.002
+  require_psar_flip: true
 
 spot:
   mode: "grid"
@@ -179,8 +206,8 @@ risk:
 
 intervals:
   indicator_refresh: 10
-  regime_refresh: 600
-  tick_delay_seconds: 1
+  regime_refresh: 300
+  tick_delay_seconds: 0.5
 
 ai:
   enabled: true

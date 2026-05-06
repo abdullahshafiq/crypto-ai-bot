@@ -16,6 +16,9 @@ data:
 execution:
   mode: "live"            # live trading
   market: "usdm"
+  paused: false
+  close_positions_on_pause: false
+  panic_exit: false
   leverage: 4
   spot_balance_pct: 0.35
   spot_reserve_pct: 0.30
@@ -32,6 +35,11 @@ execution:
   reversal_min_net_edge_pct: 0.0020
   break_even_trigger_pct: 0.0015
   break_even_buffer_pct: 0.0004
+  profit_trailing_enabled: true
+  profit_trailing_activation_pct: 0.0015 # arm trailing only after +0.15% profit
+  trailing_tp_enabled: true
+  trailing_tp_giveback_pct: 0.12      # close when profit gives back 12% from peak
+  trailing_tp_min_peak_pct: 0.0020    # needs at least +0.20% peak profit first
   trail_tighten_1_pct: 0.0020       # T1 trigger: start trailing at 0.20% profit
   trail_tighten_2_pct: 0.0040       # T2 trigger: tighten at 0.40% profit (was 0.24%)
   trail_t1_gap_pct: 0.0025          # T1 trails 0.25% behind best price
@@ -42,7 +50,7 @@ execution:
   use_native_trailing_stop: true
   use_exchange_stop_loss: true
   use_exchange_take_profit: true
-  market_fallback_on_timeout: false
+  market_fallback_on_timeout: true
   pending_entry_ttl_seconds: 10
   use_resting_support_orders: true
   resting_entry_ttl_seconds: 120
@@ -57,6 +65,7 @@ execution:
   scalp_runner_pullback_pct: 0.0012
   scalp_runner_min_lock_pct: 0.0025
   scalp_runner_exchange_tp_multiplier: 3.0
+  scalp_runner_partial_exit_pct: 0.45
   ttl_exit_seconds: 600             # 2 candles minimum (was 300 = 1 candle)
 
 # Dynamic Leverage (confidence-based)
@@ -103,16 +112,16 @@ logging:
   max_mb: 5
   backups: 3
 
-# Auto-learning from closed trades
+# Auto-learning from session trades (no historical data)
 auto_learning:
   enabled: true
-  min_completed_trades: 50     # need 50+ trades for statistical significance
-  refresh_closed_trades: 20
-  max_recent_trades: 300
-  shrinkage: 0.35
+  min_completed_trades: 5      # start learning after just 5 trades in this session
+  refresh_closed_trades: 3     # retrain every 3 new closed trades
+  max_recent_trades: 200       # (unused in session mode, kept for compat)
+  shrinkage: 0.45              # higher = more weight to session-learned weights
   ai_advisor:
     enabled: true
-    model: "gpt-4o-mini"
+    model: "deepseek-chat"
     max_weight_shift: 0.12
 
 # Quant Strategy Parameters
@@ -169,6 +178,14 @@ strategy:
   loss_tilt_min_losses: 3
   loss_tilt_pause_losses: 5
   loss_tilt_pause_minutes: 15
+
+# Rejection confirmation gate
+rejection_confirmation:
+  enabled: true
+  min_bars_away: 2
+  macd_threshold: 0.0
+  pullback_pct: 0.002
+  require_psar_flip: true
 
 # Spot settings
 spot:

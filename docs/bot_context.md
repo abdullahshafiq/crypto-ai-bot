@@ -117,6 +117,24 @@ Default config uses port `8765`.
 - AI prompts are intentionally split by task: regime, signal review, execution safety, and post-trade learning.
 - Keep these prompts short. The savings come from narrower contexts and fewer repeated instructions, not from the folder structure alone.
 
+## Latest Runtime Context
+
+- Use [`run_live.ps1`](../run_live.ps1) for the live bot and [`run_demo.ps1`](../run_demo.ps1) for the demo/paper bot.
+- Live and demo must run separately. Do not reuse the same process, port, or session for both.
+- `run_live.ps1` explicitly loads `config.yaml`.
+- `run_live.ps1` starts the live bot on dashboard port `8765` and isolates it with `BOT_INSTANCE_PORT=45678`.
+- `run_demo.ps1` starts the demo bot on dashboard port `8766` and isolates it with `BOT_INSTANCE_PORT=45679`.
+- `run_live.ps1` now launches `main.py` directly instead of accidentally opening the Python REPL.
+- `run_demo.ps1` uses `config.paper.test.yaml` and keeps paper trade logs separate from live logs.
+- `config.yaml` remains the fallback/default profile for direct `python main.py` runs.
+- `config.live.yaml` is kept only as a deprecated reference copy and is not used by the live launcher.
+- If the bot is being run on the server, prefer a dedicated `tmux` session for the live process so it can be reattached later.
+- Futures execution now treats exchange-side SL/TP/trailing orders as position-scoped protection. When a position is closed by the bot, by reversal banking, or detected flat on the exchange, stale reduce-only conditional orders are cancelled before the bot opens the next fresh position.
+- A pending maker entry is preserved while flat until its TTL expires; only stale protection orders are cleared during that state.
+- Runner exits can now scale out part of a futures position before handing the remainder back to the trailing-stop stack.
+- Futures trailing is profit-gated: the hard stop remains as emergency loss protection, and local/native trailing arms only after `profit_trailing_activation_pct`.
+- `TRAIL_TP` is the primary profit exit when enabled: it tracks peak profit and closes on `trailing_tp_giveback_pct` giveback; `SCALP_EXIT` only tightens protection in this mode.
+
 ## Files Worth Reading First
 
 1. [`main.py`](../main.py)

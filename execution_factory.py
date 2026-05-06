@@ -45,6 +45,7 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
         scalp_cfg["runner_pullback_pct"] = float(exec_cfg.get("scalp_runner_pullback_pct", scalp_cfg.get("runner_pullback_pct", 0.0012)))
         scalp_cfg["runner_min_lock_pct"] = float(exec_cfg.get("scalp_runner_min_lock_pct", scalp_cfg.get("runner_min_lock_pct", 0.0018)))
         scalp_cfg["runner_exchange_tp_multiplier"] = float(exec_cfg.get("scalp_runner_exchange_tp_multiplier", scalp_cfg.get("runner_exchange_tp_multiplier", 3.0)))
+        scalp_cfg["runner_partial_exit_pct"] = float(exec_cfg.get("scalp_runner_partial_exit_pct", scalp_cfg.get("runner_partial_exit_pct", 0.45)))
         executor.scalp_config = scalp_cfg
     executor.default_sl_pct = float(strategy_cfg.get("sl_pct", getattr(executor, "default_sl_pct", 0.0030)))
     executor.min_seconds_between_trades = max(60, int(exec_cfg.get("min_seconds_between_trades", 60)))
@@ -54,6 +55,15 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
     executor.reversal_min_net_edge_pct = float(exec_cfg.get("reversal_min_net_edge_pct", 0.0015))
     executor.break_even_trigger_pct = float(exec_cfg.get("break_even_trigger_pct", 0.0030))
     executor.break_even_buffer_pct = float(exec_cfg.get("break_even_buffer_pct", 0.0004))
+    executor.profit_trailing_enabled = bool(exec_cfg.get("profit_trailing_enabled", getattr(executor, "profit_trailing_enabled", True)))
+    executor.profit_trailing_activation_pct = float(
+        exec_cfg.get("profit_trailing_activation_pct", getattr(executor, "profit_trailing_activation_pct", executor.break_even_trigger_pct))
+    )
+    executor.trailing_tp_enabled = bool(exec_cfg.get("trailing_tp_enabled", getattr(executor, "trailing_tp_enabled", True)))
+    executor.trailing_tp_giveback_pct = float(exec_cfg.get("trailing_tp_giveback_pct", getattr(executor, "trailing_tp_giveback_pct", 0.12)))
+    executor.trailing_tp_min_peak_pct = float(
+        exec_cfg.get("trailing_tp_min_peak_pct", getattr(executor, "trailing_tp_min_peak_pct", executor.profit_trailing_activation_pct))
+    )
     executor.ttl_exit_only_if_unprofitable = bool(
         exec_cfg.get("ttl_exit_only_if_unprofitable", getattr(executor, "ttl_exit_only_if_unprofitable", True))
     )

@@ -719,22 +719,22 @@ def run_hybrid_bot():
     leverage = int(exec_cfg.get("leverage", 5))
     requested_exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "live"))).strip().lower()
 
-    strategy_config = {
-        'max_spread': cfg['strategy']['max_spread'],
-        'min_conf': cfg['strategy']['min_conf'],
-        'fixed_trade_usdt': cfg['strategy'].get('fixed_trade_usdt', 100),
-        'tp_pct': cfg['strategy']['tp_pct'],
-        'sl_pct': cfg['strategy']['sl_pct'],
-        'max_structural_sl_pct': cfg['strategy'].get('max_structural_sl_pct', 0.0030),
-        'min_reward_risk': cfg['strategy'].get('min_reward_risk', 0.90),
-        'max_ret_30s': cfg['strategy'].get('max_ret_30s', 0.0050),
-        'max_ret_5s': cfg['strategy'].get('max_ret_5s', 0.0025),
-        'block_on_volume_spike': cfg['strategy'].get('block_on_volume_spike', False),
-        'vol_filter_atr_pct': cfg['strategy'].get('vol_filter_atr_pct', 0.0005),
-        'vol_filter_atr_max_pct': cfg['strategy'].get('vol_filter_atr_max_pct', 0.08),
-        # Pass timeframe so indicators.py can compute correct candle lookback for range veto
-        'timeframe': cfg.get('timeframe', '1m'),
-    }
+    strategy_config = dict(cfg.get("strategy", {}) or {})
+    # Keep the full strategy block available to indicators.py so paper/live configs
+    # can tune gates such as range veto, midrange score, and session filters.
+    strategy_config.setdefault("timeframe", cfg.get("timeframe", "1m"))
+    strategy_config.setdefault("max_spread", 0.0005)
+    strategy_config.setdefault("min_conf", 0.15)
+    strategy_config.setdefault("fixed_trade_usdt", 100)
+    strategy_config.setdefault("tp_pct", 0.0035)
+    strategy_config.setdefault("sl_pct", 0.0025)
+    strategy_config.setdefault("max_structural_sl_pct", 0.0030)
+    strategy_config.setdefault("min_reward_risk", 0.90)
+    strategy_config.setdefault("max_ret_30s", 0.0050)
+    strategy_config.setdefault("max_ret_5s", 0.0025)
+    strategy_config.setdefault("block_on_volume_spike", False)
+    strategy_config.setdefault("vol_filter_atr_pct", 0.0005)
+    strategy_config.setdefault("vol_filter_atr_max_pct", 0.08)
     fixed_trade_usdt = float(strategy_config.get('fixed_trade_usdt', 0.0) or 0.0)
 
     indicator_refresh_interval = cfg['intervals']['indicator_refresh']
@@ -817,10 +817,9 @@ def run_hybrid_bot():
     executor.min_balance_floor = float(cfg['risk'].get('min_balance_floor', 90.0))
 
     auto_learning_enabled = bool(auto_learning_cfg.get("enabled", False))
-    auto_learning_min_trades = max(50, int(auto_learning_cfg.get("min_completed_trades", 50)))
-    auto_learning_refresh_trades = max(1, int(auto_learning_cfg.get("refresh_closed_trades", 10)))
-    auto_learning_max_recent = int(auto_learning_cfg.get("max_recent_trades", 300))
-    auto_learning_shrinkage = float(auto_learning_cfg.get("shrinkage", 0.35))
+    auto_learning_min_trades = max(3, int(auto_learning_cfg.get("min_completed_trades", 5)))
+    auto_learning_refresh_trades = max(1, int(auto_learning_cfg.get("refresh_closed_trades", 3)))
+    auto_learning_shrinkage = float(auto_learning_cfg.get("shrinkage", 0.45))
     auto_learning_ai_cfg = auto_learning_cfg.get("ai_advisor", {}) or {}
     auto_learning_ai_enabled = bool(auto_learning_ai_cfg.get("enabled", False))
     auto_learning_ai_model = str(auto_learning_ai_cfg.get("model", ai_model))
@@ -851,28 +850,13 @@ def run_hybrid_bot():
         logger.info(f"Dynamic Leverage ENABLED: {executor.leverage_min:.1f}x-{executor.leverage_max:.1f}x (confidence-based)")
 
     if auto_learning_enabled:
-        try:
-            from ml_optimizer import optimize_weights
-
-            learning_state = optimize_weights(
-                min_trades=auto_learning_min_trades,
-                max_recent_trades=auto_learning_max_recent,
-                shrinkage=auto_learning_shrinkage,
-                ai_enabled=auto_learning_ai_enabled,
-                ai_model=auto_learning_ai_model,
-                ai_max_weight_shift=auto_learning_ai_max_shift,
-                quiet=True,
-            )
-            if learning_state:
-                executor.learning_risk_multiplier = float(learning_state.get("risk_multiplier", 1.0) or 1.0)
-                logger.info(
-                    "Auto-learning initialized: %s trades, win_rate=%.1f%%, risk_multiplier=%.2f",
-                    learning_state.get("completed_trades", 0),
-                    float(learning_state.get("win_rate", 0.0)) * 100.0,
-                    float(getattr(executor, "learning_risk_multiplier", 1.0)),
-                )
-        except Exception as e:
-            logger.warning(f"Auto-learning startup skipped: {e}")
+        logger.info("Auto-learning: session-only mode — weights start from defaults, no historical CSV data.")
+        if os.path.exists(os.path.join(os.path.dirname(__file__) or ".", "weights.json")):
+            try:
+                os.remove(os.path.join(os.path.dirname(__file__) or ".", "weights.json"))
+                logger.info("Auto-learning: cleared stale weights.json for fresh session start.")
+            except Exception:
+                pass
 
     regime = "NEUTRAL"
     if ai_enabled:
@@ -1116,13 +1100,42 @@ def run_hybrid_bot():
                 # print(f"[DEBUG] Bot is currently PAUSED")
                 pass
             executor.paused = is_paused
-            if is_paused:
-                if getattr(executor, "active_positions", None) or getattr(executor, "pending_entry", None) or getattr(executor, "pending_exit", None):
-                    logger.info("Bot paused - immediately closing all positions and orders.")
-                    try:
+            if bool(cfg.get("execution", {}).get("panic_exit", False)):
+                logger.warning("Emergency exit requested from dashboard/config.")
+                try:
+                    if hasattr(executor, "emergency_close_all"):
+                        executor.emergency_close_all(symbol)
+                    else:
                         executor.close_all_positions(symbol)
+                except Exception as e:
+                    logger.error(f"Emergency exit failed: {e}")
+                finally:
+                    cfg.setdefault("execution", {})["panic_exit"] = False
+                continue
+
+            if is_paused:
+                if bool(cfg.get("execution", {}).get("close_positions_on_pause", False)):
+                    if getattr(executor, "active_positions", None) or getattr(executor, "pending_entry", None) or getattr(executor, "pending_exit", None):
+                        logger.warning("Bot paused with close_positions_on_pause=true - closing positions and orders.")
+                        try:
+                            executor.close_all_positions(symbol)
+                        except Exception as e:
+                            logger.error(f"Error closing positions on pause: {e}")
+                else:
+                    if getattr(executor, "pending_entry", None):
+                        try:
+                            order_id = str((getattr(executor, "pending_entry", {}) or {}).get("order_id") or "")
+                            if order_id:
+                                executor.exchange.cancel_order(order_id, symbol)
+                            executor.pending_entry = None
+                            logger.info("Bot paused - cancelled pending entry; active positions remain managed.")
+                        except Exception as e:
+                            logger.warning(f"Paused pending-entry cancel skipped: {e}")
+                    try:
+                        if hasattr(executor, "_cancel_non_reduce_open_orders"):
+                            executor._cancel_non_reduce_open_orders(symbol)
                     except Exception as e:
-                        logger.error(f"Error closing positions on pause: {e}")
+                        logger.debug(f"Paused non-reduce order cleanup skipped: {e}")
 
             # Update executor with current ATR for volatility-based leverage
             atr_pct = latest_indicators.get('atr_pct')
@@ -1142,21 +1155,23 @@ def run_hybrid_bot():
                     try:
                         from ml_optimizer import optimize_weights
 
+                        session_trades = getattr(executor, "get_session_trades", lambda: [])()
+
                         learning_state = optimize_weights(
                             min_trades=auto_learning_min_trades,
-                            max_recent_trades=auto_learning_max_recent,
                             shrinkage=auto_learning_shrinkage,
                             ai_enabled=auto_learning_ai_enabled,
                             ai_model=auto_learning_ai_model,
                             ai_max_weight_shift=auto_learning_ai_max_shift,
                             quiet=True,
+                            session_trades=session_trades,
                         )
                         last_learning_closed_trades = closed_trades
                         if learning_state:
                             executor.learning_risk_multiplier = float(learning_state.get("risk_multiplier", 1.0) or 1.0)
                             wr = float(learning_state.get("win_rate", 0.0)) * 100.0
                             risk_mult = float(getattr(executor, "learning_risk_multiplier", 1.0))
-                            status(f"Auto-learning updated weights (WR {wr:.1f}%, risk {risk_mult:.2f}x)")
+                            status(f"Session learning: WR {wr:.1f}%, risk {risk_mult:.2f}x, {learning_state.get('completed_trades',0)} trades")
                             logger.info(f"Auto-learning updated weights: {learning_state}")
                     except Exception as e:
                         last_learning_closed_trades = closed_trades
@@ -1170,7 +1185,12 @@ def run_hybrid_bot():
                 break
 
             runtime_strategy_config = dict(strategy_config)
-            runtime_strategy_config["min_conf"] = max(float(runtime_strategy_config.get("min_conf", 0.15) or 0.15), 0.15)
+            base_min_conf = float(runtime_strategy_config.get("min_conf", 0.15) or 0.15)
+            if requested_exec_mode == "paper":
+                paper_min_conf = float(exec_cfg.get("paper_min_conf", base_min_conf) or base_min_conf)
+                runtime_strategy_config["min_conf"] = max(base_min_conf, paper_min_conf, 0.15)
+            else:
+                runtime_strategy_config["min_conf"] = max(base_min_conf, 0.15)
             runtime_strategy_config["entry_min_confidence_hard"] = max(
                 float(runtime_strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
                 0.20,
@@ -1215,6 +1235,24 @@ def run_hybrid_bot():
                 signal["action"] = "HOLD"
                 signal["hold_reason"] = f"Consecutive loss tilt: {tilt_pause_minutes}m entry pause"
                 signal["reason"] = f"{signal.get('reason','')} LOSS_TILT_PAUSE"
+
+            # MAIN FIX 3: Scalp hold guard — prevent reversals immediately after entry.
+            # Without this, the bot enters a trade then gets a reversal signal on the very
+            # next tick (1s) and flips, paying double fees for zero move.
+            _scalp_min_hold = float(exec_cfg.get("scalp_min_hold_seconds", 30) or 30)
+            _active_pos = getattr(executor, "active_positions", [])
+            if _active_pos and signal.get("action") in {"BUY", "SELL"}:
+                _pos_entry_ts = float(_active_pos[0].get("entry_ts", 0.0) or 0.0)
+                _pos_age = time.time() - _pos_entry_ts
+                _pos_side = str(_active_pos[0].get("side", "")).upper()
+                _is_reversal_signal = (
+                    (_pos_side == "LONG" and signal["action"] == "SELL") or
+                    (_pos_side == "SHORT" and signal["action"] == "BUY")
+                )
+                if _is_reversal_signal and _pos_age < _scalp_min_hold:
+                    signal["action"] = "HOLD"
+                    signal["hold_reason"] = f"Scalp hold guard: {int(_scalp_min_hold - _pos_age)}s remaining before reversal allowed"
+                    signal["reason"] = f"{signal.get('reason','')} SCALP_HOLD_GUARD"
             
             # SIGNAL SMOOTHING: Simplified for faster scalp entry.
             raw_score = float(signal.get('score', 0.0) or 0.0)
@@ -1225,16 +1263,56 @@ def run_hybrid_bot():
             signal['score'] = raw_score # Use raw tick for speed
             signal['confidence'] = abs(max(-1.0, min(1.0, raw_score)))
             
-            # Only hold if the RAW confidence is truly under the floor
-            if signal['confidence'] < float(runtime_strategy_config.get('min_conf', 0.05)):
+            # MAIN FIX 4: Only apply confidence floor to active signals (not already-HOLD signals).
+            # Recalculating confidence for HOLDs was creating phantom "weak confidence" 
+            # hold_reasons that masked the real reason the signal was blocked.
+            min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.10))
+            if signal.get("action") in {"BUY", "SELL"} and signal['confidence'] < min_conf_floor:
                 signal['action'] = "HOLD"
-                signal['hold_reason'] = "Weak confidence (<5%)"
+                signal['hold_reason'] = f"Weak confidence ({signal['confidence']:.1%} < {min_conf_floor:.0%})"
 
             sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
             if sig_str != last_reported_signal:
                 status(sig_str)
                 logger.info(f"ANALYSIS: {sig_str}")
                 last_reported_signal = sig_str
+
+            if signal.get("action") == "HOLD":
+                gate_notes = []
+                hold_reason = str(signal.get("hold_reason", "") or "")
+                if hold_reason:
+                    gate_notes.append(hold_reason)
+                if bool(signal.get("sr_wall_locked", False)):
+                    gate_notes.append("SR_WALL_LOCK")
+                rejection = signal.get("rejection_confirmation")
+                if isinstance(rejection, dict):
+                    if not bool(rejection.get("confirmed", True)):
+                        rejection_reason = str(rejection.get("reason", "") or "")
+                        if len(rejection_reason) > 48:
+                            rejection_reason = rejection_reason[:45] + "..."
+                        gate_notes.append(f"REJECTION:{rejection_reason}")
+                    elif rejection.get("mode"):
+                        gate_notes.append(f"REJECTION_OK:{str(rejection.get('mode', ''))[:16]}")
+                if time.time() < loss_tilt_pause_until:
+                    gate_notes.append("LOSS_TILT_PAUSE")
+                if bool(ai_overlay_state.get("avoid_new_entries", False)):
+                    gate_notes.append("AI_NO_NEW_ENTRIES")
+                min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.05))
+                if float(signal.get("confidence", 0.0) or 0.0) < min_conf_floor:
+                    gate_notes.append(f"CONF<{min_conf_floor:.2f}")
+                if bool(is_paused):
+                    gate_notes.append("PAUSED")
+
+                if gate_notes:
+                    gate_text = " | ".join(gate_notes)
+                    if len(gate_text) > 160:
+                        gate_text = gate_text[:157] + "..."
+                    signal["gate_trace"] = gate_text
+                    gate_msg = f"Gate: {gate_text}"
+                    if gate_msg != last_reported_status:
+                        status(gate_msg)
+                        logger.info(f"ANALYSIS: {gate_msg}")
+                        last_reported_status = gate_msg
 
             if bool(ai_overlay_cfg.get("enabled", False)):
                 overlay_bias = str(ai_overlay_state.get("bias", "NEUTRAL") or "NEUTRAL").upper()
