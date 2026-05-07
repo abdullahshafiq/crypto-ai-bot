@@ -713,9 +713,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # Timeframe-aware: uses candles_per_day from config so the lookback is correct
     # on 1m (1440), 3m (480), 5m (288), etc. Falls back to 480 (3m equivalent).
     if action in {"BUY", "SELL"} and bool(strategy_config.get("range_position_veto_enabled", True)):
-        _tf_str = str(strategy_config.get("timeframe", "3m") or "3m").strip().lower()
+        _tf_str = str(strategy_config.get("timeframe", "15m") or "15m").strip().lower()
         _tf_map = {"1m": 1440, "3m": 480, "5m": 288, "10m": 144, "15m": 96, "1h": 24, "4h": 6}
-        _cpd = int(strategy_config.get("candles_per_day", _tf_map.get(_tf_str, 480)))
+        _cpd = int(strategy_config.get("candles_per_day", _tf_map.get(_tf_str, 96)))
         _lookback = max(50, min(_cpd, len(df_indicators)))
 
         _recent = df_indicators.iloc[-_lookback:]
@@ -734,11 +734,10 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             _is_strong = (
                 abs(total_score) >= _veto_escape_score
                 and _mtf_unanimous
-                and abs(sr_score) < 1.0
             )
 
             if action == "BUY" and _pos >= _veto_top:
-                if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -0.5:
+                if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -1.3:
                     # Unanimous bull MTF + very strong score + clear resistance = real breakout.
                     pass
                 else:
@@ -746,7 +745,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     hold_reason = (
                         f"Range Veto: BUY in top {int(_veto_top*100)}% of {_lookback}c range "
                         f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f}). "
-                        f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-0.5 for breakout."
+                        f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-1.3 for breakout."
                     )
 
             elif action == "SELL" and _pos <= _veto_bottom:

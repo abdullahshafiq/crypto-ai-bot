@@ -125,6 +125,8 @@ auto_learning:
 
 # Quant Strategy Parameters
 strategy:
+  timeframe: "15m"              # mirror top-level; used by range veto lookback
+  candles_per_day: 96           # 15m × 96 = 24h lookback for range position
   max_spread: 0.0005            # tight spread — scalping is spread-sensitive
   min_conf: 0.55                # raise bar — only high-conviction setups
   signal_smoothing_ticks: 2     # less smoothing — react fast to 15m signals
@@ -187,7 +189,7 @@ rejection_confirmation:
   min_bars_away: 1               # 1 bar confirmation on 15m = 15min
   macd_threshold: 0.0
   pullback_pct: 0.003            # require 0.3% pullback before entry
-  require_psar_flip: true
+  require_psar_flip: false       # don't wait for PSAR flip; PSAR trend is enough
 
 # Spot settings
 spot:
