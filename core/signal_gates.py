@@ -77,6 +77,17 @@ def apply_confidence_floor(signal: dict, min_conf_floor: float) -> dict:
     return signal
 
 
+def apply_reward_risk_gate(signal: dict, min_rr: float) -> dict:
+    if signal.get("action") not in {"BUY", "SELL"}:
+        return signal
+    rr = float(signal.get("reward_risk", 0.0) or 0.0)
+    if rr <= 0.0 or rr < min_rr:
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = f"R/R too low ({rr:.2f} < {min_rr:.2f})"
+        signal["reason"] = f"{signal.get('reason', '')} RR_GATE"
+    return signal
+
+
 def format_gate_trace(signal: dict, ai_overlay_state: dict, is_paused: bool, runtime_strategy_config: dict, loss_tilt_pause_until: float) -> str:
     gate_notes = []
     hold_reason = str(signal.get("hold_reason", "") or "")
@@ -100,6 +111,10 @@ def format_gate_trace(signal: dict, ai_overlay_state: dict, is_paused: bool, run
     min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.05))
     if float(signal.get("confidence", 0.0) or 0.0) < min_conf_floor:
         gate_notes.append(f"CONF<{min_conf_floor:.2f}")
+    min_rr = float(runtime_strategy_config.get("min_reward_risk", 0.0) or 0.0)
+    rr = float(signal.get("reward_risk", 0.0) or 0.0)
+    if min_rr > 0.0 and 0.0 < rr < min_rr:
+        gate_notes.append(f"RR<{min_rr:.2f}")
     if bool(is_paused):
         gate_notes.append("PAUSED")
 

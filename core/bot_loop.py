@@ -36,6 +36,7 @@ from core.signal_gates import (
     apply_loss_tilt_pause,
     apply_scalp_hold_guard,
     apply_confidence_floor,
+    apply_reward_risk_gate,
     format_gate_trace,
 )
 from core.ai_gates import (
@@ -629,6 +630,10 @@ def run_hybrid_bot():
 
             min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.10))
             signal = apply_confidence_floor(signal, min_conf_floor)
+
+            min_rr = float(runtime_strategy_config.get("min_reward_risk", 0.0) or 0.0)
+            if min_rr > 0.0:
+                signal = apply_reward_risk_gate(signal, min_rr)
 
             sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
             if sig_str != last_reported_signal:

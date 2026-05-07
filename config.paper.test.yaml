@@ -217,7 +217,7 @@ intervals:
 ai:
   enabled: true
   model: "gpt-4o-mini"
-  overlay_enabled: true
+  overlay_enabled: false
   overlay_refresh_seconds: 60
   trade_gate_enabled: false
   trade_gate_min_interval: 30
