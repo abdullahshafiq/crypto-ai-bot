@@ -50,6 +50,7 @@ def apply_common_executor_settings(executor, cfg: dict, fixed_trade_usdt: float,
         scalp_cfg["runner_partial_exit_pct"] = float(exec_cfg.get("scalp_runner_partial_exit_pct", scalp_cfg.get("runner_partial_exit_pct", 0.45)))
         executor.scalp_config = scalp_cfg
     executor.default_sl_pct = float(strategy_cfg.get("sl_pct", getattr(executor, "default_sl_pct", 0.0030)))
+    executor.max_structural_sl_pct = float(strategy_cfg.get("max_structural_sl_pct", getattr(executor, "max_structural_sl_pct", 0.0120)))
     executor.min_seconds_between_trades = max(60, int(exec_cfg.get("min_seconds_between_trades", 60)))
     executor.min_seconds_before_reversal = max(60, int(exec_cfg.get("min_seconds_before_reversal", 60)))
     executor.reversal_min_confidence = max(0.45, float(exec_cfg.get("reversal_min_confidence", 0.45)))

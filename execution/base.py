@@ -181,7 +181,49 @@ def _default_sl_price(side: str, entry: float, sl_pct: float) -> float:
     return entry * (1 - sl_pct) if side in {"LONG", "BUY"} else entry * (1 + sl_pct)
 
 
-def _pivot_guarded_sl_price(side: str, entry: float, sl: float, pivot_classic=None) -> float:
+def _smart_sl_price(
+    side: str,
+    entry: float,
+    support: float = 0.0,
+    resistance: float = 0.0,
+    atr: float = 0.0,
+    atr_multiplier: float = 1.5,
+) -> float:
+    """
+    Calculate smart SL using market structure + ATR buffer.
+    LONG: SL = support - (atr_multiplier × ATR)  — below the nearest support
+    SHORT: SL = resistance + (atr_multiplier × ATR) — above the nearest resistance
+    Falls back to default 0.30% if required level unavailable.
+    """
+    side = str(side or "").upper()
+    entry = float(entry)
+    support = float(support or 0.0)
+    resistance = float(resistance or 0.0)
+    atr = float(atr or 0.0)
+    atr_multiplier = float(atr_multiplier or 1.5)
+
+    if side in {"LONG", "BUY"}:
+        # Use support below entry as anchor
+        level = support if (support > 0 and support < entry) else 0.0
+        if level > 0 and atr > 0:
+            sl = level - (atr_multiplier * atr)
+            # SL must be strictly below entry, no other constraint — let _safe_initial_sl_price handle caps
+            if sl < entry:
+                return sl
+    else:  # SHORT
+        # Use resistance above entry as anchor
+        level = resistance if (resistance > 0 and resistance > entry) else 0.0
+        if level > 0 and atr > 0:
+            sl = level + (atr_multiplier * atr)
+            # SL must be strictly above entry
+            if sl > entry:
+                return sl
+
+    # Fallback to default 0.30% if structure unavailable
+    return _default_sl_price(side, entry, 0.0030)
+
+
+def _pivot_guarded_sl_price(side: str, entry: float, sl: float, pivot_classic=None, max_sl_pct: float = 0.0) -> float:
     side_u = str(side or "").upper()
     if side_u not in {"SHORT", "SELL"} or not isinstance(pivot_classic, dict):
         return sl
@@ -190,15 +232,18 @@ def _pivot_guarded_sl_price(side: str, entry: float, sl: float, pivot_classic=No
     except (TypeError, ValueError):
         r1 = 0.0
     if entry > 0 and r1 > entry and sl < r1 * 1.001:
-        return r1 * 1.002
+        candidate = r1 * 1.002
+        if max_sl_pct > 0 and entry > 0 and (candidate - entry) / entry > max_sl_pct:
+            return entry * (1 + max_sl_pct)
+        return candidate
     return sl
 
 
-def _safe_initial_sl_price(side: str, entry: float, proposed_sl, sl_pct: float, pivot_classic=None) -> float:
+def _safe_initial_sl_price(side: str, entry: float, proposed_sl, sl_pct: float, pivot_classic=None, max_sl_pct: float = 0.0) -> float:
     side_u = str(side or "").upper()
     entry = float(entry)
     default_sl = _default_sl_price(side_u, entry, sl_pct)
-    default_sl = _pivot_guarded_sl_price(side_u, entry, default_sl, pivot_classic)
+    default_sl = _pivot_guarded_sl_price(side_u, entry, default_sl, pivot_classic, max_sl_pct)
     min_dist_pct = abs(float(sl_pct or 0.0030))
     try:
         sl = float(proposed_sl)
@@ -213,13 +258,17 @@ def _safe_initial_sl_price(side: str, entry: float, proposed_sl, sl_pct: float, 
             return default_sl
         if ((entry - sl) / entry) < min_dist_pct:
             return default_sl
+        if max_sl_pct > 0 and (entry - sl) / entry > max_sl_pct:
+            return entry * (1 - max_sl_pct)
     else:
         if sl <= entry:
             return default_sl
         if ((sl - entry) / entry) < min_dist_pct:
             return default_sl
+        if max_sl_pct > 0 and (sl - entry) / entry > max_sl_pct:
+            return entry * (1 + max_sl_pct)
 
-    return _pivot_guarded_sl_price(side_u, entry, sl, pivot_classic)
+    return _pivot_guarded_sl_price(side_u, entry, sl, pivot_classic, max_sl_pct)
 
 
 def _safe_tp_price(side: str, entry: float, proposed_tp=None, tp_pct: float = 0.0025) -> float:

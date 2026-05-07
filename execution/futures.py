@@ -26,6 +26,7 @@ from .base import (
     _safe_tp_price,
     _trailing_tp_hit,
     _default_sl_price,
+    _smart_sl_price,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,16 @@ class BinanceFuturesExecution:
         except Exception as e:
             logger.warning(f"Leverage setup note: {e}")
             self.last_status = f"Leverage setup failed: {e}"
+
+        # Set isolated margin mode (per-position safety, not cross-wallet risk)
+        try:
+            self.exchange.fapiPrivatePostMarginType({
+                'symbol': self.symbol_id,
+                'marginType': 'ISOLATED'
+            })
+            logger.info(f"Binance Futures: Margin mode set to ISOLATED (per-position safety)")
+        except Exception as e:
+            logger.warning(f"Isolated margin setup note: {e}")
 
         self._init_trade_log()
         logger.info("Binance Futures connection initialized.")
@@ -1867,6 +1878,7 @@ class BinanceFuturesExecution:
                         pending_sl,
                         getattr(self, 'default_sl_pct', 0.0030),
                         pending_pivot_classic,
+                        max_sl_pct=getattr(self, 'max_structural_sl_pct', 0.0120),
                     )
                     tp_price = _safe_tp_price(
                         exch_side,
@@ -2246,13 +2258,20 @@ class BinanceFuturesExecution:
                         trade_id = int(pending_entry.get("trade_id", 0) or 0)
                         amount = float(pending_entry.get("amount", 0.0) or 0.0)
                         pos_side = 'LONG' if action == "BUY" else 'SHORT'
-                        default_sl = _default_sl_price(pos_side, fill_price, getattr(self, 'default_sl_pct', 0.0030))
+                        # Try smart SL first (structure + ATR buffer), fallback to default
+                        support = float(pending_entry.get("structure_support", 0.0) or 0.0)
+                        resistance = float(pending_entry.get("structure_resistance", 0.0) or 0.0)
+                        atr = float(pending_entry.get("atr", getattr(self, "_current_atr_pct", 0.0) * fill_price) or 0.0)
+                        smart_sl = _smart_sl_price(pos_side, fill_price, support, resistance, atr, atr_multiplier=1.5)
+                        default_sl = smart_sl
+                        logger.info(f"[SMART_SL] {pos_side} entry {fill_price:.2f}: support={support:.2f} resistance={resistance:.2f} ATR={atr:.4f} → SL {smart_sl:.2f}")
                         sl_price = _safe_initial_sl_price(
                             pos_side,
                             fill_price,
                             pending_entry.get("sl", default_sl),
                             getattr(self, 'default_sl_pct', 0.0030),
                             pending_entry.get("pivot_classic"),
+                            max_sl_pct=getattr(self, 'max_structural_sl_pct', 0.0120),
                         )
                         try:
                             tp_price = float(pending_entry.get("tp")) if pending_entry.get("tp") else None
@@ -2609,6 +2628,15 @@ class BinanceFuturesExecution:
                         price=float(price_str),
                         params={'timeInForce': 'GTX', 'postOnly': True}
                     )
+                    # Smart SL calculation
+                    pos_side = 'LONG' if action == "BUY" else "SHORT"
+                    entry_price = float(price_str)
+                    support = float(signal.get("structure_support", 0.0) or 0.0)
+                    resistance = float(signal.get("structure_resistance", 0.0) or 0.0)
+                    atr = float(signal.get("atr", getattr(self, "_current_atr_pct", 0.0) * entry_price) or 0.0)
+                    proposed_sl = _smart_sl_price(pos_side, entry_price, support, resistance, atr, atr_multiplier=1.5)
+                    logger.info(f"[SMART_SL] {pos_side} entry {entry_price:.2f}: support={support:.2f} resistance={resistance:.2f} ATR={atr:.4f} → SL {proposed_sl:.2f}")
+
                     self.pending_entry = {
                         'order_id': str(order_resp.get('id') or (order_resp.get('info', {}) or {}).get('orderId') or ''),
                         'action': action,
@@ -2619,11 +2647,12 @@ class BinanceFuturesExecution:
                         'effective_leverage': float(effective_leverage),
                         'ts': now,
                         'sl': _safe_initial_sl_price(
-                            'LONG' if action == "BUY" else "SHORT",
-                            float(price_str),
-                            signal.get('sl'),
+                            pos_side,
+                            entry_price,
+                            proposed_sl,
                             getattr(self, 'default_sl_pct', 0.0030),
                             signal.get('pivot_classic'),
+                            max_sl_pct=getattr(self, 'max_structural_sl_pct', 0.0120),
                         ),
                         'tp': signal.get('tp'),
                         'hold_until_ts': float(signal.get("hold_until_ts", 0.0) or 0.0),
@@ -2635,6 +2664,7 @@ class BinanceFuturesExecution:
                         'pivot_classic': signal.get('pivot_classic'),
                         'ttl_seconds': float(signal.get("pending_entry_ttl_seconds", getattr(self, "pending_entry_ttl_seconds", 20)) or getattr(self, "pending_entry_ttl_seconds", 20)),
                         'resting_entry': bool(resting_price > 0),
+                        'atr': atr,
                     }
                     self.last_status = f"{'Resting' if resting_price > 0 else 'Maker'} entry placed @ {price_str}"
                     return
@@ -2671,12 +2701,20 @@ class BinanceFuturesExecution:
 
             # The bot uses local runner logic, backed by exchange-side safety orders.
             pos_side = 'LONG' if action == "BUY" else "SHORT"
+            # Smart SL calculation
+            support = float(signal.get("structure_support", 0.0) or 0.0)
+            resistance = float(signal.get("structure_resistance", 0.0) or 0.0)
+            atr = float(signal.get("atr", getattr(self, "_current_atr_pct", 0.0) * real_entry_price) or 0.0)
+            proposed_sl = _smart_sl_price(pos_side, real_entry_price, support, resistance, atr, atr_multiplier=1.5)
+            logger.info(f"[SMART_SL] {pos_side} entry {real_entry_price:.2f}: support={support:.2f} resistance={resistance:.2f} ATR={atr:.4f} → SL {proposed_sl:.2f}")
+
             sl_price = _safe_initial_sl_price(
                 pos_side,
                 real_entry_price,
-                signal.get('sl'),
+                proposed_sl,
                 getattr(self, 'default_sl_pct', 0.0030),
                 signal.get('pivot_classic'),
+                max_sl_pct=getattr(self, 'max_structural_sl_pct', 0.0120),
             )
             logger.info(f"Using internal dynamic stop logic. Initial soft SL set at {sl_price:.4f}")
             try:

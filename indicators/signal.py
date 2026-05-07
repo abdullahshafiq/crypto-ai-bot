@@ -1209,6 +1209,11 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
         signal["structure_support"] = float(support)
     if resistance is not None:
         signal["structure_resistance"] = float(resistance)
+    # Expose ATR in absolute terms so execution layer can use it for smart SL
+    atr_pct = float(latest_indicators.get("atr_pct", 0.0) or 0.0) / 100.0
+    latest_price = float(df_indicators["close"].iloc[-1]) if len(df_indicators) > 0 else 0.0
+    if atr_pct > 0 and latest_price > 0:
+        signal["atr"] = atr_pct * latest_price
     if isinstance(pivot_data, dict):
         signal["pivot_classic"] = dict(pivot_data.get("classic", {}) or {})
     signal["wall_state"] = wall_state
@@ -1598,6 +1603,102 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     "action": "SELL",
                     "reason": "Wall rejection not yet confirmed",
                 }
+
+    # --- RANGE REVERSAL SIGNAL GENERATION ---
+    # When the signal lands on HOLD with price at a range extreme, actively generate
+    # the counter-trade instead of sitting idle. This is the fix for the paradox:
+    # "range veto blocks the SHORT but nothing generates the LONG."
+    # Placed last so it overrides every upstream HOLD, including range veto itself.
+    if (
+        signal.get("action") == "HOLD"
+        and not signal.get("sr_wall_locked", False)
+        and bool(strategy_config.get("range_position_veto_enabled", True))
+    ):
+        _tf_str_rv = str(strategy_config.get("timeframe", "15m") or "15m").strip().lower()
+        _tf_map_rv = {"1m": 1440, "3m": 480, "5m": 288, "10m": 144, "15m": 96, "1h": 24, "4h": 6}
+        _cpd_rv = int(strategy_config.get("candles_per_day", _tf_map_rv.get(_tf_str_rv, 96)))
+        _lookback_rv = max(50, min(_cpd_rv, len(df_indicators)))
+        _recent_rv = df_indicators.iloc[-_lookback_rv:]
+        _rng_hi_rv = float(_recent_rv["high"].max())
+        _rng_lo_rv = float(_recent_rv["low"].min())
+        _rng_w_rv = _rng_hi_rv - _rng_lo_rv
+
+        if _rng_w_rv > 0:
+            _pos_rv = (current_price - _rng_lo_rv) / _rng_w_rv
+            _veto_bot_rv = float(strategy_config.get("range_veto_bottom_pct", 0.25) or 0.25)
+            _veto_top_rv = float(strategy_config.get("range_veto_top_pct",    0.75) or 0.75)
+            _rev_min_d   = float(strategy_config.get("range_reversal_min_depth", 0.20) or 0.20)
+            _rev_max_b   = float(strategy_config.get("range_reversal_max_boost", 0.45) or 0.45)
+
+            # Compute PSAR direction here (psar_bull may be undefined if action was HOLD at gate)
+            _psar_raw_rv = df_indicators["psar"].iloc[-1] if "psar" in df_indicators.columns and len(df_indicators) else None
+            try:
+                _psar_bull_rv = float(_psar_raw_rv) < current_price if _psar_raw_rv is not None else True
+            except (TypeError, ValueError):
+                _psar_bull_rv = True
+
+            _rsi_rv = float(latest_indicators.get("rsi", 50) or 50)
+            _rsi_os_rv = float(strategy_config.get("rsi_os_entry_gate", 28) or 28)
+            _rsi_ob_rv = float(strategy_config.get("rsi_ob_entry_gate", 72) or 72)
+            _prev_md_rv = float(df_indicators["macd_diff"].iloc[-2]) if (
+                "macd_diff" in df_indicators.columns and len(df_indicators) > 2
+            ) else macd_diff_val
+
+            # ── RANGE FLOOR BOUNCE: generate LONG when stuck at range bottom ───
+            if _pos_rv <= _veto_bot_rv and mtf_fast_bias != "SHORT_ONLY":
+                _depth_rv = max(0.0, 1.0 - (_pos_rv / max(_veto_bot_rv, 1e-9)))
+                if _depth_rv >= _rev_min_d:
+                    # Need at least 4-of-5 stabilisation signals — high conviction
+                    # only, avoid whipsaws from loose threshold. Price must show
+                    # strong reversal intent (green candle, RSI recovery, PSAR flip, etc.)
+                    _s1 = current_price >= float(df_indicators["open"].iloc[-1])          # green candle
+                    _s2 = _rsi_rv <= (_rsi_os_rv + 10)                                    # RSI in oversold band
+                    _s3 = _psar_bull_rv                                                    # PSAR turning bull
+                    _s4 = macd_diff_val > _prev_md_rv                                     # MACD hist ticking up
+                    _s5 = len(df_indicators) > 2 and current_price >= float(df_indicators["low"].iloc[-2])  # no new low
+                    _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
+
+                    if _stab_rv >= 4:
+                        _rev_sc = float(np.clip(max(_depth_rv * _rev_max_b, 0.20), 0.20, _rev_max_b))
+                        signal["action"]      = "BUY"
+                        signal["score"]       = _rev_sc
+                        signal["confidence"]  = min(_rev_sc, 1.0)
+                        signal["hold_reason"] = ""
+                        signal["reason"] = (
+                            f"{signal.get('reason', '')} "
+                            f"[RangeFloor pos={_pos_rv:.0%} depth={_depth_rv:.2f} stab={_stab_rv}/5 sc={_rev_sc:.2f}]"
+                        ).strip()
+                        logger.debug(
+                            f"[RANGE_REV] Floor bounce: pos={_pos_rv:.1%} depth={_depth_rv:.2f} "
+                            f"stab={_stab_rv}/5 → BUY score={_rev_sc:.3f}"
+                        )
+
+            # ── RANGE CEILING REJECTION: generate SHORT when stuck at range top ─
+            elif _pos_rv >= _veto_top_rv and mtf_fast_bias != "LONG_ONLY":
+                _depth_rv = max(0.0, (_pos_rv - _veto_top_rv) / max(1.0 - _veto_top_rv, 1e-9))
+                if _depth_rv >= _rev_min_d:
+                    # Need at least 4-of-5 stabilisation signals — high conviction only
+                    _s1 = current_price <= float(df_indicators["open"].iloc[-1])           # red candle
+                    _s2 = _rsi_rv >= (_rsi_ob_rv - 10)                                     # RSI in overbought band
+                    _s3 = not _psar_bull_rv                                                 # PSAR turning bear
+                    _s4 = macd_diff_val < _prev_md_rv                                      # MACD hist ticking down
+                    _s5 = len(df_indicators) > 2 and current_price <= float(df_indicators["high"].iloc[-2])  # no new high
+                    _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
+
+                    if _stab_rv >= 4:
+                        _rev_sc = float(np.clip(max(_depth_rv * _rev_max_b, 0.20), 0.20, _rev_max_b))
+                        signal["action"]      = "SELL"
+                        signal["score"]       = -_rev_sc
+                        signal["confidence"]  = min(_rev_sc, 1.0)
+                        signal["hold_reason"] = ""
+                        signal["reason"] = (
+                            f"{signal.get('reason', '')} "
+                            f"[RangeCeil pos={_pos_rv:.0%} depth={_depth_rv:.2f} stab={_stab_rv}/5 sc={_rev_sc:.2f}]"
+                        ).strip()
+                        logger.debug(
+                            f"[RANGE_REV] Ceiling rejection: pos={_pos_rv:.1%} depth={_depth_rv:.2f} "
+                            f"stab={_stab_rv}/5 → SELL score={-_rev_sc:.3f}"
+                        )
 
     return signal
 def _detect_macd_divergence(df: pd.DataFrame) -> str:

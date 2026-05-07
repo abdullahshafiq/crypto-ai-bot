@@ -271,6 +271,12 @@ class PaperFuturesExecution:
                         closed = True
                         exit_type = "TRAIL_TP"
 
+                    # TAKE PROFIT: explicit TP price hit
+                    _tp_price = float(pos.get('tp_price') or 0.0)
+                    if not closed and _tp_price > 0 and current_price >= _tp_price:
+                        closed = True
+                        exit_type = "TAKE_PROFIT"
+
                     # PRIMARY EXIT: Parabolic SAR flip (SAR moves ABOVE price = trend reversal)
                     if not closed and psar is not None and hold_time > 10:
                         if psar > current_price and profit_pct >= min_net_profit:
@@ -292,11 +298,12 @@ class PaperFuturesExecution:
                         if min_sl_price > float(pos['sl']):
                             pos['sl'] = min_sl_price
 
-                    # TTL EXIT: cut stuck positions after timeout if barely profitable
+                    # TTL EXIT: cut stuck positions after timeout (losers AND barely-profitable)
                     ttl_seconds = int(getattr(self, 'ttl_exit_seconds', 0))
-                    if not closed and ttl_seconds > 0 and hold_time > ttl_seconds and profit_pct >= min_net_profit and profit_pct < break_even_trigger:
-                        closed = True
-                        exit_type = "TTL_EXIT"
+                    if not closed and ttl_seconds > 0 and hold_time > ttl_seconds:
+                        if profit_pct < break_even_trigger:  # not yet locked in profit — cut it
+                            closed = True
+                            exit_type = "TTL_EXIT"
 
                     # STRUCTURAL SL CHECK: price hit stop loss
                     if not closed and current_price <= pos['sl']:
@@ -321,6 +328,12 @@ class PaperFuturesExecution:
                         closed = True
                         exit_type = "TRAIL_TP"
 
+                    # TAKE PROFIT: explicit TP price hit
+                    _tp_price = float(pos.get('tp_price') or 0.0)
+                    if not closed and _tp_price > 0 and current_price <= _tp_price:
+                        closed = True
+                        exit_type = "TAKE_PROFIT"
+
                     # PRIMARY EXIT: Parabolic SAR flip (SAR moves BELOW price = trend reversal for short)
                     if not closed and psar is not None and hold_time > 10:
                         if psar < current_price and profit_pct >= min_net_profit:
@@ -342,11 +355,12 @@ class PaperFuturesExecution:
                         if max_sl_price < float(pos['sl']):
                             pos['sl'] = max_sl_price
 
-                    # TTL EXIT: cut stuck positions after timeout if barely profitable
+                    # TTL EXIT: cut stuck positions after timeout (losers AND barely-profitable)
                     ttl_seconds = int(getattr(self, 'ttl_exit_seconds', 0))
-                    if not closed and ttl_seconds > 0 and hold_time > ttl_seconds and profit_pct >= min_net_profit and profit_pct < break_even_trigger:
-                        closed = True
-                        exit_type = "TTL_EXIT"
+                    if not closed and ttl_seconds > 0 and hold_time > ttl_seconds:
+                        if profit_pct < break_even_trigger:  # not yet locked in profit — cut it
+                            closed = True
+                            exit_type = "TTL_EXIT"
 
                     # STRUCTURAL SL CHECK: price hit stop loss
                     if not closed and current_price >= pos['sl']:
