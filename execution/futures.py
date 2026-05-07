@@ -1011,6 +1011,73 @@ class BinanceFuturesExecution:
             except Exception as e:
                 logger.warning(f"[SYNC_DIAG] {fetcher_name} failed: {e}")
 
+    def _resolve_exchange_close_fill_price(self, pos: dict, current_price: float) -> float:
+        """
+        Query Binance for the actual fill price when the sync path detects a position
+        is gone from the exchange. Checks tracked TP/SL/trailing order IDs first, then
+        falls back to recent trade fills. Returns current_price if nothing found.
+        """
+        if not isinstance(pos, dict):
+            return current_price
+
+        try:
+            entry_ts = float(pos.get("entry_ts", time.time()) or time.time())
+        except (TypeError, ValueError):
+            entry_ts = time.time()
+        since_ms = max(0, int((entry_ts - 60) * 1000))
+
+        side = str(pos.get("side", "") or "").upper()
+        close_side = "sell" if side == "LONG" else "buy"
+        expected_amount = float(pos.get("amount", 0.0) or 0.0)
+
+        tracked_ids = {
+            str(pos.get("exchange_stop_order_id") or ""),
+            str(pos.get("exchange_tp_order_id") or ""),
+            str(pos.get("native_trailing_order_id") or ""),
+        }
+        tracked_ids.discard("")
+
+        # Check tracked reduce-only orders for a filled average price
+        for order_id in tracked_ids:
+            try:
+                order = self.exchange.fetch_order(order_id, self.symbol)
+                status = str(order.get("status") or "").lower()
+                avg = float(order.get("average") or (order.get("info", {}) or {}).get("avgPrice") or 0.0)
+                filled = float(order.get("filled") or (order.get("info", {}) or {}).get("executedQty") or 0.0)
+                if status in ("closed", "filled") and avg > 0 and filled > 0:
+                    logger.info(
+                        "[SYNC] Resolved actual fill price from order %s: %.5f (was using current=%.5f)",
+                        order_id[-8:], avg, current_price,
+                    )
+                    return avg
+            except Exception:
+                pass
+
+        # Fall back to recent trade fills matching the close side and amount
+        try:
+            trades = self.exchange.fetch_my_trades(self.symbol, since=since_ms, limit=20) or []
+            close_trades = [
+                t for t in trades
+                if str(t.get("side") or "").lower() == close_side
+                and float(t.get("amount") or 0.0) > 0
+            ]
+            if close_trades:
+                # Use the most recent close fill
+                close_trades.sort(key=lambda t: int(t.get("timestamp") or 0))
+                best = close_trades[-1]
+                fill_price = float(best.get("price") or 0.0)
+                if fill_price > 0:
+                    logger.info(
+                        "[SYNC] Resolved actual fill price from recent trade: %.5f (was using current=%.5f)",
+                        fill_price, current_price,
+                    )
+                    return fill_price
+        except Exception as e:
+            logger.debug(f"[SYNC] fetch_my_trades for fill price resolution failed: {e}")
+
+        logger.debug("[SYNC] Could not resolve actual fill price; using current_price=%.5f", current_price)
+        return current_price
+
     def _cleanup_trade_orders(self, symbol: str = None, pos: dict = None):
         """
         Cancel all open trade-related orders and clear local pending order state.
@@ -1707,19 +1774,20 @@ class BinanceFuturesExecution:
                             if getattr(self, "pending_entry", None):
                                 self.last_status = "Flat; preserving pending entry"
                             return
+                        fill_price = self._resolve_exchange_close_fill_price(pos, current_price)
                         self._log_exchange_close_diagnostics(pos, current_price)
-                        entry = float(pos.get("entry", current_price) or current_price)
+                        entry = float(pos.get("entry", fill_price) or fill_price)
                         amount = float(pos.get("amount", 0.0) or 0.0)
                         side = str(pos.get("side", "LONG") or "LONG").upper()
-                        pnl = (current_price - entry) * amount if side == "LONG" else (entry - current_price) * amount
-                        profit_pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
-                        fees = (amount * entry * self.fee_rate) + (amount * current_price * self.fee_rate)
-                        exit_fee = amount * current_price * self.fee_rate
+                        pnl = (fill_price - entry) * amount if side == "LONG" else (entry - fill_price) * amount
+                        profit_pct = (fill_price - entry) / entry if side == "LONG" else (entry - fill_price) / entry
+                        fees = (amount * entry * self.fee_rate) + (amount * fill_price * self.fee_rate)
+                        exit_fee = amount * fill_price * self.fee_rate
                         net_pnl = pnl - fees
                         exit_type = _realized_exit_type("EXCHANGE_CLOSED", net_pnl)
                         order_side = "SELL" if side == "LONG" else "BUY"
-                        self._record_closed_trade(exit_type, entry, current_price, pnl, profit_pct * 100, fees)
-                        self._log_trade(trade_id, "EXIT", order_side, current_price, amount, pnl, exit_fee, t_type=exit_type)
+                        self._record_closed_trade(exit_type, entry, fill_price, pnl, profit_pct * 100, fees)
+                        self._log_trade(trade_id, "EXIT", order_side, fill_price, amount, pnl, exit_fee, t_type=exit_type)
                         self.trade_count += 1
                         self._last_trade_ts = time.time()
                         self._recently_closed_ts = time.time()

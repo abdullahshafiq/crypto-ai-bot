@@ -33,17 +33,17 @@ execution:
   reversal_min_confidence: 0.55
   reversal_min_score: 0.35
   reversal_min_net_edge_pct: 0.0030   # 0.3% edge required before reversing
-  break_even_trigger_pct: 0.0008      # move to BE after +0.08% — protect capital immediately
+  break_even_trigger_pct: 0.0015      # move to BE after +0.15% — wider SL needs larger cushion
   break_even_buffer_pct: 0.0002
   profit_trailing_enabled: true
-  profit_trailing_activation_pct: 0.0010  # arm trailing after +0.10% profit
+  profit_trailing_activation_pct: 0.0020  # arm trailing after +0.20% profit
   trailing_tp_enabled: true
   trailing_tp_giveback_pct: 0.08          # give back only 8% of peak — squeeze profits
-  trailing_tp_min_peak_pct: 0.0015        # needs at least +0.15% peak first
-  trail_tighten_1_pct: 0.0020        # T1 trigger: tighten at 0.20% profit
-  trail_tighten_2_pct: 0.0040        # T2 trigger: tighten at 0.40% profit
-  trail_t1_gap_pct: 0.0010           # T1 trails 0.10% behind best price
-  trail_t2_gap_pct: 0.0008           # T2 trails 0.08% behind best price
+  trailing_tp_min_peak_pct: 0.0030        # needs at least +0.30% peak first
+  trail_tighten_1_pct: 0.0040        # T1 trigger: tighten at 0.40% profit
+  trail_tighten_2_pct: 0.0080        # T2 trigger: tighten at 0.80% profit
+  trail_t1_gap_pct: 0.0015           # T1 trails 0.15% behind best price
+  trail_t2_gap_pct: 0.0010           # T2 trails 0.10% behind best price
   min_profit_after_fees: 0.0010      # 0.10% min net profit to count as a win
   exit_on_reversal_only_in_profit: true
   use_limit_orders: true
@@ -88,7 +88,7 @@ leverage:
 mtf:
   enabled: true
   timeframes: ["5m", "15m", "1h", "4h"]
-  min_agree: 2
+  min_agree: 3
   require_full_confirmation: false
   strict_veto_on_missing: false
   veto_on_missing: false
@@ -126,16 +126,16 @@ auto_learning:
 # Quant Strategy Parameters
 strategy:
   max_spread: 0.0005            # tight spread — scalping is spread-sensitive
-  min_conf: 0.35                # higher baseline — only trade confirmed swings
+  min_conf: 0.55                # raise bar — only high-conviction setups
   signal_smoothing_ticks: 2     # less smoothing — react fast to 15m signals
   max_ret_30s: 0.0050           # block entry if price moved >0.5% in last 30s
   max_ret_5s: 0.0025            # block entry if price moved >0.25% in last 5s
   block_on_volume_spike: false
   fixed_trade_usdt: 25
-  tp_pct: 0.0075                # 0.75% TP target — scalp-sized, swing-confirmed
-  sl_pct: 0.0018                # 0.18% SL — minimum loss, cut fast
-  max_structural_sl_pct: 0.0025 # cap structural SL at 0.25%
-  min_reward_risk: 2.0          # 4:1 R/R minimum — only high-quality scalps
+  tp_pct: 0.0120                # 1.20% TP — scaled up to match wider SL (4:1 R/R)
+  sl_pct: 0.0030                # 0.30% SL — wide enough to survive AVAX 15m noise
+  max_structural_sl_pct: 0.0040 # cap structural SL at 0.40%
+  min_reward_risk: 3.0          # 4:1 R/R minimum — only high-quality scalps
   range_action_zone_pct: 0.20
   wall_veto_zone_pct: 0.12
   support_veto_pct: 0.0010
@@ -144,7 +144,7 @@ strategy:
   resistance_break_pct: 0.0010
   max_chase_pct: 0.0020         # tight chase tolerance — don't chase moves
   mtf_neutral_allow_score: 0.55 # higher bar when swing TF is neutral
-  entry_min_confidence_hard: 0.40
+  entry_min_confidence_hard: 0.50
   midrange_min_score: 0.40
   mtf_rsi_bull_level: 55
   mtf_rsi_bear_level: 45
