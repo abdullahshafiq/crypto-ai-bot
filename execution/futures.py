@@ -545,7 +545,7 @@ class BinanceFuturesExecution:
                 logger.debug(f"Protection order cancel skipped ({order_type} {order_id}): {e}")
         return cancelled
 
-    def _reset_excess_protection_orders(self, pos: dict, threshold: int = 6) -> bool:
+    def _reset_excess_protection_orders(self, pos: dict, threshold: int = 3) -> bool:
         """
         Hard reset protection orders if the stack has clearly drifted out of sync.
         This prevents repeated stop/TP refreshes from leaving many orphan orders behind.
@@ -731,6 +731,11 @@ class BinanceFuturesExecution:
         order_side = "SELL" if side == "LONG" else "BUY"
         existing_id = str(pos.get("exchange_stop_order_id") or "")
         existing_stop = float(pos.get("exchange_stop_price", 0.0) or 0.0)
+        recent_ts = float(pos.get("exchange_stop_order_ts", 0.0) or 0.0)
+        # Short-circuit: skip API fetch if price matches and we confirmed/placed within 60s
+        if existing_id and existing_stop > 0 and abs(existing_stop - stop_price) / stop_price <= 0.0005:
+            if recent_ts > 0 and time.time() - recent_ts < 60.0:
+                return False
         matching_orders = self._matching_reduce_only_orders(order_side, {"STOP_MARKET"})
         if existing_id and existing_stop > 0:
             if abs(existing_stop - stop_price) / stop_price <= 0.0005:
@@ -741,9 +746,9 @@ class BinanceFuturesExecution:
                     self._cancel_reduce_only_orders(order_side, {"STOP_MARKET"}, keep_id=existing_id)
                     pos["exchange_stop_order_id"] = existing_id
                     pos["exchange_stop_price"] = float(stop_price)
+                    pos["exchange_stop_order_ts"] = time.time()  # refresh so short-circuit holds
                     return False
-                recent_ts = float(pos.get("exchange_stop_order_ts", 0.0) or 0.0)
-                if recent_ts > 0 and time.time() - recent_ts < 20:
+                if recent_ts > 0 and time.time() - recent_ts < 60:
                     logger.debug(f"[EXCHANGE] Waiting for SL order {existing_id[-8:]} to appear before recreating.")
                     return False
                 logger.warning(
@@ -833,6 +838,11 @@ class BinanceFuturesExecution:
         order_side = "SELL" if side == "LONG" else "BUY"
         existing_id = str(pos.get("exchange_tp_order_id") or "")
         existing_tp = float(pos.get("exchange_tp_price", 0.0) or 0.0)
+        recent_ts = float(pos.get("exchange_tp_order_ts", 0.0) or 0.0)
+        # Short-circuit: skip API fetch if price matches and we confirmed/placed within 60s
+        if existing_id and existing_tp > 0 and abs(existing_tp - tp_price) / tp_price <= 0.0005:
+            if recent_ts > 0 and time.time() - recent_ts < 60.0:
+                return False
         matching_orders = self._matching_reduce_only_orders(order_side, {"TAKE_PROFIT_MARKET"})
         if existing_id and existing_tp > 0:
             if abs(existing_tp - tp_price) / tp_price <= 0.0005:
@@ -842,9 +852,9 @@ class BinanceFuturesExecution:
                     self._cancel_reduce_only_orders(order_side, {"TAKE_PROFIT_MARKET"}, keep_id=existing_id)
                     pos["exchange_tp_order_id"] = existing_id
                     pos["exchange_tp_price"] = float(tp_price)
+                    pos["exchange_tp_order_ts"] = time.time()  # refresh so short-circuit holds
                     return False
-                recent_ts = float(pos.get("exchange_tp_order_ts", 0.0) or 0.0)
-                if recent_ts > 0 and time.time() - recent_ts < 20:
+                if recent_ts > 0 and time.time() - recent_ts < 60:
                     logger.debug(f"[EXCHANGE] Waiting for TP order {existing_id[-8:]} to appear before recreating.")
                     return False
                 logger.warning(
