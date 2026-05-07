@@ -28,8 +28,8 @@ from safety import sr_wall_escape_ready as _sr_wall_escape_ready
 
 logger = logging.getLogger(__name__)
 
-# Try to load ML weights if they exist
-WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), 'weights.json')
+# Learned weights written by ml/optimizer.py
+WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), '..', 'ml', 'weights.json')
 
 # --- INSTITUTIONAL TUNING PARAMETERS ---
 # These parameters define the bot's 'Patience' and 'Aggression' levels.

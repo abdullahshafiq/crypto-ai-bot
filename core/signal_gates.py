@@ -17,13 +17,13 @@ def compute_loss_tilt_override(
 
     if consecutive_losses >= tilt_min_losses:
         loss_tilt_depth = max(0, consecutive_losses - tilt_min_losses)
-        overrides["min_conf"] = max(
-            base_min_conf,
-            min(0.25, base_min_conf + 0.04 + (0.02 * loss_tilt_depth)),
+        overrides["min_conf"] = min(
+            0.90,
+            base_min_conf + 0.05 + (0.03 * loss_tilt_depth),
         )
-        overrides["entry_min_confidence_hard"] = max(
-            float(strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
-            0.25,
+        overrides["entry_min_confidence_hard"] = min(
+            0.90,
+            float(strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20) + 0.05 + (0.03 * loss_tilt_depth),
         )
         overrides["midrange_min_score"] = max(
             float(strategy_config.get("midrange_min_score", 0.28) or 0.28),

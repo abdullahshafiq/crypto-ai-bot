@@ -5,6 +5,7 @@ import logging
 import copy
 import pandas as pd
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -251,9 +252,10 @@ def run_hybrid_bot():
 
     if auto_learning_enabled:
         logger.info("Auto-learning: session-only mode — weights start from defaults, no historical CSV data.")
-        if os.path.exists(os.path.join(os.path.dirname(__file__) or ".", "weights.json")):
+        _ml_weights = os.path.join(os.path.dirname(__file__) or ".", "..", "ml", "weights.json")
+        if os.path.exists(_ml_weights):
             try:
-                os.remove(os.path.join(os.path.dirname(__file__) or ".", "weights.json"))
+                os.remove(_ml_weights)
                 logger.info("Auto-learning: cleared stale weights.json for fresh session start.")
             except Exception:
                 pass
@@ -351,13 +353,36 @@ def run_hybrid_bot():
             if ticks == 1 or ticks % indicator_refresh_interval == 0:
                 logger.info("Refreshing macro indicators...")
                 status("Refreshing indicators/MTF")
-                # Main execution OHLCV (always use bot's execution timeframe)
-                new_df = _runtime_fetch_ohlcv(market, symbol, cfg['timeframe'], 200, paper_mode=paper_mode, logger=logger)
-                macro_df = _runtime_fetch_ohlcv(market, symbol, cfg.get('macro_timeframe', '1h'), 100, paper_mode=paper_mode, logger=logger)
 
-                # Chart-specific OHLCV update (use dashboard's selected timeframe)
+                # Build the list of OHLCV fetches to run in parallel
+                need_pivots = time.time() - last_pivot_refresh_ts >= 900 or not pivot_data
+                mtf_enabled = mtf_cfg.get("enabled", False)
+                mtf_timeframes = mtf_cfg.get("timeframes", ["15m", "3h", "4h"]) if mtf_enabled else []
+
+                fetch_tasks = {"main": (cfg['timeframe'], 200), "chart": (ui_tf, 5)}
+                if need_pivots:
+                    fetch_tasks["pivot"] = ("1d", 5)
+                for tf in mtf_timeframes:
+                    fetch_tasks[f"mtf_{tf}"] = (tf, 200)
+
+                def _fetch_one(key, tf, limit):
+                    return key, _runtime_fetch_ohlcv(market, symbol, tf, limit, paper_mode=paper_mode, logger=logger)
+
+                fetched = {}
+                with ThreadPoolExecutor(max_workers=min(len(fetch_tasks), 8)) as pool:
+                    futures = {pool.submit(_fetch_one, k, tf, lim): k for k, (tf, lim) in fetch_tasks.items()}
+                    for fut in as_completed(futures):
+                        try:
+                            key, df = fut.result()
+                            fetched[key] = df
+                        except Exception as e:
+                            logger.warning(f"Parallel OHLCV fetch error: {e}")
+
+                new_df = fetched.get("main", pd.DataFrame())
+
+                # Chart update
                 try:
-                    chart_update_df = _runtime_fetch_ohlcv(market, symbol, ui_tf, 5, paper_mode=paper_mode, logger=logger)
+                    chart_update_df = fetched.get("chart", pd.DataFrame())
                     if not chart_update_df.empty:
                         seen_times = {b["time"] for b in chart_bars}
                         for _, row in chart_update_df.iterrows():
@@ -373,9 +398,10 @@ def run_hybrid_bot():
                 except Exception as e:
                     logger.warning(f"Chart periodic update failed: {e}")
 
-                if mtf_cfg.get("enabled", False):
-                    for tf in mtf_cfg.get("timeframes", ["15m", "3h", "4h"]):
-                        htf_df = _runtime_fetch_ohlcv(market, symbol, tf, 200, paper_mode=paper_mode, logger=logger)
+                # MTF context
+                if mtf_enabled:
+                    for tf in mtf_timeframes:
+                        htf_df = fetched.get(f"mtf_{tf}", pd.DataFrame())
                         if htf_df.empty:
                             status(f"MTF {tf}: fetch failed")
                             continue
@@ -391,10 +417,10 @@ def run_hybrid_bot():
                     df_indicators = calculate_base_indicators(new_df)
                     latest_indicators = (df_indicators.iloc[-2] if len(df_indicators) > 1 else df_indicators.iloc[-1]).to_dict()
 
-                # Refresh Advanced Pivot Points from daily OHLCV (every 15 min)
-                if time.time() - last_pivot_refresh_ts >= 900 or not pivot_data:
+                # Pivot points (fetched in parallel above if needed)
+                if need_pivots:
                     try:
-                        daily_df = _runtime_fetch_ohlcv(market, symbol, '1d', 5, paper_mode=paper_mode, logger=logger)
+                        daily_df = fetched.get("pivot", pd.DataFrame())
                         if not daily_df.empty and len(daily_df) >= 2:
                             pivot_data = compute_advanced_pivots(daily_df)
                             last_pivot_refresh_ts = time.time()
@@ -586,11 +612,7 @@ def run_hybrid_bot():
 
             runtime_strategy_config = dict(strategy_config)
             base_min_conf = float(runtime_strategy_config.get("min_conf", 0.15) or 0.15)
-            if requested_exec_mode == "paper":
-                paper_min_conf = float(exec_cfg.get("paper_min_conf", base_min_conf) or base_min_conf)
-                runtime_strategy_config["min_conf"] = max(base_min_conf, paper_min_conf, 0.15)
-            else:
-                runtime_strategy_config["min_conf"] = max(base_min_conf, 0.15)
+            runtime_strategy_config["min_conf"] = max(base_min_conf, 0.15)
             runtime_strategy_config["entry_min_confidence_hard"] = max(
                 float(runtime_strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
                 0.20,
@@ -630,6 +652,12 @@ def run_hybrid_bot():
 
             min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.10))
             signal = apply_confidence_floor(signal, min_conf_floor)
+
+            hard_min = float(runtime_strategy_config.get("entry_min_confidence_hard", 0.0) or 0.0)
+            if hard_min > 0.0 and signal.get("action") in {"BUY", "SELL"}:
+                if abs(raw_score) < hard_min:
+                    signal["action"] = "HOLD"
+                    signal["hold_reason"] = f"Hard score gate ({abs(raw_score):.2f} < {hard_min:.2f})"
 
             min_rr = float(runtime_strategy_config.get("min_reward_risk", 0.0) or 0.0)
             if min_rr > 0.0:
