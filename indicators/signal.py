@@ -734,10 +734,11 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             _is_strong = (
                 abs(total_score) >= _veto_escape_score
                 and _mtf_unanimous
+                and abs(sr_score) < 1.0
             )
 
             if action == "BUY" and _pos >= _veto_top:
-                if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -1.3:
+                if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -0.5:
                     # Unanimous bull MTF + very strong score + clear resistance = real breakout.
                     pass
                 else:
@@ -745,7 +746,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     hold_reason = (
                         f"Range Veto: BUY in top {int(_veto_top*100)}% of {_lookback}c range "
                         f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f}). "
-                        f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-1.3 for breakout."
+                        f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-0.5 for breakout."
                     )
 
             elif action == "SELL" and _pos <= _veto_bottom:
