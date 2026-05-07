@@ -1648,9 +1648,8 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             if _pos_rv <= _veto_bot_rv and mtf_fast_bias != "SHORT_ONLY":
                 _depth_rv = max(0.0, 1.0 - (_pos_rv / max(_veto_bot_rv, 1e-9)))
                 if _depth_rv >= _rev_min_d:
-                    # Need at least 4-of-5 stabilisation signals — high conviction
-                    # only, avoid whipsaws from loose threshold. Price must show
-                    # strong reversal intent (green candle, RSI recovery, PSAR flip, etc.)
+                    # Need at least 3-of-5 stabilisation signals — balanced conviction
+                    # Avoids both excessive whipsaws (2/5) and getting trapped (4/5)
                     _s1 = current_price >= float(df_indicators["open"].iloc[-1])          # green candle
                     _s2 = _rsi_rv <= (_rsi_os_rv + 10)                                    # RSI in oversold band
                     _s3 = _psar_bull_rv                                                    # PSAR turning bull
@@ -1658,7 +1657,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     _s5 = len(df_indicators) > 2 and current_price >= float(df_indicators["low"].iloc[-2])  # no new low
                     _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
 
-                    if _stab_rv >= 4:
+                    if _stab_rv >= 3:
                         _rev_sc = float(np.clip(max(_depth_rv * _rev_max_b, 0.20), 0.20, _rev_max_b))
                         signal["action"]      = "BUY"
                         signal["score"]       = _rev_sc
@@ -1677,7 +1676,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             elif _pos_rv >= _veto_top_rv and mtf_fast_bias != "LONG_ONLY":
                 _depth_rv = max(0.0, (_pos_rv - _veto_top_rv) / max(1.0 - _veto_top_rv, 1e-9))
                 if _depth_rv >= _rev_min_d:
-                    # Need at least 4-of-5 stabilisation signals — high conviction only
+                    # Need at least 3-of-5 stabilisation signals — balanced conviction
                     _s1 = current_price <= float(df_indicators["open"].iloc[-1])           # red candle
                     _s2 = _rsi_rv >= (_rsi_ob_rv - 10)                                     # RSI in overbought band
                     _s3 = not _psar_bull_rv                                                 # PSAR turning bear
@@ -1685,7 +1684,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
                     _s5 = len(df_indicators) > 2 and current_price <= float(df_indicators["high"].iloc[-2])  # no new high
                     _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
 
-                    if _stab_rv >= 4:
+                    if _stab_rv >= 3:
                         _rev_sc = float(np.clip(max(_depth_rv * _rev_max_b, 0.20), 0.20, _rev_max_b))
                         signal["action"]      = "SELL"
                         signal["score"]       = -_rev_sc
