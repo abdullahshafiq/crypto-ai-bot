@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 from .calc import calculate_base_indicators
-from .signal import generate_quant_signal
+from .signals import generate_quant_signal
 
 def _detect_momentum_exhaustion(df: pd.DataFrame) -> str:
     """Detect momentum deceleration before MACD fully flips."""

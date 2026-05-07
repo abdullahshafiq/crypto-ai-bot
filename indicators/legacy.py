@@ -1,5 +1,5 @@
 from .calc import calculate_base_indicators
-from .signal import generate_quant_signal
+from .signals import generate_quant_signal
 
 def calculate_indicators(df):
     """Legacy alias for calculate_base_indicators."""

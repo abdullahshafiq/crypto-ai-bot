@@ -6,9 +6,9 @@ from .location import (
     _compute_vpoc, _compute_anchored_vwap, _compute_cvd, _detect_cvd_divergence,
     _compute_market_location_score, _compute_wall_state,
 )
-from .signal import (
+from .signals import (
     generate_quant_signal, validate_signal_integrity, generate_alpha_overlay,
-    _apply_rejection_confirmation_gate,
+    _apply_rejection_confirmation_gate, compute_advanced_pivots,
 )
 from .helpers import (
     get_trend_status, get_volatility_status, get_momentum_status,

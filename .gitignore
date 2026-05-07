@@ -15,9 +15,13 @@ trade_log*.csv
 bot_restart.out
 learning_state.json
 ui_state.json
+weights.json
+bot_*.lock
 .claude/
 .antigravity/
 scratch/
+.codegraph/
+index/
 .DS_Store
 Thumbs.db
 *.py.bak
