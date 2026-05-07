@@ -55,25 +55,25 @@ class BinanceFuturesExecution:
         self.reversal_min_confidence = 0.0
         self.reversal_min_score = 0.0
         self.reversal_min_net_edge_pct = 0.0
-        self.break_even_trigger_pct = 0.0010
+        self.break_even_trigger_pct = 0.0008
         self.break_even_buffer_pct = 0.0002
         self.profit_trailing_enabled = True
         self.profit_trailing_activation_pct = self.break_even_trigger_pct
         self.trailing_tp_enabled = True
-        self.trailing_tp_giveback_pct = 0.12
-        self.trailing_tp_min_peak_pct = 0.0020
-        self.trail_tighten_1_pct = 0.0025
-        self.trail_tighten_2_pct = 0.0050
-        self.trail_t1_gap_pct = 0.0025
-        self.trail_t2_gap_pct = 0.0020
-        self.tp_pct = 0.0025
-        self.default_sl_pct = 0.0030
+        self.trailing_tp_giveback_pct = 0.08
+        self.trailing_tp_min_peak_pct = 0.0015
+        self.trail_tighten_1_pct = 0.0020
+        self.trail_tighten_2_pct = 0.0040
+        self.trail_t1_gap_pct = 0.0010
+        self.trail_t2_gap_pct = 0.0008
+        self.tp_pct = 0.0075
+        self.default_sl_pct = 0.0018
         self.exit_on_reversal_only_in_profit = True
         self._last_trade_ts = 0.0
         self._last_profitable_exit_side = ""
         self._last_profitable_exit_ts = 0.0
         self._opposite_reset_seen_after_profit = False
-        self.same_side_reentry_cooldown_seconds = 180
+        self.same_side_reentry_cooldown_seconds = 120
         self.same_side_reentry_strong_confidence = 0.85
         self.trade_log_file = "trade_log_futures.csv"
         self.exchange = ccxt.binance({
@@ -142,23 +142,23 @@ class BinanceFuturesExecution:
         self.use_exchange_stop_loss = True
         self.use_exchange_take_profit = True
         self.market_fallback_on_timeout = False
-        self.trailing_stop_callback = 0.005
-        self.tp_pct = 0.0025
-        self.default_sl_pct = 0.0030
+        self.trailing_stop_callback = 0.0025
+        self.tp_pct = 0.0075
+        self.default_sl_pct = 0.0018
         self._last_position_sync_ok = False
         self._last_flat_order_cleanup_ts = 0.0
         self._entry_block_until_ts = 0.0
         self._post_close_cleanup_needed = False
         self.scalp_config = {
             'runner_enabled': True,
-            'tp_pct': 0.0025,
-            'min_hold_seconds': 10,
-            'runner_pullback_pct': 0.0012,
-            'runner_min_lock_pct': 0.0018,
+            'tp_pct': 0.0075,
+            'min_hold_seconds': 30,
+            'runner_pullback_pct': 0.0020,
+            'runner_min_lock_pct': 0.0040,
             'runner_exchange_tp_multiplier': 3.0,
-            'runner_partial_exit_pct': 0.45,
-            'fade_trigger_pct': 0.0050,
-            'fade_exit_pct': 0.0020
+            'runner_partial_exit_pct': 0.50,
+            'fade_trigger_pct': 0.0020,
+            'fade_exit_pct': 0.0010
         }
 
         self.last_status = "INIT"

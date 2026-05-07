@@ -20,30 +20,30 @@ def _pid_is_running(pid: int) -> bool:
 
 def _release_instance_lock(lock_path: Path):
     try:
-        if lock_path.exists():
-            lock_path.unlink()
+        lock_path.unlink(missing_ok=True)
     except OSError:
         pass
 
 
 def _enforce_single_instance(port=45678):
-    lock_path = _lock_path_for_port(int(port))
+    port = int(port)
+    lock_path = _lock_path_for_port(port)
 
     current_pid = os.getpid()
-    if lock_path.exists():
-        try:
-            raw = lock_path.read_text(encoding="utf-8").strip()
-            locked_pid = int(raw)
-        except Exception:
-            locked_pid = None
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        locked_pid = int(raw)
+    except (FileNotFoundError, ValueError, OSError):
+        locked_pid = None
 
-        if locked_pid and locked_pid != current_pid and _pid_is_running(locked_pid):
-            print(
-                "ERROR: Another instance of the bot is already running "
-                f"for port {int(port)} (pid {locked_pid}). Please close it first."
-            )
-            sys.exit(1)
+    if locked_pid and locked_pid != current_pid and _pid_is_running(locked_pid):
+        print(
+            "ERROR: Another instance of the bot is already running "
+            f"for port {port} (pid {locked_pid}). Please close it first."
+        )
+        sys.exit(1)
 
+    if locked_pid is not None:
         _release_instance_lock(lock_path)
 
     try:
