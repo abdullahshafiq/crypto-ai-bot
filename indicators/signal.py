@@ -734,7 +734,7 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
             _is_strong = (
                 abs(total_score) >= _veto_escape_score
                 and _mtf_unanimous
-                and abs(sr_score) < 1.0
+                and abs(sr_score) < 2.0
             )
 
             if action == "BUY" and _pos >= _veto_top:
