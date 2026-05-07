@@ -7,6 +7,12 @@
 
 ```
 main.py → core/bot_loop.py (runtime loop)
+  ├─ core/signal_gates.py      → loss tilt, scalp hold, confidence floor, gate trace
+  ├─ core/ai_gates.py          → AI overlay gate, AI trade gate, regime veto, entry dispatch
+  ├─ core/singles.py           → single instance lock, consecutive losses
+  ├─ core/snapshot.py          → dashboard snapshot builder
+  ├─ core/startup.py           → config init, OHLCV fetch, runtime config
+  ├─ core/synthetic_data.py    → offline demo OHLCV fallback
   ├─ market/data.py          → OHLCV, order book, funding rate
   ├─ indicators/calc.py      → base indicator calculation
   ├─ indicators/signals/     → signal generation pipeline
@@ -31,7 +37,16 @@ main.py → core/bot_loop.py (runtime loop)
   │       └─ bias.py           → trend continuation bias, range zones
   ├─ ai/orchestrator.py      → AI regime, overlay, trade gate
   ├─ execution/              → order placement & management
-  │   ├─ futures.py           → Binance USDⓈ-M futures (biggest file)
+  │   ├─ futures/            → Binance USDⓈ-M futures (mixin package)
+  │   │   ├─ _core.py        → class definition + __init__ + calculate_dynamic_leverage
+  │   │   ├─ _trade_log.py   → trade recording, session, observe, logging
+  │   │   ├─ _balance.py     → USDT/BTC balance fetch
+  │   │   ├─ _orders.py      → order cancel, fetch, wipe orphans, cleanup
+  │   │   ├─ _protection.py  → trailing stop, exchange SL/TP, cleanup orders
+  │   │   ├─ _exit.py        → reduce-only exit, finalize, diagnostics, emergency
+  │   │   ├─ _entry.py       → place_limit_order
+  │   │   ├─ _position.py    → process_orders_and_positions (main loop)
+  │   │   └─ _portfolio.py   → open orders, portfolio value, risk, close_all
   │   ├─ paper.py             → paper trading simulation
   │   ├─ spot.py              → Binance spot
   │   ├─ base.py              → base executor class
@@ -82,7 +97,16 @@ main.py → core/bot_loop.py (runtime loop)
 | News data fetching | `market/news.py` |
 | AI regime / overlay / trade gate | `ai/orchestrator.py` |
 | AI prompt templates | `ai/context.py` |
-| Order placement, SL/TP, trailing | `execution/futures.py` |
+| Order placement, SL/TP, trailing | `execution/futures/_entry.py` |
+| Reduce-only exit, finalize | `execution/futures/_exit.py` |
+| Order management (cancel, fetch, wipe) | `execution/futures/_orders.py` |
+| Trailing stop, exchange SL/TP | `execution/futures/_protection.py` |
+| Position loop (main tick) | `execution/futures/_position.py` |
+| Trade recording, logging | `execution/futures/_trade_log.py` |
+| Balance fetching | `execution/futures/_balance.py` |
+| Portfolio, risk limits, close_all | `execution/futures/_portfolio.py` |
+| Futures class __init__ | `execution/futures/_core.py` |
+| Dynamic leverage | `execution/futures/_core.py` |
 | Paper trading simulation | `execution/paper.py` |
 | Spot trading | `execution/spot.py` |
 | Executor base class | `execution/base.py` |
@@ -93,6 +117,8 @@ main.py → core/bot_loop.py (runtime loop)
 | SR wall escape detection | `safety/sr_wall.py` |
 | Terminal UI rendering | `ui/terminal.py` |
 | Main runtime loop | `core/bot_loop.py` |
+| Loss tilt computation, scalp hold guard | `core/signal_gates.py` |
+| AI overlay gate, AI trade gate, regime veto | `core/ai_gates.py` |
 | Config loading | `config/loader.py` |
 | Config schema (all keys) | `config/schema.py` |
 
@@ -111,6 +137,7 @@ BOT_CONFIG=other.yaml python main.py  → custom config
 - **`state` dict**: returned by `market.fetch_order_book_and_ticks()`. Defined in `market/state_types.py`.
 - **`signal` dict**: returned by `generate_quant_signal()`. Defined in `indicators/signals/signal_types.py`.
 - **Config**: loaded by `config/loader.py`, schema in `config/schema.py`. Runtime defaults applied in `core/bot_loop.py`.
+- **Futures mixins**: `BinanceFuturesExecution` inherits from 8 mixin classes defined in `execution/futures/_*.py`. The main class definition is in `_core.py`. All public API names stay identical.
 - **`from __future__ import annotations`**: required in all files importing TypedDicts from `ctx.py`, `state_types.py`, `signal_types.py`, or `schema.py` to avoid circular import issues.
 
 → [`docs/bot_context.md`](docs/bot_context.md) for API details and operational notes.
