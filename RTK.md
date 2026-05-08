@@ -4,7 +4,8 @@
 
 ## Rule
 
-Always prefix shell commands with `rtk`.
+Prefer `rtk` for shell commands when the binary is installed and available in `PATH`.
+If `rtk` is missing, run the underlying shell command directly so Claude CLI still works.
 
 Examples:
 

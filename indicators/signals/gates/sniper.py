@@ -21,15 +21,14 @@ def apply_range_reversal_sniper(ctx: SignalContext) -> None:
 
     if signal.get("action") != "HOLD":
         return
-    if signal.get("sr_wall_locked", False):
-        return
     if not bool(strategy_config.get("range_position_veto_enabled", True)):
         return
 
     _tf_str_rv = str(strategy_config.get("timeframe", "15m") or "15m").strip().lower()
     _tf_map_rv = {"1m": 1440, "3m": 480, "5m": 288, "10m": 144, "15m": 96, "1h": 24, "4h": 6}
-    _cpd_rv = int(strategy_config.get("candles_per_day", _tf_map_rv.get(_tf_str_rv, 96)))
-    _lookback_rv = max(50, min(_cpd_rv, len(df_indicators)))
+    _default_cpd = _tf_map_rv.get(_tf_str_rv, 96)
+    _cpd_rv = int(strategy_config.get("sniper_lookback") or strategy_config.get("candles_per_day", _default_cpd))
+    _lookback_rv = max(20, min(_cpd_rv, len(df_indicators)))
     _recent_rv = df_indicators.iloc[-_lookback_rv:]
     _rng_hi_rv = float(_recent_rv["high"].max())
     _rng_lo_rv = float(_recent_rv["low"].min())
@@ -41,8 +40,6 @@ def apply_range_reversal_sniper(ctx: SignalContext) -> None:
     _pos_rv = (current_price - _rng_lo_rv) / _rng_w_rv
     _veto_bot_rv = float(strategy_config.get("range_veto_bottom_pct", 0.25) or 0.25)
     _veto_top_rv = float(strategy_config.get("range_veto_top_pct", 0.75) or 0.75)
-    _rev_min_d = float(strategy_config.get("range_reversal_min_depth", 0.20) or 0.20)
-    _rev_max_b = float(strategy_config.get("range_reversal_max_boost", 0.45) or 0.45)
 
     _psar_raw_rv = df_indicators["psar"].iloc[-1] if "psar" in df_indicators.columns and len(df_indicators) else None
     psar_bull_rv = ctx.get('psar_bull', True)
@@ -56,49 +53,69 @@ def apply_range_reversal_sniper(ctx: SignalContext) -> None:
     _rsi_ob_rv = float(strategy_config.get("rsi_ob_entry_gate", 72) or 72)
     _prev_md_rv = float(macd_diff_val)
 
-    if _pos_rv <= _veto_bot_rv and mtf_fast_bias != "SHORT_ONLY":
+    # Score formula combines stab (evidence count) and depth (how deep into veto zone):
+    #   sc = clip(0.20 + 0.12 * (stab - 1) + depth * 0.20, 0.20, 0.85)
+    # Hits 0.55 (min_conf) at stab=4 even with shallow depth at the veto edge.
+
+    if _pos_rv <= _veto_bot_rv:
         _depth_rv = max(0.0, 1.0 - (_pos_rv / max(_veto_bot_rv, 1e-9)))
-        if _depth_rv >= _rev_min_d:
-            _s1 = current_price >= float(df_indicators["open"].iloc[-1])
-            _s2 = _rsi_rv <= (_rsi_os_rv + 10)
-            _s3 = _psar_bull_rv
-            _s4 = macd_diff_val > _prev_md_rv
-            _s5 = len(df_indicators) > 2 and current_price >= float(df_indicators["low"].iloc[-2])
-            _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
+        _s1 = current_price >= float(df_indicators["open"].iloc[-1])
+        _s2 = _rsi_rv <= (_rsi_os_rv + 10)
+        _s3 = _psar_bull_rv
+        _s4 = macd_diff_val > _prev_md_rv
+        _s5 = len(df_indicators) > 2 and current_price >= float(df_indicators["low"].iloc[-2])
+        _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
 
-            if _stab_rv >= 2:
-                _rev_sc = float(np.clip(max(_depth_rv * _rev_max_b, 0.20), 0.20, _rev_max_b))
-                signal["action"] = "BUY"
-                signal["score"] = _rev_sc
-                signal["confidence"] = min(_rev_sc, 1.0)
-                signal["hold_reason"] = ""
-                signal["reason"] = (
-                    f"{signal.get('reason', '')} "
-                    f"[RangeFloor pos={_pos_rv:.0%} depth={_depth_rv:.2f} stab={_stab_rv}/5 sc={_rev_sc:.2f}]"
-                ).strip()
-                logger.debug(f"[RANGE_REV] Floor bounce: pos={_pos_rv:.1%} depth={_depth_rv:.2f} stab={_stab_rv}/5 → BUY score={_rev_sc:.3f}")
+        _mtf_against = (mtf_fast_bias == "SHORT_ONLY")
+        _min_stab = 4 if _mtf_against else 2
 
-    elif _pos_rv >= _veto_top_rv and mtf_fast_bias != "LONG_ONLY":
+        if _stab_rv >= _min_stab:
+            _rev_sc = float(np.clip(0.20 + 0.12 * (_stab_rv - 1) + _depth_rv * 0.20, 0.20, 0.85))
+            signal["action"] = "BUY"
+            signal["score"] = _rev_sc
+            signal["confidence"] = min(_rev_sc, 1.0)
+            signal["hold_reason"] = ""
+            _mtf_tag = " contraMTF" if _mtf_against else ""
+            signal["reason"] = (
+                f"{signal.get('reason', '')} "
+                f"[RangeFloor{_mtf_tag} pos={_pos_rv:.0%} depth={_depth_rv:.2f} stab={_stab_rv}/5 sc={_rev_sc:.2f}]"
+            ).strip()
+            logger.debug(f"[RANGE_REV] Floor bounce: pos={_pos_rv:.1%} depth={_depth_rv:.2f} stab={_stab_rv}/5 mtf_against={_mtf_against} → BUY score={_rev_sc:.3f}")
+        elif _stab_rv >= 2:
+            signal["reason"] = (
+                f"{signal.get('reason', '')} "
+                f"[Watching FloorBounce pos={_pos_rv:.0%} stab={_stab_rv}/5 need>={_min_stab}{' contraMTF' if _mtf_against else ''}]"
+            ).strip()
+
+    elif _pos_rv >= _veto_top_rv:
         _depth_rv = max(0.0, (_pos_rv - _veto_top_rv) / max(1.0 - _veto_top_rv, 1e-9))
-        if _depth_rv >= _rev_min_d:
-            _s1 = current_price <= float(df_indicators["open"].iloc[-1])
-            _s2 = _rsi_rv >= (_rsi_ob_rv - 10)
-            _s3 = not _psar_bull_rv
-            _s4 = macd_diff_val < _prev_md_rv
-            _s5 = len(df_indicators) > 2 and current_price <= float(df_indicators["high"].iloc[-2])
-            _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
+        _s1 = current_price <= float(df_indicators["open"].iloc[-1])
+        _s2 = _rsi_rv >= (_rsi_ob_rv - 10)
+        _s3 = not _psar_bull_rv
+        _s4 = macd_diff_val < _prev_md_rv
+        _s5 = len(df_indicators) > 2 and current_price <= float(df_indicators["high"].iloc[-2])
+        _stab_rv = int(_s1) + int(_s2) + int(_s3) + int(_s4) + int(_s5)
 
-            if _stab_rv >= 2:
-                _rev_sc = float(np.clip(max(_depth_rv * _rev_max_b, 0.20), 0.20, _rev_max_b))
-                signal["action"] = "SELL"
-                signal["score"] = -_rev_sc
-                signal["confidence"] = min(_rev_sc, 1.0)
-                signal["hold_reason"] = ""
-                signal["reason"] = (
-                    f"{signal.get('reason', '')} "
-                    f"[RangeCeil pos={_pos_rv:.0%} depth={_depth_rv:.2f} stab={_stab_rv}/5 sc={_rev_sc:.2f}]"
-                ).strip()
-                logger.debug(f"[RANGE_REV] Ceiling rejection: pos={_pos_rv:.1%} depth={_depth_rv:.2f} stab={_stab_rv}/5 → SELL score={-_rev_sc:.3f}")
+        _mtf_against = (mtf_fast_bias == "LONG_ONLY")
+        _min_stab = 4 if _mtf_against else 2
+
+        if _stab_rv >= _min_stab:
+            _rev_sc = float(np.clip(0.20 + 0.12 * (_stab_rv - 1) + _depth_rv * 0.20, 0.20, 0.85))
+            signal["action"] = "SELL"
+            signal["score"] = -_rev_sc
+            signal["confidence"] = min(_rev_sc, 1.0)
+            signal["hold_reason"] = ""
+            _mtf_tag = " contraMTF" if _mtf_against else ""
+            signal["reason"] = (
+                f"{signal.get('reason', '')} "
+                f"[RangeCeil{_mtf_tag} pos={_pos_rv:.0%} depth={_depth_rv:.2f} stab={_stab_rv}/5 sc={_rev_sc:.2f}]"
+            ).strip()
+            logger.debug(f"[RANGE_REV] Ceiling rejection: pos={_pos_rv:.1%} depth={_depth_rv:.2f} stab={_stab_rv}/5 mtf_against={_mtf_against} → SELL score={-_rev_sc:.3f}")
+        elif _stab_rv >= 2:
+            signal["reason"] = (
+                f"{signal.get('reason', '')} "
+                f"[Watching CeilRejection pos={_pos_rv:.0%} stab={_stab_rv}/5 need>={_min_stab}{' contraMTF' if _mtf_against else ''}]"
+            ).strip()
 
 
 def apply_exhaustion_divergence_gate(ctx: SignalContext) -> None:

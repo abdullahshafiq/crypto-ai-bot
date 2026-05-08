@@ -77,14 +77,11 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     ctx['mtf_rsi_score'] = mtf_result['mtf_rsi_score']
     ctx['mtf_rsi_bias'] = mtf_result['mtf_rsi_bias']
 
-    # ── Phase 3: Chasing guard ──────────────────────────────────────────
+    # ── Phase 3: Context setup ──────────────────────────────────────────
     current_price = ctx['current_price']
     ctx['ema_21'] = float(latest_indicators.get('ema_21', current_price) or current_price)
     ctx['ema_9'] = float(latest_indicators.get('ema_9', current_price) or current_price)
     ctx['atr_pct_now'] = float(latest_indicators.get("atr_pct", 0.5) or 0.5) / 100.0
-    early_exit = apply_chasing_guard(ctx)
-    if early_exit:
-        return early_exit
 
     # ── Phase 4: Indicator scores ──────────────────────────────────────
     compute_indicator_scores(ctx)
@@ -102,6 +99,11 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     if early_exit:
         return early_exit
     _determine_action(ctx)
+
+    # ── Phase 7.5: Chasing guard ───────────────────────────────────────
+    early_exit = apply_chasing_guard(ctx)
+    if early_exit:
+        return early_exit
 
     # ── Phase 8: Trend confirmation + article setups ────────────────────
     _compute_trend_confirmation(ctx)

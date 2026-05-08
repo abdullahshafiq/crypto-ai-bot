@@ -47,6 +47,8 @@ def apply_chasing_guard(ctx: SignalContext) -> dict | None:
     atr_pct_now = ctx['atr_pct_now']
     ema_21 = ctx['ema_21']
     ema_9 = ctx.get('ema_9', latest_indicators.get('ema_9', current_price))
+    df_indicators = ctx['df_indicators']
+    action = ctx.get('action', 'HOLD')
 
     ema_dist_pct = abs(ema_9 - ema_21) / ema_21
     configured_max_chase_pct = float(strategy_config.get("max_chase_pct", 0.0) or 0.0)
@@ -66,6 +68,44 @@ def apply_chasing_guard(ctx: SignalContext) -> dict | None:
 
     if ema_dist_pct > max_chase_pct:
         return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chasing Guard ({ema_dist_pct:.3%}>{max_chase_pct:.3%})", "weights": {}}
+
+    # Near-extreme guard: block BUY near 20c high, SELL near 20c low
+    extreme_lookback = strategy_config.get("chase_recent_extreme_lookback")
+    if extreme_lookback is None:
+        extreme_lookback = 20
+    else:
+        extreme_lookback = int(extreme_lookback)
+
+    near_extreme_pct = strategy_config.get("chase_near_extreme_pct")
+    if near_extreme_pct is None:
+        near_extreme_pct = 0.0025
+    else:
+        near_extreme_pct = float(near_extreme_pct)
+
+    if near_extreme_pct > 0 and action in {"BUY", "SELL"} and len(df_indicators) >= extreme_lookback:
+        recent_ext = df_indicators.tail(extreme_lookback)
+        if action == "BUY":
+            recent_high = float(recent_ext["high"].max())
+            if current_price >= recent_high * (1 - near_extreme_pct):
+                return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Near-Extreme Guard: BUY too close to {extreme_lookback}c high (${recent_high:.3f})", "weights": {}}
+        elif action == "SELL":
+            recent_low = float(recent_ext["low"].min())
+            if current_price <= recent_low * (1 + near_extreme_pct):
+                return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Near-Extreme Guard: SELL too close to {extreme_lookback}c low (${recent_low:.3f})", "weights": {}}
+
+    # Block entries after extended uninterrupted run (price already exhausted)
+    max_consec = int(strategy_config.get("max_consecutive_candles_chase", 4) or 4)
+    if action in {"BUY", "SELL"} and len(df_indicators) >= max_consec:
+        recent = df_indicators.tail(max_consec)
+        if action == "BUY":
+            all_green = all(recent['close'].values[i] >= recent['open'].values[i] for i in range(max_consec))
+            if all_green:
+                return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chase Guard: {max_consec} consecutive green candles — wait for pullback", "weights": {}}
+        elif action == "SELL":
+            all_red = all(recent['close'].values[i] <= recent['open'].values[i] for i in range(max_consec))
+            if all_red:
+                return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chase Guard: {max_consec} consecutive red candles — wait for bounce", "weights": {}}
+
     return None
 
 
@@ -85,6 +125,15 @@ def apply_adx_range_filter(ctx: SignalContext) -> dict | None:
     adx_value = ctx.get('adx_value', 0.0)
     total_score = ctx.get('total_score', 0.0)
     if adx_value < 15:
+        # S/R edge bounce entries are valid in ranging markets — skip block when at the walls
+        support = ctx.get('support')
+        resistance = ctx.get('resistance')
+        current_price = ctx['current_price']
+        range_action_zone_pct = float(ctx.get('range_action_zone_pct', 0.20) or 0.20)
+        if support and resistance:
+            zone = (float(resistance) - float(support)) * range_action_zone_pct
+            if current_price <= float(support) + zone or current_price >= float(resistance) - zone:
+                return None
         return {"action": "HOLD", "score": total_score, "confidence": min(abs(total_score), 1.0), "reason": f"Ranging market (ADX:{adx_value:.0f}<15)", "weights": {}}
     return None
 

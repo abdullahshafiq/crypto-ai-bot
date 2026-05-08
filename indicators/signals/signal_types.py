@@ -104,10 +104,11 @@ class QuantSignal(TypedDict):
     # ── Pivots ───────────────────────────────────────────────────
     pivot_classic: NotRequired[dict]        # Classic pivot levels dict
 
-    # ── Setup overrides (set by stops.py) ─────────────────────────
+    # ── Setup overrides (set by stops.py / trend.py) ──────────────
     mean_reversion: NotRequired[SetupInfo]  # MR setup details
     wick_sweep: NotRequired[SetupInfo]     # Wick sweep setup details
     entry: NotRequired[float]              # Entry price override
+    article_sl_override: NotRequired[float | None]  # SL override from article/ORB setup (builder.py)
 
     # ── Weights (only in "Warming Up" early return) ───────────────
     weights: NotRequired[dict]             # Indicator weights dict

@@ -37,6 +37,7 @@ def _build_core_context(ctx: SignalContext) -> dict | None:
         current_price,
         mtf_context=ctx.get('mtf_context'),
         pivot_data=ctx.get('pivot_data'),
+        max_sl_pct=float(strategy_config.get('max_structural_sl_pct', 0.012)),
     )
     ctx['support'] = support
     ctx['resistance'] = resistance

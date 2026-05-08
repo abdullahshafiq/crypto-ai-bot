@@ -14,7 +14,6 @@ from .helpers import (
     get_trend_status, get_volatility_status, get_momentum_status,
     get_structural_status, calculate_indicators, get_quant_signal,
     _detect_momentum_exhaustion, _body_range_ratio_score,
-    compute_advanced_pivots,
 )
 
 __all__ = [

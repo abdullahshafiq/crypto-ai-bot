@@ -1,6 +1,10 @@
 # CLAUDE.md
 
+@.clinerules/caveman.md
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> ⚠️ See **AGENTS.md** for canonical architecture map, edit recipes, and TypedDict references. This file is supplementary.
 
 ## Quick Start
 

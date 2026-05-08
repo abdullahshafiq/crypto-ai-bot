@@ -141,5 +141,3 @@ BOT_CONFIG=other.yaml python main.py  → custom config
 - **`from __future__ import annotations`**: required in all files importing TypedDicts from `ctx.py`, `state_types.py`, `signal_types.py`, or `schema.py` to avoid circular import issues.
 
 → [`docs/bot_context.md`](docs/bot_context.md) for API details and operational notes.
-
-@RTK.md

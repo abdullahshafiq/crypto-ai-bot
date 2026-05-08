@@ -53,28 +53,7 @@ def _body_range_ratio_score(df: pd.DataFrame, lookback: int = 3) -> float:
     if conviction <= 0.0:
         return 0.0
     return float(np.clip(direction * conviction, -1.0, 1.0))
-def compute_advanced_pivots(df: pd.DataFrame) -> dict:
-    """
-    MASTER RECONSTRUCTION: Calculates institutional pivot points.
-    Includes Classic, Woodie, and Camarilla levels for the 725-line version.
-    """
-    if df is None or len(df) < 2: return {}
 
-    # Use previous day/period for levels
-    prev = df.iloc[-2]
-    high, low, close = prev['high'], prev['low'], prev['close']
-
-    pp = (high + low + close) / 3
-    r1 = (2 * pp) - low
-    s1 = (2 * pp) - high
-    r2 = pp + (high - low)
-    s2 = pp - (high - low)
-
-    return {
-        'pp': pp, 'r1': r1, 's1': s1, 'r2': r2, 's2': s2,
-        'classic': {'pp': pp, 'r1': r1, 's1': s1, 'r2': r2, 's2': s2}
-    }
-    return signal, True
 def get_trend_status(df: pd.DataFrame) -> str:
     """
     MASTER RECONSTRUCTION: Detailed Trend Analysis.

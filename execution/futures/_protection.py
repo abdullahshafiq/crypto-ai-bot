@@ -51,8 +51,8 @@ class ProtectionMixin:
 
         order_side = 'SELL' if side == 'LONG' else 'BUY'
         callback_rate_pct = float(getattr(self, 'trailing_stop_callback', 0.005)) * 100
-        activation_pct = float(pos.get('native_trailing_activation_pct', pos.get('break_even_trigger_pct', 0.0020)) or 0.0020)
-        activation_pct = max(0.0020, activation_pct)
+        activation_pct = float(pos.get('native_trailing_activation_pct', pos.get('break_even_trigger_pct', 0.0008)) or 0.0008)
+        activation_pct = max(float(getattr(self, 'break_even_trigger_pct', 0.0008)), activation_pct)
         activation_price = entry_price * (1 + activation_pct) if side == 'LONG' else entry_price * (1 - activation_pct)
 
         existing_id = str(pos.get('native_trailing_order_id') or '')

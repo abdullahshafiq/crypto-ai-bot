@@ -130,6 +130,7 @@ def _make_strategy_config(**overrides):
         "spread_max_pct": 0.005,
         "low_vol_min_score": 0.15,
         "chase_max_dist_pct": 0.003,
+        "chase_near_extreme_pct": 0.0,
         "midrange_min_score": 0.28,
         "session_block_min_score": 0.35,
     }
@@ -260,6 +261,7 @@ class TestChasingGuard:
             "strategy_config": {"chase_max_dist_pct": 0.003},
             "current_price": 100.0,
             "latest_indicators": _make_latest_indicators(ema_9=99.0),
+            "df_indicators": _make_df(),
             "ema_21": 100.0,
             "ema_9": 99.0,
             "atr_pct_now": 0.005,
@@ -272,12 +274,13 @@ class TestChasingGuard:
 
     def test_no_chase_returns_none(self):
         ctx: SignalContext = {
-            "state": {"price": 100.0, "bid": 99.99, "ask": 100.01, "spread_pct": 0.0002},
-            "strategy_config": {"chase_max_dist_pct": 0.003},
-            "current_price": 100.0,
-            "latest_indicators": _make_latest_indicators(ema_9=99.99),
-            "ema_21": 100.0,
-            "ema_9": 99.99,
+            "state": {"price": 95.0, "bid": 94.99, "ask": 95.01, "spread_pct": 0.0002},
+            "strategy_config": {"chase_max_dist_pct": 0.003, "chase_near_extreme_pct": 0.0},
+            "current_price": 95.0,
+            "latest_indicators": _make_latest_indicators(ema_9=94.99),
+            "df_indicators": _make_df(),
+            "ema_21": 95.0,
+            "ema_9": 94.99,
             "atr_pct_now": 0.005,
             "mtf_fast_bias": "NEUTRAL",
             "mtf_fast_score": 0.0,
@@ -315,6 +318,7 @@ class TestADXRangeFilter:
         ctx: SignalContext = {
             "latest_indicators": {"adx": 10.0, "atr_pct": 0.5},
             "adx_value": 10.0,
+            "current_price": 100.0,
             "total_score": 0.01,
             "action": "BUY",
             "hold_reason": "",
