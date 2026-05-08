@@ -223,7 +223,7 @@ intervals:
 ai:
   enabled: true
   model: "gpt-4o-mini"
-  overlay_enabled: true
+  overlay_enabled: false
   overlay_refresh_seconds: 300   # refresh overlay every 5 min
   trade_gate_enabled: true       # enable AI gate — fewer trades, worth the latency
   trade_gate_min_interval: 300

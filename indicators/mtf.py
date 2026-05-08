@@ -84,19 +84,18 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
     macd_bull = (macd_val > macd_sig) and momentum_rising
     macd_bear = (macd_val < macd_sig) and not momentum_rising
 
-    # SUPER HIGH SENSITIVITY: Use EMA 3 to detect reversals before they happen
-    ema_fast_3 = ta.trend.ema_indicator(df['close'], window=3).iloc[-1]
+    price_bull = current_price > ema_9
+    price_bear = current_price < ema_9
 
-    price_bull = current_price > ema_fast_3
-    price_bear = current_price < ema_fast_3
+    # 2-of-3 vote: EMA stack, MACD momentum, price vs EMA9
+    bull_votes = int(ema_bull) + int(macd_bull) + int(price_bull)
+    bear_votes = int(not ema_bull) + int(macd_bear) + int(price_bear)
 
-    # Trend is BULL only if EMA is aligned AND MACD is aligned AND Price is holding above EMA 9
-    if ema_bull and macd_bull and price_bull:
+    if bull_votes >= 2:
         trend = "BULL"
-    elif not ema_bull and macd_bear and price_bear:
+    elif bear_votes >= 2:
         trend = "BEAR"
     else:
-        # If price is below EMA 9 on 15m, we are NEUTRAL even if EMAs are stacked (High Sensitivity)
         trend = "NEUTRAL"
 
     structure_state = "NEUTRAL"
@@ -114,10 +113,13 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
         elif last_swing_low > prev_swing_low:
             structure_state = "HIGHER_LOW"
 
+    _win20 = min(20, len(df))
     return {
         "trend": trend,
         "support_levels": all_supports,
         "resistance_levels": all_resistances,
+        "recent_low_20": float(df['low'].rolling(window=_win20).min().iloc[-1]),
+        "recent_high_20": float(df['high'].rolling(window=_win20).max().iloc[-1]),
         "s_dist": f"{s_dist:+.1f}%",
         "r_dist": f"{r_dist:+.1f}%",
         "rsi_14": float(rsi_series.iloc[-1]),
@@ -135,12 +137,37 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
         "structure": structure_state,
     }
 
-def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivot_data: dict = None) -> tuple:
+def _tighten_level(current_price: float, confirmed, candidate, is_support: bool, max_sl_pct: float):
+    """Return candidate if swing is too far and candidate is closer. Otherwise None."""
+    if confirmed is None or candidate is None:
+        return None
+    try:
+        cand = float(candidate)
+        if is_support:
+            if cand >= current_price:
+                return None
+            confirmed_d = (current_price - float(confirmed)) / current_price
+            cand_d = (current_price - cand) / current_price
+        else:
+            if cand <= current_price:
+                return None
+            confirmed_d = (float(confirmed) - current_price) / current_price
+            cand_d = (cand - current_price) / current_price
+        if confirmed_d > max_sl_pct and 0 < cand_d < confirmed_d:
+            return cand
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivot_data: dict = None, max_sl_pct: float = 0.012) -> tuple:
     """Return structural support/resistance prioritizing 5m chart swings.
 
     5m swings give wider, more meaningful levels that allow room for profit booking.
     Fallback order: 5m → 15m → 1h → 4h → daily pivots → 3m.
     For each source, we pick the NEAREST level on the correct side of price.
+    If the confirmed swing is farther than max_sl_pct, tightens using recent 20-candle
+    extremes from 5m/15m so fresh session levels (e.g. recent bounce highs) aren't missed.
     """
     def _extract_levels(levels_list, side):
         """Extract valid float levels on the correct side of price."""
@@ -223,5 +250,11 @@ def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivo
         if resistance is None:
             candidates = _extract_levels(tf_data.get("resistance_levels"), "resistance")
             resistance = _pick_nearest(candidates, "resistance")
+
+    if isinstance(mtf_context, dict):
+        for _tf in ["5m", "15m"]:
+            _tfd = mtf_context.get(_tf) or {}
+            support = _tighten_level(current_price, support, _tfd.get("recent_low_20"), True, max_sl_pct) or support
+            resistance = _tighten_level(current_price, resistance, _tfd.get("recent_high_20"), False, max_sl_pct) or resistance
 
     return support, resistance

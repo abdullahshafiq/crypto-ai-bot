@@ -5,6 +5,7 @@ import logging
 import copy
 import pandas as pd
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -30,6 +31,20 @@ from core.startup import (
     _startup_symbol_candidates,
     _reapply_runtime_executor_config,
     setup_logging,
+)
+from core.signal_gates import (
+    compute_loss_tilt_override,
+    apply_loss_tilt_pause,
+    apply_scalp_hold_guard,
+    apply_confidence_floor,
+    apply_reward_risk_gate,
+    format_gate_trace,
+)
+from core.ai_gates import (
+    apply_ai_overlay,
+    apply_ai_trade_gate,
+    apply_regime_veto,
+    dispatch_entry,
 )
 from ui.terminal import print_dashboard, YELLOW, BOLD, RESET
 from ui.windows_vt import (
@@ -237,9 +252,10 @@ def run_hybrid_bot():
 
     if auto_learning_enabled:
         logger.info("Auto-learning: session-only mode — weights start from defaults, no historical CSV data.")
-        if os.path.exists(os.path.join(os.path.dirname(__file__) or ".", "weights.json")):
+        _ml_weights = os.path.join(os.path.dirname(__file__) or ".", "..", "ml", "weights.json")
+        if os.path.exists(_ml_weights):
             try:
-                os.remove(os.path.join(os.path.dirname(__file__) or ".", "weights.json"))
+                os.remove(_ml_weights)
                 logger.info("Auto-learning: cleared stale weights.json for fresh session start.")
             except Exception:
                 pass
@@ -337,13 +353,36 @@ def run_hybrid_bot():
             if ticks == 1 or ticks % indicator_refresh_interval == 0:
                 logger.info("Refreshing macro indicators...")
                 status("Refreshing indicators/MTF")
-                # Main execution OHLCV (always use bot's execution timeframe)
-                new_df = _runtime_fetch_ohlcv(market, symbol, cfg['timeframe'], 200, paper_mode=paper_mode, logger=logger)
-                macro_df = _runtime_fetch_ohlcv(market, symbol, cfg.get('macro_timeframe', '1h'), 100, paper_mode=paper_mode, logger=logger)
 
-                # Chart-specific OHLCV update (use dashboard's selected timeframe)
+                # Build the list of OHLCV fetches to run in parallel
+                need_pivots = time.time() - last_pivot_refresh_ts >= 900 or not pivot_data
+                mtf_enabled = mtf_cfg.get("enabled", False)
+                mtf_timeframes = mtf_cfg.get("timeframes", ["15m", "3h", "4h"]) if mtf_enabled else []
+
+                fetch_tasks = {"main": (cfg['timeframe'], 200), "chart": (ui_tf, 5)}
+                if need_pivots:
+                    fetch_tasks["pivot"] = ("1d", 5)
+                for tf in mtf_timeframes:
+                    fetch_tasks[f"mtf_{tf}"] = (tf, 200)
+
+                def _fetch_one(key, tf, limit):
+                    return key, _runtime_fetch_ohlcv(market, symbol, tf, limit, paper_mode=paper_mode, logger=logger)
+
+                fetched = {}
+                with ThreadPoolExecutor(max_workers=min(len(fetch_tasks), 8)) as pool:
+                    futures = {pool.submit(_fetch_one, k, tf, lim): k for k, (tf, lim) in fetch_tasks.items()}
+                    for fut in as_completed(futures):
+                        try:
+                            key, df = fut.result()
+                            fetched[key] = df
+                        except Exception as e:
+                            logger.warning(f"Parallel OHLCV fetch error: {e}")
+
+                new_df = fetched.get("main", pd.DataFrame())
+
+                # Chart update
                 try:
-                    chart_update_df = _runtime_fetch_ohlcv(market, symbol, ui_tf, 5, paper_mode=paper_mode, logger=logger)
+                    chart_update_df = fetched.get("chart", pd.DataFrame())
                     if not chart_update_df.empty:
                         seen_times = {b["time"] for b in chart_bars}
                         for _, row in chart_update_df.iterrows():
@@ -359,9 +398,10 @@ def run_hybrid_bot():
                 except Exception as e:
                     logger.warning(f"Chart periodic update failed: {e}")
 
-                if mtf_cfg.get("enabled", False):
-                    for tf in mtf_cfg.get("timeframes", ["15m", "3h", "4h"]):
-                        htf_df = _runtime_fetch_ohlcv(market, symbol, tf, 200, paper_mode=paper_mode, logger=logger)
+                # MTF context
+                if mtf_enabled:
+                    for tf in mtf_timeframes:
+                        htf_df = fetched.get(f"mtf_{tf}", pd.DataFrame())
                         if htf_df.empty:
                             status(f"MTF {tf}: fetch failed")
                             continue
@@ -377,10 +417,10 @@ def run_hybrid_bot():
                     df_indicators = calculate_base_indicators(new_df)
                     latest_indicators = (df_indicators.iloc[-2] if len(df_indicators) > 1 else df_indicators.iloc[-1]).to_dict()
 
-                # Refresh Advanced Pivot Points from daily OHLCV (every 15 min)
-                if time.time() - last_pivot_refresh_ts >= 900 or not pivot_data:
+                # Pivot points (fetched in parallel above if needed)
+                if need_pivots:
                     try:
-                        daily_df = _runtime_fetch_ohlcv(market, symbol, '1d', 5, paper_mode=paper_mode, logger=logger)
+                        daily_df = fetched.get("pivot", pd.DataFrame())
                         if not daily_df.empty and len(daily_df) >= 2:
                             pivot_data = compute_advanced_pivots(daily_df)
                             last_pivot_refresh_ts = time.time()
@@ -572,41 +612,20 @@ def run_hybrid_bot():
 
             runtime_strategy_config = dict(strategy_config)
             base_min_conf = float(runtime_strategy_config.get("min_conf", 0.15) or 0.15)
-            if requested_exec_mode == "paper":
-                paper_min_conf = float(exec_cfg.get("paper_min_conf", base_min_conf) or base_min_conf)
-                runtime_strategy_config["min_conf"] = max(base_min_conf, paper_min_conf, 0.15)
-            else:
-                runtime_strategy_config["min_conf"] = max(base_min_conf, 0.15)
+            runtime_strategy_config["min_conf"] = max(base_min_conf, 0.15)
             runtime_strategy_config["entry_min_confidence_hard"] = max(
                 float(runtime_strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
                 0.20,
             )
             closed_snapshot = list(getattr(executor, "closed_trades", []) or [])[-10:]
             consec_losses = _count_consecutive_losses(closed_snapshot)
-            tilt_min_losses = max(1, int(strategy_config.get("loss_tilt_min_losses", 3) or 3))
-            tilt_pause_losses = max(tilt_min_losses + 1, int(strategy_config.get("loss_tilt_pause_losses", 5) or 5))
-            tilt_pause_minutes = max(1, int(strategy_config.get("loss_tilt_pause_minutes", 15) or 15))
-            if consec_losses >= tilt_min_losses:
-                loss_tilt_depth = max(0, consec_losses - tilt_min_losses)
-                runtime_strategy_config["min_conf"] = max(
-                    base_min_conf,
-                    min(0.25, base_min_conf + 0.04 + (0.02 * loss_tilt_depth)),
-                )
-                runtime_strategy_config["entry_min_confidence_hard"] = max(
-                    float(runtime_strategy_config.get("entry_min_confidence_hard", 0.20) or 0.20),
-                    0.25,
-                )
-                runtime_strategy_config["midrange_min_score"] = max(
-                    float(runtime_strategy_config.get("midrange_min_score", 0.28) or 0.28),
-                    0.32,
-                )
-                runtime_strategy_config["session_block_min_score"] = max(
-                    float(runtime_strategy_config.get("session_block_min_score", 0.35) or 0.35),
-                    0.35,
-                )
-            if consec_losses >= tilt_pause_losses and consec_losses > loss_tilt_last_count:
-                loss_tilt_pause_until = max(loss_tilt_pause_until, time.time() + float(tilt_pause_minutes * 60))
-            loss_tilt_last_count = consec_losses
+            tilt_result = compute_loss_tilt_override(consec_losses, base_min_conf, strategy_config)
+            runtime_strategy_config.update(tilt_result["overrides"])
+            if tilt_result["pauses"]["should_pause"]:
+                loss_tilt_pause_until = max(loss_tilt_pause_until, tilt_result["pauses"]["tilt_pause_until"])
+                loss_tilt_last_count = consec_losses
+            else:
+                loss_tilt_last_count = consec_losses
 
             signal_df = df_indicators.iloc[:-1] if (df_indicators is not None and len(df_indicators) > 1) else df_indicators
 
@@ -621,45 +640,28 @@ def run_hybrid_bot():
                     pivot_data=pivot_data,
                 )
 
-            if time.time() < loss_tilt_pause_until and signal.get("action") in {"BUY", "SELL"}:
-                signal["action"] = "HOLD"
-                signal["hold_reason"] = f"Consecutive loss tilt: {tilt_pause_minutes}m entry pause"
-                signal["reason"] = f"{signal.get('reason','')} LOSS_TILT_PAUSE"
+            signal = apply_loss_tilt_pause(signal, loss_tilt_pause_until)
 
-            # MAIN FIX 3: Scalp hold guard — prevent reversals immediately after entry.
-            # Without this, the bot enters a trade then gets a reversal signal on the very
-            # next tick (1s) and flips, paying double fees for zero move.
-            _scalp_min_hold = float(exec_cfg.get("scalp_min_hold_seconds", 30) or 30)
-            _active_pos = getattr(executor, "active_positions", [])
-            if _active_pos and signal.get("action") in {"BUY", "SELL"}:
-                _pos_entry_ts = float(_active_pos[0].get("entry_ts", 0.0) or 0.0)
-                _pos_age = time.time() - _pos_entry_ts
-                _pos_side = str(_active_pos[0].get("side", "")).upper()
-                _is_reversal_signal = (
-                    (_pos_side == "LONG" and signal["action"] == "SELL") or
-                    (_pos_side == "SHORT" and signal["action"] == "BUY")
-                )
-                if _is_reversal_signal and _pos_age < _scalp_min_hold:
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = f"Scalp hold guard: {int(_scalp_min_hold - _pos_age)}s remaining before reversal allowed"
-                    signal["reason"] = f"{signal.get('reason','')} SCALP_HOLD_GUARD"
+            signal = apply_scalp_hold_guard(signal, executor, exec_cfg)
 
-            # SIGNAL SMOOTHING: Simplified for faster scalp entry.
             raw_score = float(signal.get('score', 0.0) or 0.0)
             signal_history.append(raw_score)
-            avg_score = sum(signal_history) / len(signal_history)
 
-            # Apply the score and confidence
-            signal['score'] = raw_score # Use raw tick for speed
+            signal['score'] = raw_score
             signal['confidence'] = abs(max(-1.0, min(1.0, raw_score)))
 
-            # MAIN FIX 4: Only apply confidence floor to active signals (not already-HOLD signals).
-            # Recalculating confidence for HOLDs was creating phantom "weak confidence"
-            # hold_reasons that masked the real reason the signal was blocked.
             min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.10))
-            if signal.get("action") in {"BUY", "SELL"} and signal['confidence'] < min_conf_floor:
-                signal['action'] = "HOLD"
-                signal['hold_reason'] = f"Weak confidence ({signal['confidence']:.1%} < {min_conf_floor:.0%})"
+            signal = apply_confidence_floor(signal, min_conf_floor)
+
+            hard_min = float(runtime_strategy_config.get("entry_min_confidence_hard", 0.0) or 0.0)
+            if hard_min > 0.0 and signal.get("action") in {"BUY", "SELL"}:
+                if abs(raw_score) < hard_min:
+                    signal["action"] = "HOLD"
+                    signal["hold_reason"] = f"Hard score gate ({abs(raw_score):.2f} < {hard_min:.2f})"
+
+            min_rr = float(runtime_strategy_config.get("min_reward_risk", 0.0) or 0.0)
+            if min_rr > 0.0:
+                signal = apply_reward_risk_gate(signal, min_rr)
 
             sig_str = f"Signal: {signal.get('action','?')} conf={float(signal.get('confidence',0.0) or 0.0):.1%} Reason: {signal.get('reason','N/A')}"
             if sig_str != last_reported_signal:
@@ -668,35 +670,8 @@ def run_hybrid_bot():
                 last_reported_signal = sig_str
 
             if signal.get("action") == "HOLD":
-                gate_notes = []
-                hold_reason = str(signal.get("hold_reason", "") or "")
-                if hold_reason:
-                    gate_notes.append(hold_reason)
-                if bool(signal.get("sr_wall_locked", False)):
-                    gate_notes.append("SR_WALL_LOCK")
-                rejection = signal.get("rejection_confirmation")
-                if isinstance(rejection, dict):
-                    if not bool(rejection.get("confirmed", True)):
-                        rejection_reason = str(rejection.get("reason", "") or "")
-                        if len(rejection_reason) > 48:
-                            rejection_reason = rejection_reason[:45] + "..."
-                        gate_notes.append(f"REJECTION:{rejection_reason}")
-                    elif rejection.get("mode"):
-                        gate_notes.append(f"REJECTION_OK:{str(rejection.get('mode', ''))[:16]}")
-                if time.time() < loss_tilt_pause_until:
-                    gate_notes.append("LOSS_TILT_PAUSE")
-                if bool(ai_overlay_state.get("avoid_new_entries", False)):
-                    gate_notes.append("AI_NO_NEW_ENTRIES")
-                min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.05))
-                if float(signal.get("confidence", 0.0) or 0.0) < min_conf_floor:
-                    gate_notes.append(f"CONF<{min_conf_floor:.2f}")
-                if bool(is_paused):
-                    gate_notes.append("PAUSED")
-
-                if gate_notes:
-                    gate_text = " | ".join(gate_notes)
-                    if len(gate_text) > 160:
-                        gate_text = gate_text[:157] + "..."
+                gate_text = format_gate_trace(signal, ai_overlay_state, is_paused, runtime_strategy_config, loss_tilt_pause_until)
+                if gate_text:
                     signal["gate_trace"] = gate_text
                     gate_msg = f"Gate: {gate_text}"
                     if gate_msg != last_reported_status:
@@ -705,157 +680,20 @@ def run_hybrid_bot():
                         last_reported_status = gate_msg
 
             if bool(ai_overlay_cfg.get("enabled", False)):
-                overlay_bias = str(ai_overlay_state.get("bias", "NEUTRAL") or "NEUTRAL").upper()
-                overlay_risk = str(ai_overlay_state.get("risk_mode", "NORMAL") or "NORMAL").upper()
-                overlay_avoid = bool(ai_overlay_state.get("avoid_new_entries", False))
-                overlay_hold_minutes = int(ai_overlay_state.get("max_hold_minutes", 0) or 0)
-                overlay_note = str(ai_overlay_state.get("rationale", "") or "")[:120]
+                signal = apply_ai_overlay(signal, ai_overlay_state, executor, symbol, status)
 
-                # AI EMERGENCY EXIT: If we are counter-trend to AI Bias, liquidation is mandatory
-                active_positions = getattr(executor, 'active_positions', [])
-                if active_positions:
-                    current_pos = active_positions[0]
-                    if overlay_bias == "SHORT_ONLY" and current_pos['side'] == "LONG":
-                        signal["action"] = "HOLD"
-                        status("AI EMERGENCY: Liquidating LONG (Bias: SHORT_ONLY)")
-                        executor.close_all_positions(symbol)
-                    elif overlay_bias == "LONG_ONLY" and current_pos['side'] == "SHORT":
-                        signal["action"] = "HOLD"
-                        status("AI EMERGENCY: Liquidating SHORT (Bias: LONG_ONLY)")
-                        executor.close_all_positions(symbol)
-
-                if overlay_avoid and signal.get("action") in {"BUY", "SELL"}:
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = "AI overlay: no new entries"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay] {overlay_note}"
-                elif overlay_bias == "LONG_ONLY" and signal.get("action") == "SELL":
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay Soft Bias] {overlay_note}"
-                elif overlay_bias == "SHORT_ONLY" and signal.get("action") == "BUY":
-                    signal["reason"] = f"{signal.get('reason','')} [AI Overlay Soft Bias] {overlay_note}"
-
-                if signal.get("action") in {"BUY", "SELL"} and overlay_hold_minutes > 0:
-                    signal["hold_until_ts"] = time.time() + (overlay_hold_minutes * 60)
-
-            # Legacy trade-gating AI (evaluates each BUY/SELL before execution)
-            if ai_trade_cfg.get("enabled", False) and signal.get("action") in {"BUY", "SELL"}:
-                now = time.time()
-                ai_resp = None
-                use_cached = False
-                max_hold_minutes = int(ai_trade_cfg.get("max_hold_minutes", 60))
-                on_error = str(ai_trade_cfg.get("on_error", "allow")).strip().lower()
-                current_pos = executor.active_positions[0] if getattr(executor, "active_positions", []) else None
-                is_reversal = False
-                if isinstance(current_pos, dict):
-                    if (signal["action"] == "BUY" and current_pos.get("side") == "SHORT") or (signal["action"] == "SELL" and current_pos.get("side") == "LONG"):
-                        is_reversal = True
-                    else:
-                        # We already have a position in this direction, don't ask AI again
-                        pass
-
-                # SKIP AI evaluation if we are already in the right direction
-                should_skip_ai = False
-                if current_pos and not is_reversal:
-                    should_skip_ai = True
-
-                if not should_skip_ai:
-                    min_ivl = int(ai_trade_cfg.get("min_interval_seconds", 30))
-                    # ULTRA-SIMPLE KEY: Only the action matters. Don't re-ask if signal hasn't flipped.
-                    key = str(signal.get("action"))
-                    use_cached = (last_ai_trade_key == key) and (last_ai_trade_resp is not None) and ((now - last_ai_trade_ts) < float(min_ivl))
-
-                    if use_cached:
-                        ai_resp = last_ai_trade_resp
-                    else:
-                        status("Asking AI to evaluate trade...")
-                        ai_model_trade = str(ai_trade_cfg.get("model", ai_model))
-
-                        ctx = {
-                            "symbol": symbol,
-                            "mode": getattr(executor, "label", ""),
-                            "proposed_action": signal.get("action"),
-                            "is_reversal": is_reversal,
-                            "price": state.get("price"),
-                            "spread_pct": state.get("spread_pct"),
-                            "ret_30s": state.get("ret_30s"),
-                            "signal": {
-                                "score": signal.get("score"),
-                                "confidence": signal.get("confidence"),
-                                "tp": signal.get("tp"),
-                                "sl": signal.get("sl"),
-                                "reason": str(signal.get("reason", ""))[:200],
-                            },
-                            "fees": {
-                                "fee_rate_per_side": getattr(executor, "fee_rate", None),
-                                "fee_slippage_buffer_pct": getattr(executor, "fee_slippage_buffer_pct", None),
-                                "fee_edge_multiplier": getattr(executor, "fee_edge_multiplier", None),
-                            },
-                            "mtf": mtf_context,
-                            "position": current_pos or None,
-                        }
-                        ai_resp = ai_orch.evaluate_trade(ctx, model=ai_model_trade)
-                        last_ai_trade_ts = now
-                        last_ai_trade_key = key
-                        last_ai_trade_resp = ai_resp
-
-                decision = str((ai_resp or {}).get("decision", "ALLOW")).upper()
-                hold_minutes = int((ai_resp or {}).get("hold_minutes", 0) or 0)
-                if hold_minutes < 0:
-                    hold_minutes = 0
-                if hold_minutes > max_hold_minutes:
-                    hold_minutes = max_hold_minutes
-                scalp_friendly = (
-                    signal.get("action") in {"BUY", "SELL"}
-                    and float(signal.get("confidence", 0.0) or 0.0) >= float(runtime_strategy_config.get("min_conf", 0.05))
-                    and not bool(ai_overlay_state.get("avoid_new_entries", False))
-                    and str(ai_overlay_state.get("risk_mode", "NORMAL") or "NORMAL").upper() not in {"HIGH", "EXTREME"}
-                )
-
-                if decision == "VETO":
-                    veto_note = str((ai_resp or {}).get("rationale", "") or "")[:120]
-                    if scalp_friendly:
-                        signal["reason"] = f"{signal.get('reason','')} [AI Soft Veto Ignored] {veto_note}"
-                        if not use_cached and not should_skip_ai:
-                            status("AI: SOFT ALLOW")
-                    else:
-                        signal["action"] = "HOLD"
-                        signal["reason"] = f"{signal.get('reason','')} [AI Veto] {veto_note}"
-                        if not use_cached and not should_skip_ai:
-                            status("AI: VETO")
-                else:
-                    if not use_cached and not should_skip_ai:
-                        status("AI: ALLOW")
-
-                if decision not in {"ALLOW", "VETO"} and on_error == "veto":
-                    signal["action"] = "HOLD"
-                    signal["reason"] = f"{signal.get('reason','')} [AI Error Veto]"
+            signal, last_ai_trade_ts, last_ai_trade_key, last_ai_trade_resp = apply_ai_trade_gate(
+                signal, ai_orch, ai_trade_cfg, ai_model, executor, state, mtf_context,
+                runtime_strategy_config, ai_overlay_state, last_ai_trade_ts, last_ai_trade_key,
+                last_ai_trade_resp, symbol, status,
+            )
 
             if signal['action'] != "HOLD":
-                # Regime Vetoes
-                if is_ai_enabled:
-                    if regime == "BEARISH" and signal['action'] == "BUY":
-                        signal['reason'] += " [AI Regime Soft Bias: Bearish]"
-                    elif regime == "BULLISH" and signal['action'] == "SELL":
-                        signal['reason'] += " [AI Regime Soft Bias: Bullish]"
-                    elif regime == "VOLATILE":
-                        signal['reason'] += " [AI Regime Caution: Volatile]"
+                signal = apply_regime_veto(signal, is_ai_enabled, regime)
 
                 # Re-check action after vetoes
             if not is_paused and signal['action'] != "HOLD":
-                    entry_style = str(ai_overlay_state.get('entry_style', 'MIXED')).upper()
-                    target_price = float(signal.get('entry', state['price']) or state['price'])
-
-                    if entry_style == "BUY_PULLBACKS" and signal['action'] == "BUY":
-                        target_price = min(target_price, state['price'] * 0.999)
-                    elif entry_style == "SELL_RALLIES" and signal['action'] == "SELL":
-                        target_price = max(target_price, state['price'] * 1.001)
-
-                    # Structural Take Profit Interception
-                    if signal['action'] == "BUY" and signal.get("structure_resistance"):
-                        signal["tp_target"] = float(signal["structure_resistance"]) * 0.999
-                    elif signal['action'] == "SELL" and signal.get("structure_support"):
-                        signal["tp_target"] = float(signal["structure_support"]) * 1.001
-
-                    executor.place_limit_order(signal, symbol, target_price)
+                dispatch_entry(signal, ai_overlay_state, state, executor, symbol)
 
             curr_status = str(getattr(executor, 'last_status', '') or "")
             if curr_status != last_reported_status:
