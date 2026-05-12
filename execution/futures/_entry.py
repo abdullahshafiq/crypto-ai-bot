@@ -371,7 +371,8 @@ class EntryMixin:
             # Determine trade size
             dca_enabled = getattr(self, 'dca_enabled', False)
             configured_trade_usdt = float(getattr(self, 'fixed_trade_usdt', 0.0) or 0.0)
-            balance_based_cap = available_balance * 0.60
+            # Live sizing: keep a 10% reserve and use the rest as the margin budget.
+            balance_based_cap = available_balance * 0.90
             if is_dca:
                 trade_usdt = min(balance_based_cap, available_balance * 0.20)
             elif dca_enabled:

@@ -673,55 +673,7 @@
                 } else {
                     pct = (sl - cp) / (sl - tp) * 100;
                     entryPct = (sl - entryP) / (sl - tp) * 100;
-                  // Interactive Draggable Logic
-        setupGaugeDrags(pos);
-      }
-
-      function setupGaugeDrags(pos) {
-        if (!pos) return;
-        const container = q('posGauge');
-        const bar = container.querySelector('.relative.h-1.5');
-        const groupL = q('gaugeGroupL');
-        const groupR = q('gaugeGroupR');
-        
-        const handleDrag = (e, type) => {
-          e.preventDefault();
-          const rect = bar.getBoundingClientRect();
-          const startX = e.clientX;
-          const startPct = type === 'SL' ? 0 : 100; // Actually they start at ends
-          
-          const onMove = (me) => {
-            let pct = ((me.clientX - rect.left) / rect.width) * 100;
-            pct = Math.max(0, Math.min(100, pct));
-            
-            // Visual Update Only (Real update on Release)
-            const price = pos.sl + (pos.tp_price - pos.sl) * (pct / 100); 
-            // This math is complex because range is dynamic. 
-            // For now, just show visual movement.
-            if (type === 'SL') {
-              groupL.style.left = `${pct}%`;
-              groupL.style.right = 'auto';
-              q('gaugePriceL').textContent = 'RELEASE TO SET';
-            } else {
-              groupR.style.right = `${100 - pct}%`;
-              q('gaugePriceR').textContent = 'RELEASE TO SET';
-            }
-          };
-          
-          const onUp = async (ue) => {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-            // Restore visual or trigger API
-            refresh(); 
-          };
-          
-          window.addEventListener('pointermove', onMove);
-          window.addEventListener('pointerup', onUp);
-        };
-
-        groupL.onpointerdown = (e) => handleDrag(e, 'SL');
-        groupR.onpointerdown = (e) => handleDrag(e, 'TP');
-      }
+                }
                 const bounded = Math.max(0, Math.min(100, pct));
                 const entryBounded = Math.max(0, Math.min(100, entryPct));
                 
@@ -745,6 +697,7 @@
                     prog.style.width = `${entryBounded - bounded}%`;
                     prog.className = 'absolute top-0 bottom-0 bg-gradient-to-l from-rose-500/20 to-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.8)] transition-all duration-500 ease-out rounded-l-full';
                 }
+                setupGaugeDrags(pos);
             }
         } else if (posGauge) {
             posGauge.classList.add('hidden');
@@ -993,6 +946,42 @@
         });
         if (r.ok) { setTimeout(refresh, 500); }
       } catch (err) { console.error('Command Error:', err); }
+    }
+
+    function setupGaugeDrags(pos) {
+      if (!pos) return;
+      const container = q('posGauge');
+      if (!container) return;
+      const bar = container.querySelector('.relative.h-1.5');
+      const groupL = q('gaugeGroupL');
+      const groupR = q('gaugeGroupR');
+      if (!bar || !groupL || !groupR) return;
+      
+      const handleDrag = (e, type) => {
+        e.preventDefault();
+        const rect = bar.getBoundingClientRect();
+        const onMove = (me) => {
+          let pct = ((me.clientX - rect.left) / rect.width) * 100;
+          pct = Math.max(0, Math.min(100, pct));
+          if (type === 'SL') {
+            groupL.style.left = `${pct}%`;
+            groupL.style.right = 'auto';
+            q('gaugePriceL').textContent = 'RELEASE';
+          } else {
+            groupR.style.right = `${100 - pct}%`;
+            q('gaugePriceR').textContent = 'RELEASE';
+          }
+        };
+        const onUp = () => {
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          refresh(); 
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+      };
+      groupL.onpointerdown = (e) => handleDrag(e, 'SL');
+      groupR.onpointerdown = (e) => handleDrag(e, 'TP');
     }
 
     document.addEventListener('DOMContentLoaded', async () => { 
