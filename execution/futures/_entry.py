@@ -123,6 +123,9 @@ class EntryMixin:
                                 existing['trailing_tp_enabled'] = bool(getattr(self, 'trailing_tp_enabled', True))
                                 existing['trailing_tp_giveback_pct'] = float(getattr(self, 'trailing_tp_giveback_pct', 0.12))
                                 existing['trailing_tp_min_peak_pct'] = float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020)))
+                                existing['trailing_tp_keep_ratio'] = float(existing.get('trailing_tp_keep_ratio', 0.0) or 0.0)
+                                existing['trailing_tp_peak_pct'] = float(existing.get('trailing_tp_peak_pct', 0.0) or 0.0)
+                                existing['trailing_tp_floor_pct'] = float(existing.get('trailing_tp_floor_pct', 0.0) or 0.0)
                                 existing['native_trailing_activation_pct'] = float(getattr(self, 'profit_trailing_activation_pct', self.break_even_trigger_pct))
                                 existing['trail_armed'] = bool(existing.get('trail_armed', False))
                                 self._ensure_exchange_stop_loss(existing)
@@ -165,6 +168,9 @@ class EntryMixin:
                             'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
                             'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
                             'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
+                            'trailing_tp_keep_ratio': 0.0,
+                            'trailing_tp_peak_pct': 0.0,
+                            'trailing_tp_floor_pct': 0.0,
                             'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
                             'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
                             'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),
@@ -582,6 +588,9 @@ class EntryMixin:
                 'trailing_tp_enabled': bool(getattr(self, 'trailing_tp_enabled', True)),
                 'trailing_tp_giveback_pct': float(getattr(self, 'trailing_tp_giveback_pct', 0.12)),
                 'trailing_tp_min_peak_pct': float(getattr(self, 'trailing_tp_min_peak_pct', getattr(self, 'profit_trailing_activation_pct', 0.0020))),
+                'trailing_tp_keep_ratio': 0.0,
+                'trailing_tp_peak_pct': 0.0,
+                'trailing_tp_floor_pct': 0.0,
                 'trail_tighten_1_pct': float(self.trail_tighten_1_pct),
                 'trail_tighten_2_pct': float(self.trail_tighten_2_pct),
                 'trail_t1_gap_pct': float(getattr(self, 'trail_t1_gap_pct', 0.0025)),

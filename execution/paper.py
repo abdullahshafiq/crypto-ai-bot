@@ -28,7 +28,7 @@ class PaperFuturesExecution:
         self.label = "PAPER"
         self.cash_usdt = float(starting_balance_usdt)
         self.initial_balance = float(starting_balance_usdt)
-        self.symbol = "BTC/USDT:USDT"
+        self.symbol = "AVAX/USDC:USDC"
         self.symbol_id = _market_id_from_symbol(self.symbol)
         self.leverage = leverage
         self.fee_rate = float(fee_rate)
@@ -707,6 +707,13 @@ class PaperFuturesExecution:
                             closed = True
                             exit_type = "TTL_EXIT"
 
+                    if not closed:
+                        new_sl = _compute_trailing_stop(pos, current_price)
+                        if new_sl > float(pos['sl']):
+                            old_sl = float(pos['sl'])
+                            pos['sl'] = new_sl
+                            logger.info(f"[STRUCTURAL_TRAIL] SL moved {old_sl:.4f} -> {new_sl:.4f} (Support Lock)")
+
                     # STRUCTURAL SL CHECK: price hit stop loss
                     if not closed and current_price <= pos['sl']:
                         closed = True
@@ -784,6 +791,13 @@ class PaperFuturesExecution:
                         elif profit_pct < break_even_trigger:  # not yet locked in profit — cut it
                             closed = True
                             exit_type = "TTL_EXIT"
+
+                    if not closed:
+                        new_sl = _compute_trailing_stop(pos, current_price)
+                        if new_sl < float(pos['sl']):
+                            old_sl = float(pos['sl'])
+                            pos['sl'] = new_sl
+                            logger.info(f"[STRUCTURAL_TRAIL] SL moved {old_sl:.4f} -> {new_sl:.4f} (Resistance Lock)")
 
                     # STRUCTURAL SL CHECK: price hit stop loss
                     if not closed and current_price >= pos['sl']:

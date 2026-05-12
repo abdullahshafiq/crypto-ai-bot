@@ -126,6 +126,24 @@ def _realized_exit_type(exit_type: str, net_pnl: float) -> str:
     return base if float(net_pnl) > 0 else f"{base}_LOSS"
 
 
+def _resolve_trailing_tp_keep_ratio(pos: dict, peak_profit: float) -> float:
+    """Return the fraction of peak profit that should remain locked in."""
+    giveback_pct = max(0.01, min(0.95, float(pos.get("trailing_tp_giveback_pct", 0.12) or 0.12)))
+    keep_ratio = 1.0 - giveback_pct
+
+    tighten_1 = max(0.0, float(pos.get("trail_tighten_1_pct", 0.0025) or 0.0025))
+    tighten_2 = max(tighten_1, float(pos.get("trail_tighten_2_pct", 0.0050) or 0.0050))
+
+    if peak_profit >= tighten_1:
+        keep_ratio = max(keep_ratio, 0.70)
+    if peak_profit >= tighten_2:
+        keep_ratio = max(keep_ratio, 0.80)
+    if peak_profit >= (tighten_2 * 2.0):
+        keep_ratio = max(keep_ratio, 0.88)
+
+    return max(0.05, min(0.95, keep_ratio))
+
+
 def _exchange_flag_true(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -327,8 +345,11 @@ def _trailing_tp_hit(pos: dict, profit_pct: float, min_net_profit: float) -> boo
     if peak_profit < min_peak:
         return False
 
-    giveback_pct = max(0.01, min(0.95, float(pos.get("trailing_tp_giveback_pct", 0.12) or 0.12)))
-    floor_profit = peak_profit * (1.0 - giveback_pct)
+    keep_ratio = _resolve_trailing_tp_keep_ratio(pos, peak_profit)
+    floor_profit = max(float(min_net_profit), peak_profit * keep_ratio)
+    floor_profit = max(float(pos.get("trailing_tp_floor_pct", 0.0) or 0.0), floor_profit)
+    pos["trailing_tp_keep_ratio"] = keep_ratio
+    pos["trailing_tp_peak_pct"] = peak_profit
     pos["trailing_tp_floor_pct"] = floor_profit
     return float(profit_pct) >= float(min_net_profit) and float(profit_pct) <= floor_profit
 
@@ -358,6 +379,7 @@ def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float 
     t2_pct = float(pos.get("trail_tighten_2_pct", 0.0035) or 0.0035)
     fee_rate = float(pos.get("fee_rate", 0.0004) or 0.0004)
     min_profit = float(pos.get("min_profit_after_fees", 0.0002) or 0.0002)
+    trailing_tp_floor_pct = max(0.0, float(pos.get("trailing_tp_floor_pct", 0.0) or 0.0))
 
     t1_gap = float(pos.get("trail_t1_gap_pct", 0.0025) or 0.0025)
     t2_gap = float(pos.get("trail_t2_gap_pct", 0.0020) or 0.0020)
@@ -389,6 +411,11 @@ def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float 
             trail_sl = max(trail_sl, t2_sl)
             stage = "T2"
 
+        if trailing_tp_floor_pct > 0:
+            tp_sl = entry * (1.0 + trailing_tp_floor_pct)
+            trail_sl = max(trail_sl, tp_sl)
+            stage = "TP_LOCK"
+
         trail_sl = min(trail_sl, current_price * (1 - safety_margin))
         pos["trail_stage"] = stage
         return trail_sl
@@ -418,6 +445,11 @@ def _compute_trailing_stop(pos: dict, current_price: float, current_psar: float 
         t2_sl = best_price * (1 + t2_gap)
         trail_sl = min(trail_sl, t2_sl)
         stage = "T2"
+
+    if trailing_tp_floor_pct > 0:
+        tp_sl = entry * (1.0 - trailing_tp_floor_pct)
+        trail_sl = min(trail_sl, tp_sl)
+        stage = "TP_LOCK"
 
     trail_sl = max(trail_sl, current_price * (1 + safety_margin))
     pos["trail_stage"] = stage

@@ -9,7 +9,7 @@
 #   - dashboard stays local
 # =============================================================================
 
-symbol: "AVAX/USDT:USDT"
+symbol: "AVAX/USDC:USDC"
 timeframe: "3m"
 macro_timeframe: "5m"
 
@@ -133,6 +133,8 @@ auto_learning:
     max_weight_shift: 0.12
 
 strategy:
+  timeframe: "3m"
+  candles_per_day: 480
   max_spread: 0.0005
   min_conf: 0.10
   signal_smoothing_ticks: 3
@@ -181,6 +183,9 @@ strategy:
   range_veto_escape_score: 0.90
   range_reversal_min_depth: 0.20
   range_reversal_max_boost: 0.45
+  max_consecutive_candles_chase: 4
+  chase_recent_extreme_lookback: 20
+  chase_near_extreme_pct: 0.0025
   rsi_ob_entry_gate: 72
   rsi_os_entry_gate: 28
   orb_volume_mult: 1.5

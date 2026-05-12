@@ -1,5 +1,7 @@
 import time
 
+import time
+
 import pytest
 
 import execution.paper as paper_module
@@ -100,8 +102,16 @@ def test_long_runner_can_exit_after_partial_tp(tmp_path, monkeypatch):
 
     executor.process_orders_and_positions("BTC/USDT:USDT", 100.7)
     runner_sl = executor.active_positions[0]["sl"]
+    initial_floor = executor.active_positions[0]["trailing_tp_floor_pct"]
+    assert initial_floor > 0
 
-    executor.process_orders_and_positions("BTC/USDT:USDT", runner_sl - 0.01)
+    executor.active_positions[0]["tp_price"] = 0.0
+
+    executor.process_orders_and_positions("BTC/USDT:USDT", 101.5)
+    ratcheted_sl = executor.active_positions[0]["sl"]
+    assert ratcheted_sl > runner_sl
+
+    executor.process_orders_and_positions("BTC/USDT:USDT", ratcheted_sl - 0.01)
 
     assert executor.active_positions == []
     assert executor.trade_count == 1

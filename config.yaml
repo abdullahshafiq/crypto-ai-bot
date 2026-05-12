@@ -5,9 +5,9 @@
 #          Fast entries, tight stops, aggressive trailing. No bag holding.
 # =============================================================================
 
-symbol: "JUP/USDT:USDT"
-timeframe: "15m"
-macro_timeframe: "1h"
+symbol: "AVAX/USDC:USDC"
+timeframe: "3m"
+macro_timeframe: "5m"
 
 # Market data source (spot vs futures)
 data:
@@ -15,11 +15,13 @@ data:
 
 # Execution Settings
 execution:
-  mode: "paper"            # live trading
+  mode: "live"            # live trading
   market: "usdm"
+  trade_log_file: "trade_log_futures.csv"
   paused: false
   close_positions_on_pause: false
   panic_exit: false
+  dynamic_leverage: true
   leverage: 2
   spot_balance_pct: 0.35
   spot_reserve_pct: 0.30
@@ -51,6 +53,7 @@ execution:
   use_exchange_stop_loss: false
   use_exchange_take_profit: false
   market_fallback_on_timeout: true
+  psar_exit_min_streak: 2
   pending_entry_ttl_seconds: 15      # 15s to fill or cancel — fast or nothing
   use_resting_support_orders: true
   resting_entry_ttl_seconds: 300     # 5min resting orders only
@@ -58,6 +61,13 @@ execution:
   resting_entry_offset_pct: 0.0005
   resting_entry_max_distance_pct: 0.0080  # entries within 0.8% only
   trailing_callback_pct: 0.25        # tight trailing callback
+  scale_in_enabled: false
+  scale_in_max_steps: 2
+  scale_in_min_pnl_pct: 0.0020
+  scale_in_cooldown_seconds: 180
+  scale_in_position_pct: 0.5
+  scale_in_max_exposure_pct: 0.50
+  scale_in_wall_buffer_pct: 0.002
   same_side_reentry_cooldown_seconds: 120   # 2min cooldown — re-enter quickly when signal resets
   same_side_reentry_strong_confidence: 0.85
   scalp_min_hold_seconds: 30         # 30s minimum — fast in/out
@@ -87,23 +97,21 @@ leverage:
 # Multi-Timeframe Trend + S/R
 mtf:
   enabled: true
-  timeframes: ["5m", "15m", "1h", "4h"]
+  timeframes: ["1m", "3m", "5m", "10m", "15m", "1h", "4h"]
   min_agree: 2
   require_full_confirmation: false
   strict_veto_on_missing: false
   veto_on_missing: false
-  max_age_seconds: 300         # 5min max age — scalp data must be fresh
-  sr_buffer_pct: 0.0015        # tighter S/R buffer for 15m scalping
+  max_age_seconds: 300
+  sr_buffer_pct: 0.0015
   mode: "hard"
 
-# Terminal UI
 ui:
   mode: "ansi"
   compact: true
   status_lines: 3
   alt_screen: true
 
-# Memory/Log limits
 memory:
   max_closed_trades: 5000
 
@@ -111,7 +119,6 @@ logging:
   max_mb: 5
   backups: 3
 
-# Auto-learning from session trades (no historical data)
 auto_learning:
   enabled: true
   min_completed_trades: 5
@@ -123,114 +130,113 @@ auto_learning:
     model: "deepseek-chat"
     max_weight_shift: 0.12
 
-# Quant Strategy Parameters
 strategy:
-  timeframe: "15m"              # mirror top-level; used by range veto lookback
-  candles_per_day: 96           # 15m × 96 = 24h lookback for range position
-  max_spread: 0.0005            # tight spread — scalping is spread-sensitive
-  min_conf: 0.55                # raise bar — only high-conviction setups
-  signal_smoothing_ticks: 2     # less smoothing — react fast to 15m signals
-  max_ret_30s: 0.0050           # block entry if price moved >0.5% in last 30s
-  max_ret_5s: 0.0025            # block entry if price moved >0.25% in last 5s
+  timeframe: "3m"
+  candles_per_day: 480
+  max_spread: 0.0005
+  min_conf: 0.10
+  signal_smoothing_ticks: 3
+  max_ret_30s: 0.0040
+  max_ret_5s: 0.0018
   block_on_volume_spike: false
   fixed_trade_usdt: 25
-  tp_pct: 0.0120                # 1.20% TP — scaled up to match wider SL (4:1 R/R)
-  sl_pct: 0.0030                # 0.30% SL — wide enough to survive JUP 15m noise
-  max_structural_sl_pct: 0.0120 # cap structural SL at 1.20%
-  min_reward_risk: 3.0          # 4:1 R/R minimum — only high-quality scalps
+  tp_pct: 0.0060
+  sl_pct: 0.0025
+  max_structural_sl_pct: 0.0120
+  min_reward_risk: 0.50
   range_action_zone_pct: 0.20
   wall_veto_zone_pct: 0.12
   support_veto_pct: 0.0010
   resistance_veto_pct: 0.0010
   support_break_pct: 0.0010
   resistance_break_pct: 0.0010
-  max_chase_pct: 0.0020         # tight chase tolerance — don't chase moves
-  max_consecutive_candles_chase: 4  # block entry after N consecutive same-direction candles
-  chase_recent_extreme_lookback: 20  # candles to look back for recent high/low
-  chase_near_extreme_pct: 0.0025    # block BUY within 0.25% of 20c high, SELL within 0.25% of 20c low
-  mtf_neutral_allow_score: 0.55 # higher bar when swing TF is neutral
-  entry_min_confidence_hard: 0.50
-  midrange_min_score: 0.40
+  max_chase_pct: 0.0035
+  mtf_neutral_allow_score: 0.35
+  entry_min_confidence_hard: 0.20
+  midrange_min_score: 0.28
   mtf_rsi_bull_level: 55
   mtf_rsi_bear_level: 45
   mtf_rsi_min_agree: 2
-  vpoc_near_pct: 0.0015
-  vpoc_break_pct: 0.0020
+  vpoc_near_pct: 0.0010
+  vpoc_break_pct: 0.0015
   session_filter_enabled: true
   session_block_hours_utc: []
-  session_block_min_score: 0.45
-  entry_near_resistance_block_pct: 0.0050  # block within 0.5% of resistance
-  entry_near_support_block_pct: 0.0050
-  macd_noise_threshold: 0.0001   # lower floor — catch 15m MACD signals earlier
-  vol_filter_atr_pct: 0.0005
-  vol_filter_atr_max_pct: 0.10
-  low_vol_min_score: 0.55        # need higher score in low-vol environments
+  session_block_min_score: 0.35
+  entry_near_resistance_block_pct: 0.0030
+  entry_near_support_block_pct: 0.0030
+  macd_noise_threshold: 0.00005
+  vol_filter_atr_pct: 0.0001
+  vol_filter_atr_max_pct: 0.08
+  low_vol_min_score: 0.45
   wick_sweep_enabled: true
-  wick_sweep_buffer_pct: 0.0010
-  wick_sweep_reclaim_pct: 0.0005
-  wick_sweep_wick_ratio: 1.5     # 15m wicks are tighter than swing
+  wick_sweep_buffer_pct: 0.0008
+  wick_sweep_reclaim_pct: 0.0002
+  wick_sweep_wick_ratio: 1.6
   wall_reversal_assist: true
-  wall_reversal_score_gate: 0.15
-  wall_breakout_score_gate: 0.20
+  wall_reversal_score_gate: 0.12
+  wall_breakout_score_gate: 0.15
   range_position_veto_enabled: true
-  range_veto_top_pct: 0.80
-  range_veto_bottom_pct: 0.20
-  range_veto_escape_score: 0.75
+  range_veto_top_pct: 0.75
+  range_veto_bottom_pct: 0.25
+  range_veto_escape_score: 0.90
   range_reversal_min_depth: 0.20
   range_reversal_max_boost: 0.45
-  rsi_ob_entry_gate: 75          # block longs above 75 RSI on 15m
-  rsi_os_entry_gate: 25          # block shorts below 25 RSI on 15m
+  max_consecutive_candles_chase: 4
+  chase_recent_extreme_lookback: 20
+  chase_near_extreme_pct: 0.0025
+  rsi_ob_entry_gate: 72
+  rsi_os_entry_gate: 28
   orb_volume_mult: 1.5
-  spread_atr_ratio_max: 0.12
-  ob_midpoint_tolerance_pct: 0.0020
-  anchored_vwap_near_pct: 0.0015
+  sr_wall_veto_enabled: false
+  spread_atr_ratio_max: 0.15
+  ob_midpoint_tolerance_pct: 0.0015
+  anchored_vwap_near_pct: 0.0010
+  aggressive_scalp_enabled: true
+  aggressive_scalp_min_conf: 0.06
+  aggressive_scalp_fee_buffer_pct: 0.0003
   loss_tilt_min_losses: 3
   loss_tilt_pause_losses: 5
-  loss_tilt_pause_minutes: 15    # 15min pause after loss streak — back sooner
+  loss_tilt_pause_minutes: 15
 
-# Rejection confirmation gate
 rejection_confirmation:
   enabled: true
-  min_bars_away: 1               # 1 bar confirmation on 15m = 15min
+  min_bars_away: 2
   macd_threshold: 0.0
-  pullback_pct: 0.003            # require 0.3% pullback before entry
-  require_psar_flip: false       # don't wait for PSAR flip; PSAR trend is enough
+  pullback_pct: 0.002
+  require_psar_flip: true
 
-# Spot settings
 spot:
   mode: "grid"
   max_layers: 3
   layer_quote_pct: 0.20
   reserve_quote_pct: 0.30
-  buy_near_support_pct: 0.0300
-  sell_near_resistance_pct: 0.0050
-  layer_spacing_pct: 0.0080
-  emergency_break_pct: 0.0100
-  min_take_profit_pct: 0.0150
+  buy_near_support_pct: 0.0150
+  sell_near_resistance_pct: 0.0020
+  layer_spacing_pct: 0.0030
+  emergency_break_pct: 0.0040
+  min_take_profit_pct: 0.0035
   min_trail_profit_quote: 0.10
 
-# Risk Limits
 risk:
   daily_loss_cap: 0.10
   disable_loss_cap: false
   max_open_positions: 1
   min_balance_floor: 0.0
 
-# Refresh Intervals (in ticks, 1 tick ≈ 5 seconds on swing)
 intervals:
-  indicator_refresh: 1         # recalc every tick (~1s) — buttery smooth response
-  regime_refresh: 300          # macro regime every 5 min
-  tick_delay_seconds: 1.0      # 1s loop — scalping needs fast polling
+  indicator_refresh: 10
+  regime_refresh: 300
+  tick_delay_seconds: 0.5
 
-# AI Settings (consolidated)
 ai:
   enabled: true
   model: "gpt-4o-mini"
   overlay_enabled: false
-  overlay_refresh_seconds: 300   # refresh overlay every 5 min
-  trade_gate_enabled: true       # enable AI gate — fewer trades, worth the latency
-  trade_gate_min_interval: 300
+  overlay_refresh_seconds: 60
+  trade_gate_enabled: false
+  trade_gate_min_interval: 30
   trade_gate_on_error: "allow"
+  trade_gate_max_hold_minutes: 60
 
 # Local web dashboard
 dashboard:
