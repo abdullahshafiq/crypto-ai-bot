@@ -22,7 +22,7 @@ execution:
   close_positions_on_pause: false
   panic_exit: false
   dynamic_leverage: true
-  leverage: 2
+  leverage: 5
   spot_balance_pct: 0.35
   spot_reserve_pct: 0.30
   spot_max_layers: 3
@@ -82,12 +82,12 @@ execution:
 leverage:
   enabled: true
   min_leverage: 1
-  max_leverage: 3
+  max_leverage: 5
   confidence_levels:
-    0.30: 1.0                  # floor: 1x at minimum entry confidence
-    0.50: 2.0                  # moderate conviction — go in at 2x
-    0.65: 3.0                  # strong conviction — full 3x
-    0.80: 3.0                  # max (3x — tight SL keeps dollar risk controlled)
+    0.30: 2.0                  # floor: 2x at minimum entry confidence
+    0.50: 3.0                  # moderate conviction — go in at 3x
+    0.65: 5.0                  # strong conviction — full 5x
+    0.80: 5.0                  # max (5x — tight SL keeps dollar risk controlled)
   use_score_multiplier: true
   score_weight: 0.2
   atr_volatility_scaling: true
@@ -139,7 +139,7 @@ strategy:
   max_ret_30s: 0.0040
   max_ret_5s: 0.0018
   block_on_volume_spike: false
-  fixed_trade_usdt: 25
+  fixed_trade_usdt: 100
   tp_pct: 0.0060
   sl_pct: 0.0025
   max_structural_sl_pct: 0.0120
