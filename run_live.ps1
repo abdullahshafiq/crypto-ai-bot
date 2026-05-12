@@ -16,7 +16,7 @@ if (Test-PortInUse 45678) {
 $explicit = "C:\Users\A\AppData\Local\Python\pythoncore-3.14-64\python.exe"
 $pythonArgs = @("-u", "main.py")
 
-Write-Host "Starting LIVE bot on dashboard http://127.0.0.1:8765"
+Write-Host "Starting LIVE bot on dashboard http://127.0.0.1:8080"
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
     & py @pythonArgs

@@ -136,7 +136,7 @@ main.py → core/bot_loop.py (runtime loop)
 ## Running
 
 ```
-.\run_live.ps1   → config.yaml, dashboard :8765, bot port :45678
+.\run_live.ps1   → config.yaml, dashboard :8080, bot port :45678
 .\run_demo.ps1   → config.paper.test.yaml, dashboard :8766, bot port :45679
 python main.py    → defaults to config.yaml
 BOT_CONFIG=other.yaml python main.py  → custom config

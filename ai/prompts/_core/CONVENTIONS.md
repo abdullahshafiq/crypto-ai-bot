@@ -10,7 +10,7 @@
 
 - Live bot launcher: [`run_live.ps1`](../../run_live.ps1)
 - Demo bot launcher: [`run_demo.ps1`](../../run_demo.ps1)
-- Live dashboard port: `8765`
+- Live dashboard port: `8080`
 - Demo dashboard port: `8766`
 - Live `BOT_INSTANCE_PORT`: `45678`
 - Demo `BOT_INSTANCE_PORT`: `45679`

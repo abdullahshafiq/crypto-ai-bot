@@ -37,7 +37,7 @@ Crypto trading bot. `main.py` is the runtime loop: market data → indicators �
 
 ## Running
 ```
-.\run_live.ps1   → config.yaml, dashboard :8765, bot port :45678
+.\run_live.ps1   → config.yaml, dashboard :8080, bot port :45678
 .\run_demo.ps1   → config.paper.test.yaml, dashboard :8766, bot port :45679
 python main.py   → defaults to config.yaml
 ```

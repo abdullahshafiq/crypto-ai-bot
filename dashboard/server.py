@@ -215,7 +215,7 @@ class DashboardRuntime:
                 _deep_set(self.cfg, key, coerced)
         return changed
 
-    def start(self, host: str = "0.0.0.0", port: int = 8765):
+    def start(self, host: str = "0.0.0.0", port: int = 8080):
         self.host = str(host)
         requested_port = int(port)
         last_error = None
@@ -240,7 +240,7 @@ class DashboardRuntime:
 
     def ensure_running(self, host: str | None = None, port: int | None = None) -> bool:
         host = str(host or self.host or "0.0.0.0")
-        port = int(port or self.port or 8765)
+        port = int(port or self.port or 8080)
         if self.thread is not None and self.thread.is_alive() and self.httpd is not None:
             return True
         now = time.time()
@@ -394,5 +394,5 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             return
         self._send(json.dumps({"error": "not found"}).encode("utf-8"), status=404)
 
-def start_dashboard_server(runtime: DashboardRuntime, host: str = "0.0.0.0", port: int = 8765):
+def start_dashboard_server(runtime: DashboardRuntime, host: str = "0.0.0.0", port: int = 8080):
     return runtime.start(host=host, port=port)
