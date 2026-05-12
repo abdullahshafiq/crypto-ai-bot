@@ -171,19 +171,19 @@
             </div>
             <!-- TACTICAL GAUGE -->
             <div id="posGauge" class="mt-4 mb-6 hidden">
-              <div class="relative h-14 mb-1 px-1">
-                <div class="absolute left-0 bottom-0 flex flex-col items-start leading-none">
-                  <span id="gaugeLabelL" class="text-[9px] font-black text-rose-500 uppercase tracking-widest drop-shadow-[0_0_8px_rgba(244,63,94,0.6)]">SL</span>
-                  <span id="gaugePriceL" class="text-[8px] font-mono text-rose-500/60 mt-0.5">-.----</span>
+              <div class="relative h-14 mb-1 px-1 select-none">
+                <div id="gaugeGroupL" class="absolute left-0 bottom-0 flex flex-col items-start leading-none cursor-ew-resize active:scale-95 transition-transform group">
+                  <span id="gaugeLabelL" class="text-[9px] font-black text-rose-500 uppercase tracking-widest drop-shadow-[0_0_8px_rgba(244,63,94,0.6)] group-hover:text-rose-400">SL</span>
+                  <span id="gaugePriceL" class="text-[8px] font-mono text-rose-500/60 mt-0.5 group-hover:text-rose-400/80">-.----</span>
                 </div>
-                <div id="gaugeEntryGroup" class="absolute top-0 flex flex-col items-center leading-none -translate-x-1/2 transition-all duration-500">
+                <div id="gaugeEntryGroup" class="absolute top-0 flex flex-col items-center leading-none -translate-x-1/2 transition-all duration-500 pointer-events-none">
                   <span id="gaugeLabelM" class="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Entry</span>
                   <span id="gaugePriceM" class="text-[8px] font-mono text-slate-500/60 mt-0.5">-.----</span>
                   <div class="w-px h-2 bg-slate-800 mt-0.5"></div>
                 </div>
-                <div class="absolute right-0 bottom-0 flex flex-col items-end leading-none">
-                  <span id="gaugeLabelR" class="text-[9px] font-black text-emerald-500 uppercase tracking-widest drop-shadow-[0_0_8px_rgba(16,185,129,0.6)]">TP</span>
-                  <span id="gaugePriceR" class="text-[8px] font-mono text-emerald-500/60 mt-0.5">-.----</span>
+                <div id="gaugeGroupR" class="absolute right-0 bottom-0 flex flex-col items-end leading-none cursor-ew-resize active:scale-95 transition-transform group">
+                  <span id="gaugeLabelR" class="text-[9px] font-black text-emerald-500 uppercase tracking-widest drop-shadow-[0_0_8px_rgba(16,185,129,0.6)] group-hover:text-emerald-400">TP</span>
+                  <span id="gaugePriceR" class="text-[8px] font-mono text-emerald-500/60 mt-0.5 group-hover:text-emerald-400/80">-.----</span>
                 </div>
               </div>
               <div class="relative w-full py-2">
@@ -194,11 +194,13 @@
                 <div id="gaugeMarker" class="absolute top-0.5 w-2 h-5 bg-white rounded-[2px] shadow-[0_0_15px_rgba(255,255,255,1)] z-20 -translate-x-1/2 transition-all duration-300 ease-out border border-slate-300"></div>
               </div>
             </div>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-cyan-500/70 uppercase mb-1">Leverage</p><p class="text-sm font-mono font-bold text-cyan-300" id="posLev">-</p></div>
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Entry</p><p class="text-sm font-mono font-bold text-white" id="posEntry">-</p></div>
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-rose-500/70 uppercase mb-1">Risk SL</p><p class="text-sm font-mono font-bold text-rose-400" id="posSl">-</p></div>
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-emerald-500/70 uppercase mb-1">Target TP</p><p class="text-sm font-mono font-bold text-emerald-400" id="posTp">-</p></div>
+            <div class="grid grid-cols-3 gap-2 text-center">
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[9px] font-black text-cyan-500/70 uppercase mb-1 tracking-tighter">Leverage</p><p class="text-xs font-mono font-bold text-cyan-300" id="posLev">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[9px] font-black text-slate-500 uppercase mb-1 tracking-tighter">Trade Size</p><p class="text-xs font-mono font-bold text-white" id="posSize">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[9px] font-black text-emerald-500/70 uppercase mb-1 tracking-tighter">Live PnL</p><p class="text-xs font-mono font-bold text-emerald-400" id="posPnL">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[9px] font-black text-slate-500 uppercase mb-1 tracking-tighter">Entry</p><p class="text-xs font-mono font-bold text-white" id="posEntry">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[9px] font-black text-rose-500/70 uppercase mb-1 tracking-tighter">Risk SL</p><p class="text-xs font-mono font-bold text-rose-400" id="posSl">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[9px] font-black text-emerald-500/70 uppercase mb-1 tracking-tighter">Target TP</p><p class="text-xs font-mono font-bold text-emerald-400" id="posTp">-</p></div>
             </div>
           </div>
         </div>
@@ -586,7 +588,8 @@
         safeSet('estSide', estActive ? estSide : 'FLAT', `text-[7px] font-black px-1.5 py-0.5 rounded border uppercase ${estSideCls}`);
         const pnlBlock = q('pnlEstimatorBlock');
         if (pnlBlock) {
-          if (estActive) pnlBlock.classList.remove('hidden');
+          // Only show estimator if active AND no real position exists (to avoid redundancy)
+          if (estActive && !pos) pnlBlock.classList.remove('hidden');
           else pnlBlock.classList.add('hidden');
         }
         safeSet('estEntry', est.entry ? fmt(est.entry, 5) : '-');
@@ -648,7 +651,13 @@
           }
         }
 
-        safeSet('posLev', pos && pos.effective_leverage ? `${fmt(pos.effective_leverage, 1)}x` : '-'); safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-'); safeSet('posSl', pos ? fmt(pos.sl, 5) : '-'); safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
+        safeSet('posLev', pos && pos.effective_leverage ? `${fmt(pos.effective_leverage, 1)}x` : '-');
+        safeSet('posSize', pos && pos.notional ? `$${fmt(pos.notional, 2)}` : '-');
+        const pnlVal = pos ? Number(pos.pnl_unrealized_usdt || 0) : 0;
+        safeSet('posPnL', pos ? `${pnlVal >= 0 ? '+' : ''}$${fmt(pnlVal, 2)}` : '-', `text-xs font-mono font-bold ${pnlVal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
+        safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-');
+        safeSet('posSl', pos ? fmt(pos.sl, 5) : '-');
+        safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
         // Gauge Update
         const posGauge = q('posGauge');
         if (pos && posGauge) {
@@ -664,7 +673,55 @@
                 } else {
                     pct = (sl - cp) / (sl - tp) * 100;
                     entryPct = (sl - entryP) / (sl - tp) * 100;
-                }
+                  // Interactive Draggable Logic
+        setupGaugeDrags(pos);
+      }
+
+      function setupGaugeDrags(pos) {
+        if (!pos) return;
+        const container = q('posGauge');
+        const bar = container.querySelector('.relative.h-1.5');
+        const groupL = q('gaugeGroupL');
+        const groupR = q('gaugeGroupR');
+        
+        const handleDrag = (e, type) => {
+          e.preventDefault();
+          const rect = bar.getBoundingClientRect();
+          const startX = e.clientX;
+          const startPct = type === 'SL' ? 0 : 100; // Actually they start at ends
+          
+          const onMove = (me) => {
+            let pct = ((me.clientX - rect.left) / rect.width) * 100;
+            pct = Math.max(0, Math.min(100, pct));
+            
+            // Visual Update Only (Real update on Release)
+            const price = pos.sl + (pos.tp_price - pos.sl) * (pct / 100); 
+            // This math is complex because range is dynamic. 
+            // For now, just show visual movement.
+            if (type === 'SL') {
+              groupL.style.left = `${pct}%`;
+              groupL.style.right = 'auto';
+              q('gaugePriceL').textContent = 'RELEASE TO SET';
+            } else {
+              groupR.style.right = `${100 - pct}%`;
+              q('gaugePriceR').textContent = 'RELEASE TO SET';
+            }
+          };
+          
+          const onUp = async (ue) => {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+            // Restore visual or trigger API
+            refresh(); 
+          };
+          
+          window.addEventListener('pointermove', onMove);
+          window.addEventListener('pointerup', onUp);
+        };
+
+        groupL.onpointerdown = (e) => handleDrag(e, 'SL');
+        groupR.onpointerdown = (e) => handleDrag(e, 'TP');
+      }
                 const bounded = Math.max(0, Math.min(100, pct));
                 const entryBounded = Math.max(0, Math.min(100, entryPct));
                 

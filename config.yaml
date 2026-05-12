@@ -30,23 +30,23 @@ execution:
   fee_rate: 0.0006
   fee_slippage_buffer_pct: 0.0002
   fee_edge_multiplier: 1.2
-  min_seconds_between_trades: 120     # 2min minimum — trade frequently when setups appear
-  min_seconds_before_reversal: 300
-  reversal_min_confidence: 0.55
-  reversal_min_score: 0.35
-  reversal_min_net_edge_pct: 0.0030   # 0.3% edge required before reversing
-  break_even_trigger_pct: 0.0015      # move to BE after +0.15% — wider SL needs larger cushion
-  break_even_buffer_pct: 0.0002
+  min_seconds_between_trades: 60
+  min_seconds_before_reversal: 60
+  reversal_min_confidence: 0.45
+  reversal_min_score: 0.25
+  reversal_min_net_edge_pct: 0.0020
+  break_even_trigger_pct: 0.0025
+  break_even_buffer_pct: 0.0008
   profit_trailing_enabled: true
-  profit_trailing_activation_pct: 0.0020  # arm trailing after +0.20% profit
+  profit_trailing_activation_pct: 0.0025
   trailing_tp_enabled: true
-  trailing_tp_giveback_pct: 0.08          # give back only 8% of peak — squeeze profits
-  trailing_tp_min_peak_pct: 0.0030        # needs at least +0.30% peak first
-  trail_tighten_1_pct: 0.0040        # T1 trigger: tighten at 0.40% profit
-  trail_tighten_2_pct: 0.0080        # T2 trigger: tighten at 0.80% profit
-  trail_t1_gap_pct: 0.0015           # T1 trails 0.15% behind best price
-  trail_t2_gap_pct: 0.0010           # T2 trails 0.10% behind best price
-  min_profit_after_fees: 0.0010      # 0.10% min net profit to count as a win
+  trailing_tp_giveback_pct: 0.35
+  trailing_tp_min_peak_pct: 0.0035
+  trail_tighten_1_pct: 0.0050
+  trail_tighten_2_pct: 0.0100
+  trail_t1_gap_pct: 0.0040
+  trail_t2_gap_pct: 0.0030
+  min_profit_after_fees: 0.0010
   exit_on_reversal_only_in_profit: true
   use_limit_orders: false
   use_native_trailing_stop: true
@@ -54,29 +54,29 @@ execution:
   use_exchange_take_profit: false
   market_fallback_on_timeout: true
   psar_exit_min_streak: 2
-  pending_entry_ttl_seconds: 15      # 15s to fill or cancel — fast or nothing
+  pending_entry_ttl_seconds: 10
   use_resting_support_orders: true
-  resting_entry_ttl_seconds: 300     # 5min resting orders only
-  resting_entry_min_conf: 0.55
-  resting_entry_offset_pct: 0.0005
-  resting_entry_max_distance_pct: 0.0080  # entries within 0.8% only
-  trailing_callback_pct: 0.25        # tight trailing callback
-  scale_in_enabled: false
+  resting_entry_ttl_seconds: 120
+  resting_entry_min_conf: 0.50
+  resting_entry_offset_pct: 0.0002
+  resting_entry_max_distance_pct: 0.0125
+  trailing_callback_pct: 0.65
+  scale_in_enabled: true
   scale_in_max_steps: 2
   scale_in_min_pnl_pct: 0.0020
   scale_in_cooldown_seconds: 180
   scale_in_position_pct: 0.5
   scale_in_max_exposure_pct: 0.50
   scale_in_wall_buffer_pct: 0.002
-  same_side_reentry_cooldown_seconds: 120   # 2min cooldown — re-enter quickly when signal resets
+  same_side_reentry_cooldown_seconds: 300
   same_side_reentry_strong_confidence: 0.85
-  scalp_min_hold_seconds: 30         # 30s minimum — fast in/out
+  scalp_min_hold_seconds: 20
   scalp_runner_enabled: true
   scalp_runner_pullback_pct: 0.0020
   scalp_runner_min_lock_pct: 0.0040
   scalp_runner_exchange_tp_multiplier: 1.0
-  scalp_runner_partial_exit_pct: 0.50
-  ttl_exit_seconds: 1200             # 20min max hold — no bag holding
+  scalp_runner_partial_exit_pct: 0.45
+  ttl_exit_seconds: 1800
 
 # Dynamic Leverage (confidence-based)
 leverage:
@@ -139,7 +139,7 @@ strategy:
   max_ret_30s: 0.0040
   max_ret_5s: 0.0018
   block_on_volume_spike: false
-  fixed_trade_usdt: 100
+  fixed_trade_usdt: 25
   tp_pct: 0.0060
   sl_pct: 0.0025
   max_structural_sl_pct: 0.0120

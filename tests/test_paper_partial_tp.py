@@ -104,14 +104,58 @@ def test_long_runner_can_exit_after_partial_tp(tmp_path, monkeypatch):
     runner_sl = executor.active_positions[0]["sl"]
     initial_floor = executor.active_positions[0]["trailing_tp_floor_pct"]
     assert initial_floor > 0
-
-    executor.active_positions[0]["tp_price"] = 0.0
+    assert executor.active_positions[0]["tp_price"] == 0.0
 
     executor.process_orders_and_positions("BTC/USDT:USDT", 101.5)
     ratcheted_sl = executor.active_positions[0]["sl"]
     assert ratcheted_sl > runner_sl
 
     executor.process_orders_and_positions("BTC/USDT:USDT", ratcheted_sl - 0.01)
+
+    assert executor.active_positions == []
+    assert executor.trade_count == 1
+
+
+def test_short_runner_can_exit_after_partial_tp(tmp_path, monkeypatch):
+    executor = _make_executor(tmp_path, monkeypatch)
+    entry = 100.0
+    pos = {
+        "trade_id": 3,
+        "side": "SHORT",
+        "entry": entry,
+        "amount": 10.0,
+        "entry_ts": time.time() - 60,
+        "highest_price": entry,
+        "lowest_price": entry,
+        "highest_profit_pct": 0.0,
+        "sl": 101.0,
+        "tp_price": 99.4,
+        "fee_rate": 0.0006,
+        "min_profit_after_fees": 0.0002,
+        "break_even_trigger_pct": 0.0060,
+        "profit_trailing_enabled": True,
+        "profit_trailing_activation_pct": 0.0060,
+        "trailing_tp_enabled": True,
+        "trailing_tp_giveback_pct": 0.35,
+        "trailing_tp_min_peak_pct": 0.0060,
+        "trail_tighten_1_pct": 0.0050,
+        "trail_tighten_2_pct": 0.0100,
+        "trail_t1_gap_pct": 0.0040,
+        "trail_t2_gap_pct": 0.0030,
+    }
+    executor.active_positions = [pos]
+
+    executor.process_orders_and_positions("BTC/USDT:USDT", 99.3)
+    runner_sl = executor.active_positions[0]["sl"]
+    initial_floor = executor.active_positions[0]["trailing_tp_floor_pct"]
+    assert initial_floor > 0
+    assert executor.active_positions[0]["tp_price"] == 0.0
+
+    executor.process_orders_and_positions("BTC/USDT:USDT", 98.5)
+    ratcheted_sl = executor.active_positions[0]["sl"]
+    assert ratcheted_sl < runner_sl
+
+    executor.process_orders_and_positions("BTC/USDT:USDT", ratcheted_sl + 0.01)
 
     assert executor.active_positions == []
     assert executor.trade_count == 1

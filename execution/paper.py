@@ -481,6 +481,8 @@ class PaperFuturesExecution:
         pos["runner_scale_out_taken"] = True
         pos["profit_runner_armed"] = True
         pos["trail_armed"] = True
+        pos["fixed_take_profit_enabled"] = False
+        pos["tp_price"] = 0.0
         pos["runner_partial_exit_pct"] = partial_pct
         pos["runner_remaining_amount"] = remaining_amount
         pos["highest_profit_pct"] = max(float(pos.get("highest_profit_pct", 0.0) or 0.0), profit_pct)
