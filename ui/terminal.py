@@ -12,7 +12,7 @@ from .windows_vt import (
 from .windows_vt import CYAN, MAGENTA, YELLOW, BLUE, GREEN, RED, BOLD, RESET, CL
 
 
-def print_dashboard(ticks, symbol, regime, state, signal, executor, session_start, mtf_context=None, mtf_cfg=None, status_lines=None, ui_cfg=None, ai_overlay=None, pivot_data=None, open_orders=None):
+def print_dashboard(ticks, symbol, regime, state, signal, executor, session_start, mtf_context=None, mtf_cfg=None, status_lines=None, ui_cfg=None, ai_overlay=None, pivot_data=None, open_orders=None, freshness=None):
     ui_cfg = ui_cfg or {}
     ui_mode = _detect_ui_mode(str(ui_cfg.get("mode", "auto")))
     use_alt = bool(ui_cfg.get("alt_screen", False))
@@ -148,6 +148,7 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
     out.append(f"{'-'*frame_width}{CL}")
     out.append(f" {BLUE}{BOLD}[ STRATEGY & AI ]{RESET}{CL}")
     out.append(ln("Action", f"{action_str} ({signal.get('confidence',0):.1%})", "Bias", f"{bias_str}", "Overlay", f"{overlay_bias_c}{overlay_bias}{RESET}"))
+    out.append(ln("Intent", trim_text(signal.get('intent', 'Waiting for alignment'), frame_width - 10)))
     if overlay:
         out.append(f" {YELLOW}Thinking:{RESET} {trim_text(overlay_rationale, frame_width - 12)}{CL}")
         if overlay_avoid:
@@ -185,6 +186,7 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
             pnl_pct = pnl_val / pos['entry'] * 100 if pos['entry'] else 0
             val_pnl = pnl_val * pos['amount']
             pnl_c = GREEN if val_pnl >= 0 else RED
+            eff_lev = float(pos.get('effective_leverage', getattr(executor, 'leverage', 1.0)) or getattr(executor, 'leverage', 1.0))
             sl_price = float(pos.get('sl', 0.0) or 0.0)
             support = float(pos.get('structure_support', 0.0) or 0.0)
             resistance = float(pos.get('structure_resistance', 0.0) or 0.0)
@@ -205,7 +207,7 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
             out.append(
                 f"  {side_c}{pos['side']}{RESET} ${pos['amount']*pos['entry']:.0f} @ ${pos['entry']:.5f} | "
                 f"{pnl_c}PnL:${val_pnl:+,.2f} ({pnl_pct:+.2f}%){RESET} | "
-                f"SL:${sl_price:.5f} | {ref_str} | Trail:{trail_mode}{trail_id_str}/{trail_stage}{CL}"
+                f"Lev:{eff_lev:.1f}x | SL:${sl_price:.5f} | {ref_str} | Trail:{trail_mode}{trail_id_str}/{trail_stage}{CL}"
             )
 
     closed = getattr(executor, 'closed_trades', [])
@@ -226,6 +228,21 @@ def print_dashboard(ticks, symbol, regime, state, signal, executor, session_star
 
     out.append(f"{CYAN}{BOLD}{'='*frame_width}{RESET}{CL}")
     out.append(f" {MAGENTA}Press Ctrl+C to safely exit.{RESET}{CL}")
+
+    if isinstance(freshness, dict):
+        parts = []
+        lp = freshness.get("live_price_age")
+        if lp is not None and lp >= 0:
+            parts.append(f"Live:{lp:.1f}s")
+        sc = freshness.get("signal_candle_age")
+        if sc is not None and sc >= 0:
+            parts.append(f"Signal:{sc:.0f}s")
+        mtf = freshness.get("mtf_ages", {})
+        if mtf:
+            mtf_parts = ",".join(f"{tf}:{v:.0f}s" for tf, v in sorted(mtf.items()))
+            parts.append(f"MTF:{mtf_parts}")
+        if parts:
+            out.append(f" {YELLOW}Fresh:{RESET} {'  '.join(parts)}{CL}")
 
     if status_lines:
         out.append(f"{'-'*frame_width}{CL}")

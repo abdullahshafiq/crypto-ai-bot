@@ -23,7 +23,7 @@
   </script>
   <style>
     body { background-color: #020617; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em; margin: 0; padding: 0; min-height: 100vh; overflow-x: hidden; }
-    .terminal-card { background: linear-gradient(145deg, #0b1120 0%, #080d1a 100%); border: 1px solid rgba(71, 85, 105, 0.5); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.6); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; }
+    .terminal-card { background: rgba(11, 17, 32, 0.65); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.05); box-shadow: 0 8px 32px -8px rgba(0,0,0,0.8); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; }
     .card-collapsed { min-height: 0 !important; height: auto !important; }
     .card-content { max-height: 2000px; transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1); overflow: hidden; opacity: 1; padding: 0 1rem 1rem 1rem; }
     @media (min-width: 768px) { .card-content { padding: 0 1.5rem 1.5rem 1.5rem; } }
@@ -77,67 +77,44 @@
     </header>
 
     <main class="p-4 md:p-6 bg-obsidian">
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6 auto-rows-min">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 md:gap-6 auto-rows-min">
         
         <!-- EQUITY CARD -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1" id="cardEquity">
+        <div class="terminal-card rounded-3xl inner-glow lg:col-span-4 order-1" id="cardEquity">
           <div class="card-header">
             <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="wallet" class="w-4 h-4"></i> Total Equity</p>
             <button onclick="toggleCard('cardEquity')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
           </div>
           <div class="card-content">
-            <div class="flex items-baseline gap-2"><span class="text-3xl md:text-4xl font-black text-white tracking-tighter" id="balance">0.00</span><span class="text-xs text-slate-500 font-mono font-bold">USDC</span></div>
+            <div class="flex items-center justify-between">
+              <div class="flex items-baseline gap-2"><span class="text-3xl md:text-4xl font-black text-white tracking-tighter" id="balance">0.00</span><span class="text-xs text-slate-500 font-mono font-bold">USDC</span></div>
+              <div id="equitySpark" class="w-24 h-10 opacity-50"></div>
+            </div>
             <div class="mt-4 grid grid-cols-2 gap-4">
                <div class="bg-black/20 p-3 rounded-xl border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Realized Profit</p><p class="text-sm font-black text-emerald-400" id="totalProfit">+$0.00</p></div>
                <div class="bg-black/20 p-3 rounded-xl border border-white/5 text-right"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Realized Loss</p><p class="text-sm font-black text-rose-500" id="totalLoss">-$0.00</p></div>
             </div>
             <div class="mt-4 flex items-center justify-between bg-slate-900/60 p-3 rounded-xl border border-white/5"><span class="text-xs text-slate-400 font-black uppercase tracking-wider">Session PnL</span><span class="text-lg font-black tracking-tight" id="pnl">0.00%</span></div>
             <div class="mt-3 flex items-center justify-between bg-black/20 p-3 rounded-xl border border-white/5"><span class="text-xs text-slate-400 font-black uppercase tracking-wider">Open PnL</span><span class="text-base font-black tracking-tight" id="openPnl">0.00 USDC</span></div>
-            <div class="mt-3 bg-black/30 p-3 rounded-2xl border border-white/5">
-              <div class="flex items-center justify-between gap-2">
-                <p class="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">PnL Estimator</p>
-                <span id="estSide" class="text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase">FLAT</span>
+            <div id="pnlEstimatorBlock" class="mt-3 bg-black/40 rounded-2xl border border-white/10 hidden transition-all duration-300 overflow-hidden shadow-[0_4px_20px_rgba(0,0,0,0.4)]">
+              <div class="bg-slate-900/80 px-3 py-1.5 border-b border-white/5 flex items-center justify-between">
+                <p class="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-1.5"><i data-lucide="calculator" class="w-3 h-3 text-cyan-400"></i> PnL Estimator</p>
+                <span id="estSide" class="text-[7px] font-black px-1.5 py-0.5 rounded border border-white/10 uppercase tracking-widest bg-black/20">FLAT</span>
               </div>
-              <div class="mt-3 grid grid-cols-2 gap-2 text-[10px] font-mono">
-                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Entry</p><p id="estEntry" class="font-bold text-white">-</p></div>
-                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Current</p><p id="estCurrent" class="font-bold text-white">-</p></div>
-                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Leverage</p><p id="estLev" class="font-bold text-white">-</p></div>
-                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Notional</p><p id="estNotional" class="font-bold text-white">-</p></div>
-                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Gross</p><p id="estGross" class="font-bold text-emerald-400">-</p></div>
-                <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-slate-500 uppercase font-black mb-1">Net</p><p id="estNet" class="font-bold text-emerald-400">-</p></div>
+              <div class="p-3 grid grid-cols-3 gap-x-4 gap-y-3 text-[10px] font-mono">
+                <div class="flex flex-col"><span class="text-slate-500 uppercase text-[7px] font-black tracking-tighter mb-0.5">Entry</span><span id="estEntry" class="text-white font-bold leading-none">-</span></div>
+                <div class="flex flex-col"><span class="text-slate-500 uppercase text-[7px] font-black tracking-tighter mb-0.5">Mark</span><span id="estCurrent" class="text-white font-bold leading-none">-</span></div>
+                <div class="flex flex-col"><span class="text-slate-500 uppercase text-[7px] font-black tracking-tighter mb-0.5">Lev</span><span id="estLev" class="text-cyan-400 font-bold leading-none">-</span></div>
+                <div class="flex flex-col"><span class="text-slate-500 uppercase text-[7px] font-black tracking-tighter mb-0.5">Size</span><span id="estNotional" class="text-white font-bold leading-none">-</span></div>
+                <div class="flex flex-col"><span class="text-emerald-500/50 uppercase text-[7px] font-black tracking-tighter mb-0.5">Gross PnL</span><span id="estGross" class="text-emerald-400 font-black leading-none">-</span></div>
+                <div class="flex flex-col"><span class="text-emerald-500/50 uppercase text-[7px] font-black tracking-tighter mb-0.5">Net PnL</span><span id="estNet" class="text-emerald-400 font-black leading-none">-</span></div>
               </div>
-              <div id="estFormula" class="mt-2 text-[10px] font-mono text-slate-500 leading-relaxed">LONG: notional × (price / entry - 1); SHORT: notional × (1 - price / entry)</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- TACTICAL CARD -->
-        <div class="terminal-card rounded-3xl border-white/10 inner-glow col-span-1 transition-all duration-500" id="cardTactical">
-          <div class="card-header flex-wrap gap-y-3">
-            <div class="flex items-center gap-2 md:gap-3 flex-1 min-w-[150px]">
-              <p class="text-[10px] md:text-xs font-black text-white uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="crosshair" class="w-4 h-4 text-emerald-400"></i> <span id="symbolName">TACTICAL POSITION</span></p>
-              <span id="posSide" class="text-[8px] md:text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase whitespace-nowrap">FLAT</span>
-            </div>
-            <div class="flex items-center gap-2 ml-auto">
-              <button id="emergencyExit" class="px-2 py-1 rounded bg-rose-500/20 border border-rose-500/40 text-rose-500 text-[8px] font-black uppercase hover:bg-rose-500 hover:text-white transition-all shrink-0">Flatten</button>
-              <button onclick="toggleCard('cardTactical')" class="shrink-0"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
-            </div>
-          </div>
-          <div class="card-content">
-            <div class="mb-6 bg-black/40 p-4 rounded-2xl border border-white/5 flex flex-col items-center">
-              <p class="text-[9px] font-black text-slate-500 uppercase tracking-[0.3em] mb-1">Live Price Vector</p>
-              <p class="text-2xl md:text-3xl font-mono font-black text-white tracking-tighter" id="livePrice">---.----</p>
-            </div>
-            <div class="grid grid-cols-3 gap-2 text-center">
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Entry</p><p class="text-sm font-mono font-bold text-white" id="posEntry">-</p></div>
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-rose-500/70 uppercase mb-1">Risk SL</p><p class="text-sm font-mono font-bold text-rose-400" id="posSl">-</p></div>
-              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-emerald-500/70 uppercase mb-1">Target TP</p><p class="text-sm font-mono font-bold text-emerald-400" id="posTp">-</p></div>
             </div>
           </div>
         </div>
 
         <!-- AI DECISION MATRIX -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1 border-slate-500/20" id="cardDecision">
+        <div class="terminal-card rounded-3xl inner-glow border-slate-500/20 lg:col-span-4 order-2 transition-all duration-700" id="cardDecision">
           <div class="card-header">
             <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
               <i data-lucide="brain-circuit" class="w-4 h-4 text-slate-400"></i> AI Decision Matrix
@@ -148,6 +125,7 @@
             <div class="flex items-center justify-between mb-4">
               <div class="flex flex-col">
                 <span id="signalText" class="text-xl font-black text-white uppercase tracking-tighter">-</span>
+                <span id="signalIntent" class="text-[10px] font-bold text-cyan-300 uppercase tracking-wide mt-1">Intent: -</span>
                 <div class="flex gap-1.5 mt-1">
                   <span id="riskPill" class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase">NORMAL RISK</span>
                   <span id="biasPill" class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase">NEUTRAL</span>
@@ -162,9 +140,10 @@
               </div>
             </div>
             
-            <div class="bg-black/40 p-4 rounded-2xl border border-white/5 relative overflow-hidden group">
+              <div class="bg-black/40 p-4 rounded-2xl border border-white/5 relative overflow-hidden group">
               <div class="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity"></div>
               <p id="aiRationale" class="text-xs font-mono text-slate-300 leading-relaxed relative z-10">Initializing neural vector...</p>
+              <p id="macdLine" class="mt-2 text-[10px] font-mono text-cyan-300 leading-relaxed relative z-10 uppercase tracking-wide">MACD: -</p>
               <p id="gateTrace" class="mt-2 text-[10px] font-mono text-amber-300 leading-relaxed relative z-10 uppercase tracking-wide">Gate: -</p>
               <div class="mt-2 h-0.5 w-full bg-slate-800/50 rounded-full overflow-hidden">
                 <div id="signalConf" class="h-full bg-indigo-500 transition-all duration-700 w-0"></div>
@@ -173,8 +152,59 @@
           </div>
         </div>
 
+        <!-- TACTICAL CARD -->
+        <div class="terminal-card rounded-3xl border-white/10 inner-glow transition-all duration-500 lg:col-span-4 order-3" id="cardTactical">
+          <div class="card-header flex-wrap gap-y-3">
+            <div class="flex items-center gap-2 md:gap-3 flex-1 min-w-[150px]">
+              <p class="text-[10px] md:text-xs font-black text-white uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="crosshair" class="w-4 h-4 text-emerald-400"></i> <span id="symbolName">TACTICAL POSITION</span></p>
+              <span id="posSide" class="text-[8px] md:text-[9px] font-black px-1.5 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700 uppercase whitespace-nowrap">FLAT</span>
+            </div>
+            <div class="flex items-center gap-2 ml-auto">
+              <button id="emergencyExit" class="px-2 py-1 rounded bg-rose-500/20 border border-rose-500/40 text-rose-500 text-[8px] font-black uppercase hover:bg-rose-500 hover:text-white transition-all shrink-0">Flatten</button>
+              <button onclick="toggleCard('cardTactical')" class="shrink-0"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+            </div>
+          </div>
+          <div class="card-content">
+            <div class="mb-4 bg-black/40 p-4 rounded-2xl border border-white/5 flex flex-col items-center relative overflow-hidden">
+              <p class="text-[9px] font-black text-slate-500 uppercase tracking-[0.3em] mb-1">Live Price Vector</p>
+              <p class="text-2xl md:text-3xl font-mono font-black text-white tracking-tighter" id="livePrice">---.----</p>
+            </div>
+            <!-- TACTICAL GAUGE -->
+            <div id="posGauge" class="mt-4 mb-6 hidden">
+              <div class="relative h-14 mb-1 px-1">
+                <div class="absolute left-0 bottom-0 flex flex-col items-start leading-none">
+                  <span id="gaugeLabelL" class="text-[9px] font-black text-rose-500 uppercase tracking-widest drop-shadow-[0_0_8px_rgba(244,63,94,0.6)]">SL</span>
+                  <span id="gaugePriceL" class="text-[8px] font-mono text-rose-500/60 mt-0.5">-.----</span>
+                </div>
+                <div id="gaugeEntryGroup" class="absolute top-0 flex flex-col items-center leading-none -translate-x-1/2 transition-all duration-500">
+                  <span id="gaugeLabelM" class="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Entry</span>
+                  <span id="gaugePriceM" class="text-[8px] font-mono text-slate-500/60 mt-0.5">-.----</span>
+                  <div class="w-px h-2 bg-slate-800 mt-0.5"></div>
+                </div>
+                <div class="absolute right-0 bottom-0 flex flex-col items-end leading-none">
+                  <span id="gaugeLabelR" class="text-[9px] font-black text-emerald-500 uppercase tracking-widest drop-shadow-[0_0_8px_rgba(16,185,129,0.6)]">TP</span>
+                  <span id="gaugePriceR" class="text-[8px] font-mono text-emerald-500/60 mt-0.5">-.----</span>
+                </div>
+              </div>
+              <div class="relative w-full py-2">
+                <div class="absolute inset-y-2 left-0 right-0 h-2 bg-slate-950 rounded-full border border-white/10 shadow-[inset_0_2px_4px_rgba(0,0,0,0.8)] overflow-hidden">
+                  <div id="gaugeProgress" class="absolute top-0 bottom-0 transition-all duration-500 ease-out"></div>
+                </div>
+                <div id="gaugeEntryMark" class="absolute top-1 bottom-1 w-1 bg-slate-500 z-10 -translate-x-1/2 transition-all duration-500 shadow-[0_0_5px_rgba(0,0,0,0.8)]"></div>
+                <div id="gaugeMarker" class="absolute top-0.5 w-2 h-5 bg-white rounded-[2px] shadow-[0_0_15px_rgba(255,255,255,1)] z-20 -translate-x-1/2 transition-all duration-300 ease-out border border-slate-300"></div>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-cyan-500/70 uppercase mb-1">Leverage</p><p class="text-sm font-mono font-bold text-cyan-300" id="posLev">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-slate-500 uppercase mb-1">Entry</p><p class="text-sm font-mono font-bold text-white" id="posEntry">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-rose-500/70 uppercase mb-1">Risk SL</p><p class="text-sm font-mono font-bold text-rose-400" id="posSl">-</p></div>
+              <div class="bg-black/20 p-2 rounded-lg border border-white/5"><p class="text-[10px] font-black text-emerald-500/70 uppercase mb-1">Target TP</p><p class="text-sm font-mono font-bold text-emerald-400" id="posTp">-</p></div>
+            </div>
+          </div>
+        </div>
+
         <!-- LIVE MARKET CHART -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-3 flex flex-col" id="cardChart">
+        <div class="terminal-card rounded-3xl inner-glow flex flex-col lg:col-span-9 order-4" id="cardChart">
           <div class="card-header items-start md:items-center gap-4">
             <div class="flex flex-wrap items-center gap-3 md:gap-6 flex-1">
               <p class="text-[10px] md:text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2 shrink-0"><i data-lucide="bar-chart-3" class="w-4 h-4"></i> Live Market Chart</p>
@@ -192,25 +222,12 @@
             </div>
             <button onclick="toggleCard('cardChart')" class="p-1 hover:bg-white/5 rounded-lg transition-colors shrink-0"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
           </div>
-          <div id="chartContainer" class="card-content chart-height flex-1 bg-black/20 rounded-2xl border border-white/5 overflow-hidden"></div>
-        </div>
-
-        <!-- LIVE EXECUTION LOG -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-2 flex flex-col max-h-[450px] overflow-hidden" id="cardTelemetry">
-           <div class="card-header border-b border-white/5 bg-black/20">
-              <div class="flex items-center justify-between w-full">
-                 <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="terminal" class="w-4 h-4"></i> Live Execution Log</p>
-                 <div class="flex items-center gap-4">
-                    <div id="indicatorsHUD" class="flex gap-4 text-xs font-mono"></div>
-                    <button onclick="toggleCard('cardTelemetry')" class="p-1 hover:bg-white/5 rounded-lg transition-colors"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
-                 </div>
-              </div>
-           </div>
-           <div id="statusLines" class="card-content flex-1 p-6 font-mono text-xs text-slate-300 overflow-y-auto whitespace-pre-wrap leading-relaxed custom-scrollbar"></div>
+          <div id="indicatorControls" class="px-4 pt-3 flex flex-wrap gap-2 text-[9px] font-black uppercase"></div>
+          <div id="chartContainer" class="card-content chart-height h-[420px] bg-black/20 rounded-2xl border border-white/5 overflow-hidden"></div>
         </div>
 
         <!-- MULTI-TIMEFRAME ANALYSIS -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1" id="cardMTF">
+        <div class="terminal-card rounded-3xl inner-glow lg:col-span-3 order-5" id="cardMTF">
           <div class="card-header">
             <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="layers" class="w-4 h-4"></i> Multi-Timeframe Analysis</p>
             <button onclick="toggleCard('cardMTF')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
@@ -219,7 +236,7 @@
         </div>
 
         <!-- PERFORMANCE STATS -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-3" id="cardPerf">
+        <div class="terminal-card rounded-3xl inner-glow lg:col-span-12 order-6" id="cardPerf">
           <div class="card-header">
             <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="trophy" class="w-4 h-4"></i> Session Performance</p>
             <button onclick="toggleCard('cardPerf')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
@@ -253,7 +270,7 @@
         </div>
 
         <!-- EQUITY CURVE -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1 md:col-span-2 flex flex-col" id="cardEquityCurve">
+        <div class="terminal-card rounded-3xl inner-glow flex flex-col lg:col-span-4 order-7" id="cardEquityCurve">
           <div class="card-header">
             <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="trending-up" class="w-4 h-4"></i> Equity Curve</p>
             <button onclick="toggleCard('cardEquityCurve')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
@@ -261,8 +278,22 @@
           <div id="equityChartContainer" class="card-content" style="min-height:220px;"></div>
         </div>
 
+        <!-- LIVE EXECUTION LOG -->
+        <div class="terminal-card rounded-3xl inner-glow flex flex-col max-h-[450px] overflow-hidden lg:col-span-5 order-8" id="cardTelemetry">
+           <div class="card-header border-b border-white/5 bg-black/20">
+              <div class="flex items-center justify-between w-full">
+                 <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="terminal" class="w-4 h-4"></i> Live Execution Log</p>
+                 <div class="flex items-center gap-4">
+                    <div id="indicatorsHUD" class="flex gap-4 text-xs font-mono"></div>
+                    <button onclick="toggleCard('cardTelemetry')" class="p-1 hover:bg-white/5 rounded-lg transition-colors"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
+                 </div>
+              </div>
+           </div>
+           <div id="statusLines" class="card-content flex-1 p-6 font-mono text-xs text-slate-300 overflow-y-auto whitespace-pre-wrap leading-relaxed custom-scrollbar"></div>
+        </div>
+
         <!-- TRADE HISTORY -->
-        <div class="terminal-card rounded-3xl inner-glow col-span-1 flex flex-col" id="cardTrades">
+        <div class="terminal-card rounded-3xl inner-glow flex flex-col lg:col-span-3 order-9" id="cardTrades">
           <div class="card-header border-b border-white/5">
             <p class="text-xs font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><i data-lucide="list" class="w-4 h-4"></i> Trade Log</p>
             <button onclick="toggleCard('cardTrades')"><i data-lucide="chevron-up" class="w-4 h-4 text-slate-600 collapse-icon"></i></button>
@@ -290,7 +321,7 @@
   </div>
 
   <script>
-    let STATE = {}, SCHEMA = [], CONFIG = {}, chart, candleSeries, volumeSeries;
+    let STATE = {}, SCHEMA = [], CONFIG = {}, chart, candleSeries, volumeSeries, ema9Series, ema21Series, macdHistSeries, macdLineSeries, macdSignalSeries, macdZeroLine;
     let isSyncingPause = false, expectedPauseState = null;
     let _pauseSyncTimeout = null;
     let _chartFirstRender = true;
@@ -302,10 +333,35 @@
     let _equityHistory = [];
     let _srLines = { support: null, resistance: null, actionSupport: null, actionResistance: null };
     let _lastTradeCount = 0;
+    let indicatorVisibility = { ema9: true, ema21: true, sar: true, macd: true };
     const q = (id) => document.getElementById(id);
     const fmt = (n, d=2) => { const v = Number(n); return Number.isFinite(v) ? v.toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d}) : '-'; };
     const safeSet = (id, val, cls) => { const el = q(id); if (!el) return; if (val !== undefined) el.textContent = val; if (cls !== undefined) el.className = cls; };
     const escHtml = (s) => { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+
+    const indicatorBtnCls = (on) => on
+      ? 'px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20 transition-colors'
+      : 'px-2 py-1 rounded bg-slate-800 text-slate-500 border border-slate-700 hover:bg-white/5 transition-colors';
+
+    function toggleIndicator(key) {
+      indicatorVisibility[key] = !indicatorVisibility[key];
+      _lastChartKey = null;
+      renderState(STATE);
+    }
+
+    function renderIndicatorControls() {
+      const box = q('indicatorControls');
+      if (!box) return;
+      box.innerHTML = [
+        `<button type="button" data-indicator="ema9" class="${indicatorBtnCls(indicatorVisibility.ema9)}">EMA9</button>`,
+        `<button type="button" data-indicator="ema21" class="${indicatorBtnCls(indicatorVisibility.ema21)}">EMA21</button>`,
+        `<button type="button" data-indicator="sar" class="${indicatorBtnCls(indicatorVisibility.sar)}">SAR</button>`,
+        `<button type="button" data-indicator="macd" class="${indicatorBtnCls(indicatorVisibility.macd)}">MACD</button>`,
+      ].join('');
+      box.querySelectorAll('[data-indicator]').forEach(btn => {
+        btn.onclick = () => toggleIndicator(btn.getAttribute('data-indicator'));
+      });
+    }
 
     function initChart() {
       const container = q('chartContainer'); if (!container || chart) return;
@@ -322,6 +378,46 @@
       volumeSeries = chart.addSeries(LightweightCharts.HistogramSeries, { 
         color: '#334155', priceFormat: { type: 'volume' }, priceScaleId: '' 
       });
+      ema9Series = chart.addSeries(LightweightCharts.LineSeries, {
+        color: '#22d3ee', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false
+      });
+      ema21Series = chart.addSeries(LightweightCharts.LineSeries, {
+        color: '#f59e0b', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false
+      });
+      macdHistSeries = chart.addSeries(LightweightCharts.HistogramSeries, {
+        color: '#22c55e',
+        priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
+        priceScaleId: 'macd',
+        base: 0,
+      });
+      macdLineSeries = chart.addSeries(LightweightCharts.LineSeries, {
+        color: '#22d3ee',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        priceScaleId: 'macd',
+      });
+      macdSignalSeries = chart.addSeries(LightweightCharts.LineSeries, {
+        color: '#f43f5e',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        priceScaleId: 'macd',
+      });
+      macdZeroLine = chart.addSeries(LightweightCharts.LineSeries, {
+        color: '#475569',
+        lineWidth: 1,
+        lineStyle: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        priceScaleId: 'macd',
+      });
+      if (macdHistSeries?.priceScale) macdHistSeries.priceScale().applyOptions({ scaleMargins: { top: 0.76, bottom: 0.06 } });
+      if (macdLineSeries?.priceScale) macdLineSeries.priceScale().applyOptions({ scaleMargins: { top: 0.76, bottom: 0.06 } });
+      if (macdZeroLine?.priceScale) macdZeroLine.priceScale().applyOptions({ scaleMargins: { top: 0.76, bottom: 0.06 } });
       volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
       _chartResizeObserver = new ResizeObserver(entries => { if (entries.length && chart) chart.applyOptions({ width: entries[0].contentRect.width, height: entries[0].contentRect.height }); });
       _chartResizeObserver.observe(container);
@@ -456,6 +552,7 @@
       if (!s) return;
       try {
         if (!chart) initChart();
+        renderIndicatorControls();
         
         const actualPaused = !!(s.config?.execution?.paused);
         if (isSyncingPause) {
@@ -486,22 +583,24 @@
         const estSideCls = estActive
           ? (estLong ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30')
           : 'bg-slate-800 text-slate-500 border-slate-700';
-        safeSet('estSide', estActive ? estSide : 'FLAT', `text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${estSideCls}`);
+        safeSet('estSide', estActive ? estSide : 'FLAT', `text-[7px] font-black px-1.5 py-0.5 rounded border uppercase ${estSideCls}`);
+        const pnlBlock = q('pnlEstimatorBlock');
+        if (pnlBlock) {
+          if (estActive) pnlBlock.classList.remove('hidden');
+          else pnlBlock.classList.add('hidden');
+        }
         safeSet('estEntry', est.entry ? fmt(est.entry, 5) : '-');
         safeSet('estCurrent', est.price ? fmt(est.price, 5) : '-');
         safeSet('estLev', est.effective_leverage ? `${fmt(est.effective_leverage, 1)}x` : '-');
         safeSet('estNotional', est.notional_usdt ? `$${fmt(est.notional_usdt, 2)}` : '-');
         const estGross = Number(est.gross_pnl || 0);
         const estNet = Number(est.net_pnl || 0);
-        safeSet('estGross', `${estGross >= 0 ? '+' : '-'}$${fmt(Math.abs(estGross), 2)}`, `font-bold ${estGross >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
-        safeSet('estNet', `${estNet >= 0 ? '+' : '-'}$${fmt(Math.abs(estNet), 2)}`, `font-bold ${estNet >= 0 ? 'text-emerald-400' : 'text-rose-400'}`);
-        safeSet('estFormula', est.formula || 'LONG: notional × (price / entry - 1); SHORT: notional × (1 - price / entry)');
+        safeSet('estGross', `${estGross >= 0 ? '+' : '-'}$${fmt(Math.abs(estGross), 2)}`, `font-bold ${estGross >= 0 ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.3)]' : 'text-rose-400 drop-shadow-[0_0_5px_rgba(244,63,94,0.3)]'}`);
+        safeSet('estNet', `${estNet >= 0 ? '+' : '-'}$${fmt(Math.abs(estNet), 2)}`, `font-bold ${estNet >= 0 ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.3)]' : 'text-rose-400 drop-shadow-[0_0_5px_rgba(244,63,94,0.3)]'}`);
 
         const pos = (s.positions && s.positions[0]) || null;
-        
         const sig = s.signal || {}, sColor = sig.action === 'BUY' ? 'text-emerald-400' : sig.action === 'SELL' ? 'text-rose-400' : 'text-white';
         safeSet('signalText', sig.action || 'HOLD', `text-xl font-black uppercase tracking-tighter ${sColor}`);
-        
         const conf = (sig.confidence || 0) * 100;
         safeSet('signalConfVal', `${Math.round(conf)}%`);
         const circle = q('confCircle');
@@ -510,16 +609,22 @@
           circle.style.strokeDashoffset = offset;
           circle.style.stroke = sig.action === 'BUY' ? '#10b981' : sig.action === 'SELL' ? '#f43f5e' : '#475569';
         }
-        
         const overlay = s.ai_overlay || {};
         const b = (overlay.bias || 'NEUTRAL').toUpperCase();
         const bCls = b === 'LONG_ONLY' || b === 'LONG' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 
                      (b === 'SHORT_ONLY' || b === 'SHORT' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 
                      'bg-slate-800 text-slate-500 border-slate-700');
+        const decisionCard = q('cardDecision');
+        if (decisionCard) {
+            if (b.includes('LONG')) decisionCard.style.boxShadow = 'inset 0 0 40px rgba(16,185,129,0.05)';
+            else if (b.includes('SHORT')) decisionCard.style.boxShadow = 'inset 0 0 40px rgba(244,63,94,0.05)';
+            else decisionCard.style.boxShadow = '';
+        }
         safeSet('biasPill', b, `text-[10px] font-black px-1.5 py-0.5 rounded border uppercase ${bCls}`);
-        
         safeSet('riskPill', `${overlay.risk_mode || 'NORMAL'} RISK`, `text-[10px] font-black px-1.5 py-0.5 rounded border uppercase ${overlay.risk_mode==='AGGRESSIVE'?'bg-amber-500/10 text-amber-400 border-amber-500/20':'bg-slate-800 text-slate-500 border-slate-700'}`);
-        
+        safeSet('signalIntent', sig?.intent ? `Intent: ${sig.intent}` : 'Intent: -');
+        const ind = s.latest_indicators || {};
+        safeSet('macdLine', Number.isFinite(Number(ind.macd)) ? `MACD: ${fmt(ind.macd, 4)} | SIG: ${fmt(ind.macd_signal, 4)} | DIF: ${fmt(ind.macd_diff, 4)}` : 'MACD: -');
         safeSet('aiRationale', overlay.rationale || sig.reason || 'Initializing neural vector...');
         safeSet('gateTrace', sig.gate_trace ? `Gate: ${sig.gate_trace}` : (sig.hold_reason ? `Gate: ${sig.hold_reason}` : 'Gate: -'));
         if (q('signalConf')) { 
@@ -527,7 +632,6 @@
           q('signalConf').className = `h-full transition-all duration-700 ${sig.action==='BUY'?'bg-emerald-500':sig.action==='SELL'?'bg-rose-500':'bg-slate-600'}`; 
         }
         if (q('posSide')) { q('posSide').textContent = pos?pos.side:'FLAT'; q('posSide').className = `text-[9px] font-black px-1.5 py-0.5 rounded border uppercase ${pos?(pos.side==='LONG'?'bg-emerald-500/20 text-emerald-400 border-emerald-500/30':'bg-rose-500/20 text-rose-400 border-rose-500/30'):'bg-slate-800 text-slate-500 border-slate-700'}`; }
-        
         const cardTactical = q('cardTactical');
         if (cardTactical) {
           if (pos) {
@@ -544,7 +648,51 @@
           }
         }
 
-        safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-'); safeSet('posSl', pos ? fmt(pos.sl, 5) : '-'); safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
+        safeSet('posLev', pos && pos.effective_leverage ? `${fmt(pos.effective_leverage, 1)}x` : '-'); safeSet('posEntry', pos ? fmt(pos.entry, 5) : '-'); safeSet('posSl', pos ? fmt(pos.sl, 5) : '-'); safeSet('posTp', pos ? fmt(pos.tp_price, 5) : '-');
+        // Gauge Update
+        const posGauge = q('posGauge');
+        if (pos && posGauge) {
+            posGauge.classList.remove('hidden');
+            const sl = parseFloat(pos.sl), tp = parseFloat(pos.tp_price), cp = curP;
+            const entryP = parseFloat(pos.entry);
+            const side = String(pos.side).toUpperCase();
+            if (sl && tp && cp && entryP) {
+                let pct = 0, entryPct = 0;
+                if (side === 'LONG') {
+                    pct = (cp - sl) / (tp - sl) * 100;
+                    entryPct = (entryP - sl) / (tp - sl) * 100;
+                } else {
+                    pct = (sl - cp) / (sl - tp) * 100;
+                    entryPct = (sl - entryP) / (sl - tp) * 100;
+                }
+                const bounded = Math.max(0, Math.min(100, pct));
+                const entryBounded = Math.max(0, Math.min(100, entryPct));
+                
+                q('gaugeLabelL').textContent = 'SL'; 
+                q('gaugeLabelR').textContent = 'TP';
+                safeSet('gaugePriceL', fmt(sl, 4));
+                safeSet('gaugePriceM', fmt(entryP, 4));
+                safeSet('gaugePriceR', fmt(tp, 4));
+                
+                const prog = q('gaugeProgress');
+                q('gaugeMarker').style.left = `${bounded}%`;
+                if (q('gaugeEntryMark')) q('gaugeEntryMark').style.left = `${entryBounded}%`;
+                if (q('gaugeEntryGroup')) q('gaugeEntryGroup').style.left = `${Math.max(5, Math.min(95, entryBounded))}%`;
+                
+                if (bounded >= entryBounded) {
+                    prog.style.left = `${entryBounded}%`;
+                    prog.style.width = `${bounded - entryBounded}%`;
+                    prog.className = 'absolute top-0 bottom-0 bg-gradient-to-r from-emerald-500/20 to-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.8)] transition-all duration-500 ease-out rounded-r-full';
+                } else {
+                    prog.style.left = `${bounded}%`;
+                    prog.style.width = `${entryBounded - bounded}%`;
+                    prog.className = 'absolute top-0 bottom-0 bg-gradient-to-l from-rose-500/20 to-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.8)] transition-all duration-500 ease-out rounded-l-full';
+                }
+            }
+        } else if (posGauge) {
+            posGauge.classList.add('hidden');
+        }
+
         const mCtx = s.mtf_context || {}, m5 = mCtx['5m'] || {}, allLvls = [...(m5.support_levels || []), ...(m5.resistance_levels || [])].map(l => parseFloat(l)).filter(l => !isNaN(l)).sort((a,b)=>a-b);
         safeSet('bullStrike', (allLvls.filter(l => l > curP)[0]) ? fmt(allLvls.filter(l => l > curP)[0], 5) : 'WAITING');
         safeSet('bearStrike', (allLvls.filter(l => l < curP).reverse()[0]) ? fmt(allLvls.filter(l => l < curP).reverse()[0], 5) : 'WAITING');
@@ -559,12 +707,31 @@
             open: parseFloat(c.open), 
             high: parseFloat(c.high), 
             low: parseFloat(c.low), 
-            close: parseFloat(c.close) 
+            close: parseFloat(c.close),
+            ema_9: parseFloat(c.ema_9),
+            ema_21: parseFloat(c.ema_21),
+            psar: parseFloat(c.psar),
+            macd: parseFloat(c.macd),
+            macd_signal: parseFloat(c.macd_signal),
+            macd_diff: parseFloat(c.macd_diff),
           }));
           
           const chartKey = sorted.length > 0 ? (sorted[sorted.length-1].time + '|' + sorted[sorted.length-1].close) : null;
           if (chartKey !== _lastChartKey) {
             candleSeries.setData(chartData);
+            if (ema9Series) ema9Series.setData(indicatorVisibility.ema9 ? chartData.filter(c => Number.isFinite(c.ema_9)).map(c => ({ time: c.time, value: c.ema_9 })) : []);
+            if (ema21Series) ema21Series.setData(indicatorVisibility.ema21 ? chartData.filter(c => Number.isFinite(c.ema_21)).map(c => ({ time: c.time, value: c.ema_21 })) : []);
+            if (candleSeries.setMarkers) candleSeries.setMarkers(indicatorVisibility.sar ? chartData.filter(c => Number.isFinite(c.psar)).map(c => ({
+              time: c.time,
+              position: c.psar <= c.close ? 'belowBar' : 'aboveBar',
+              color: '#a855f7',
+              shape: c.psar <= c.close ? 'arrowUp' : 'arrowDown',
+              text: 'SAR'
+            })) : []);
+            if (macdHistSeries) macdHistSeries.setData(indicatorVisibility.macd ? chartData.filter(c => Number.isFinite(c.macd_diff)).map(c => ({ time: c.time, value: c.macd_diff, color: c.macd_diff >= 0 ? 'rgba(34,197,94,0.55)' : 'rgba(244,63,94,0.55)' })) : []);
+            if (macdLineSeries) macdLineSeries.setData(indicatorVisibility.macd ? chartData.filter(c => Number.isFinite(c.macd)).map(c => ({ time: c.time, value: c.macd })) : []);
+            if (macdSignalSeries) macdSignalSeries.setData(indicatorVisibility.macd ? chartData.filter(c => Number.isFinite(c.macd_signal)).map(c => ({ time: c.time, value: c.macd_signal })) : []);
+            if (macdZeroLine) macdZeroLine.setData(indicatorVisibility.macd && chartData.length ? [{ time: chartData[0].time, value: 0 }, { time: chartData[chartData.length - 1].time, value: 0 }] : []);
             if (volumeSeries) {
               volumeSeries.setData(sorted.map(c => ({
                 time: Math.floor(c.time / 1000),
@@ -605,14 +772,26 @@
         }
         if (q('newsTicker') && s.ai_overlay?.headlines) { q('newsTicker').innerHTML = s.ai_overlay.headlines.map(h => `<div class="ticker__item">${escHtml(h)}</div>`).join(''); }
 
-        // New panels
         if (!_equityChart) initEquityChart();
         const _netPnl = Number(s.pnl_stats?.total_profit || 0) - Math.abs(Number(s.pnl_stats?.total_loss || 0));
         updateEquityCurve(s.closed_trades || [], Number(s.balance || 1000) - _netPnl);
         renderTradeList(s.closed_trades || []);
         renderPerfStats(s.pnl_stats, s.closed_trades || []);
+        renderSparkline(s.closed_trades || []);
         updateSRLines(s.signal || {}, pos);
       } catch (err) { console.error('RenderState Error:', err); }
+    }
+
+    function renderSparkline(trades) {
+        const container = q('equitySpark'); if (!container) return;
+        if (!trades || trades.length < 3) return;
+        const vals = trades.slice(-10).map(t => Number(t.pnl || 0));
+        let cur = 0; const points = [0]; vals.forEach(v => { cur += v; points.push(cur); });
+        const min = Math.min(...points), max = Math.max(...points), range = max - min || 1;
+        const w = 96, h = 40;
+        const pts = points.map((v, i) => `${(i / (points.length - 1)) * w},${h - ((v - min) / range) * h}`);
+        const color = points[points.length-1] >= points[0] ? '#10b981' : '#f43f5e';
+        container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" class="w-full h-full"><path d="M ${pts.join(' L ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>`;
     }
 
     async function fetchJson(p) { const r = await fetch(p, {cache:'no-store'}); if (!r.ok) throw new Error('Fetch failed'); const t = await r.text(); return JSON.parse(t.replace(/:\s*(NaN|Infinity|-Infinity)/g, ':null')); }
@@ -628,37 +807,30 @@
 
     function buildSettingsForm(cfg) {
       const container = q('settingsForm'); if (!container) return;
-      
       const categories = {};
       SCHEMA.forEach(f => {
         const cat = f.cat || 'General';
         if (!categories[cat]) categories[cat] = [];
         categories[cat].push(f);
       });
-
       container.innerHTML = '';
       Object.entries(categories).forEach(([cat, fields]) => {
         const section = document.createElement('div');
         section.className = 'mb-8';
-        
         const hdr = document.createElement('h3');
         hdr.className = 'text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4 pb-2 border-b border-white/10 flex items-center gap-2';
         hdr.innerHTML = `<span class="w-1 h-1 rounded-full bg-emerald-500/50"></span> ${escHtml(cat)}`;
         section.appendChild(hdr);
-        
         fields.forEach(f => {
           const val = (cfg && f.key) ? f.key.split('.').reduce((o,i) => (o && typeof o === 'object') ? o[i] : undefined, cfg) : undefined;
           const row = document.createElement('div');
           row.className = 'mb-4 flex items-center justify-between gap-4 p-3 bg-white/5 rounded-2xl border border-white/5';
-          
           const label = document.createElement('label');
           label.className = 'block text-[11px] font-bold text-slate-400 uppercase tracking-tight';
           label.textContent = f.label;
           row.appendChild(label);
-          
           const wrap = document.createElement('div');
           wrap.className = 'min-w-[100px] flex justify-end';
-          
           let input;
           if (f.type === 'bool') {
             const lbl = document.createElement('label');
@@ -699,7 +871,6 @@
           row.appendChild(wrap);
           section.appendChild(row);
         });
-        
         container.appendChild(section);
       });
     }
@@ -718,27 +889,20 @@
     q('pauseToggleBtn').onclick = () => {
       const btn = q('pauseToggleBtn'), textEl = q('pauseText'), iconEl = q('pauseIcon');
       if (!btn || !textEl || !iconEl || isSyncingPause) return;
-      
       const isPaused = !!(STATE.config?.execution?.paused);
       expectedPauseState = !isPaused;
       isSyncingPause = true;
-
       textEl.textContent = 'SYNCING...';
       iconEl.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
       btn.classList.add('opacity-80', 'pointer-events-none');
-
       _pauseSyncTimeout = setTimeout(() => {
         _resetPauseSync();
         if (STATE) renderState(STATE);
       }, 8000);
-
       fetch('/api/toggle-pause', { method: 'POST', headers: {'Content-Type': 'application/json'} })
         .then(r => r.json())
         .then(() => setTimeout(refresh, 200))
-        .catch(() => {
-          _resetPauseSync();
-          if (STATE) renderState(STATE);
-        });
+        .catch(() => { _resetPauseSync(); if (STATE) renderState(STATE); });
     };
 
     q('emergencyExit').onclick = async () => {
@@ -770,9 +934,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cmd: 'set_tf', tf: tf })
         });
-        if (r.ok) {
-          setTimeout(refresh, 500);
-        }
+        if (r.ok) { setTimeout(refresh, 500); }
       } catch (err) { console.error('Command Error:', err); }
     }
 

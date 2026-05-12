@@ -28,15 +28,20 @@ def apply_sr_wall_veto(ctx: SignalContext) -> None:
     current_price = ctx['current_price']
     ema_9_val = ctx.get('ema_9_val', ctx['latest_indicators'].get('ema_9', current_price))
     wall_escape_gate = float(strategy_config.get("wall_breakout_score_gate", 0.15) or 0.15)
+    wall_state = ctx.get('wall_state', {}) or {}
+    resistance_broken = bool(wall_state.get("resistance_broken"))
+    support_broken = bool(wall_state.get("support_broken"))
 
     if sr_score >= 1.0 and action == "SELL" and not _sr_wall_escape_ready(
         action, sr_score, total_score, mtf_fast_bias, macd_diff_val, psar_bull, current_price, ema_9_val, wall_escape_gate,
+        break_confirmed=support_broken,
     ):
         ctx['action'] = "HOLD"
         ctx['hold_reason'] = f"SR Wall Veto: price near support (sr={sr_score:.1f}) — no SHORT"
         ctx['sr_wall_locked'] = True
     elif sr_score <= -1.0 and action == "BUY" and not _sr_wall_escape_ready(
         action, sr_score, total_score, mtf_fast_bias, macd_diff_val, psar_bull, current_price, ema_9_val, wall_escape_gate,
+        break_confirmed=resistance_broken,
     ):
         ctx['action'] = "HOLD"
         ctx['hold_reason'] = f"SR Wall Veto: price near resistance (sr={sr_score:.1f}) — no LONG"
@@ -57,6 +62,8 @@ def apply_range_position_veto(ctx: SignalContext) -> None:
     sr_score = ctx.get('sr_score', 0.0)
     mtf_fast_bias = ctx.get('mtf_fast_bias', 'NEUTRAL')
     total_score = ctx.get('total_score', 0.0)
+    macd_diff_val = float(ctx.get('macd_diff', 0.0) or 0.0)
+    psar_bull = bool(ctx.get('psar_bull', True))
 
     _tf_str = str(strategy_config.get("timeframe", "15m") or "15m").strip().lower()
     _tf_map = {"1m": 1440, "3m": 480, "5m": 288, "10m": 144, "15m": 96, "1h": 24, "4h": 6}
@@ -83,26 +90,44 @@ def apply_range_position_veto(ctx: SignalContext) -> None:
         and abs(sr_score) < 1.0
     )
 
+    wall_state = ctx.get('wall_state', {}) or {}
+    resistance_broken = bool(wall_state.get("resistance_broken"))
+    support_broken = bool(wall_state.get("support_broken"))
+
     if action == "BUY" and _pos >= _veto_top:
-        if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -0.5:
+        if _is_strong and mtf_fast_bias == "LONG_ONLY" and sr_score > -0.5 and resistance_broken:
             pass
         else:
             ctx['action'] = "HOLD"
             ctx['hold_reason'] = (
                 f"Range Veto: BUY in top {int(_veto_top*100)}% of {_lookback}c range "
-                f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f}). "
-                f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-0.5 for breakout."
+                f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f} res_broken={resistance_broken}). "
+                f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr>-0.5 + resistance_broken."
             )
 
     elif action == "SELL" and _pos <= _veto_bottom:
-        if _is_strong and mtf_fast_bias == "SHORT_ONLY" and sr_score < 0.5:
+        _prior_recent = df_indicators.iloc[-(_lookback + 1):-1] if len(df_indicators) > 1 else df_indicators.iloc[0:0]
+        _prior_local_range_low = float(_prior_recent["low"].min()) if len(_prior_recent) > 0 else _range_low
+        _early_local_breakdown = (
+            mtf_fast_bias == "SHORT_ONLY"
+            and total_score <= -0.70
+            and macd_diff_val < 0
+            and not psar_bull
+            and current_price <= _prior_local_range_low * (1 - 0.0003)
+        )
+
+        if _is_strong and mtf_fast_bias == "SHORT_ONLY" and sr_score < 0.5 and support_broken:
             pass
+        elif _early_local_breakdown:
+            suffix = ctx.get('signal_reason_suffix', '')
+            ctx['signal_reason_suffix'] = f"{suffix} [EarlyLocalBreakdown]"
         else:
             ctx['action'] = "HOLD"
             ctx['hold_reason'] = (
                 f"Range Veto: SELL in bottom {int((1-_veto_bottom)*100)}% of {_lookback}c range "
-                f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f}). "
-                f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr<0.5 for breakdown."
+                f"(pos={_pos:.0%} score={total_score:.2f} sr={sr_score:.1f} sup_broken={support_broken}). "
+                f"Need score>={_veto_escape_score:.2f} + unanimous MTF + sr<0.5 + support_broken, "
+                f"or EarlyLocalBreakdown below prior local low."
             )
 
 
@@ -141,9 +166,21 @@ def classify_entry_mode_and_walls(ctx: SignalContext) -> None:
 
     if support and resistance and action in {"BUY", "SELL"}:
         if res_broken and action == "BUY":
-            entry_mode = "BREAKOUT_LONG"
+            break_level = float(wall_state.get('resistance_break_level', resistance))
+            near_break = abs(current_price - break_level) / max(break_level, 1e-9) <= float(strategy_config.get('retest_gate_pct', 0.003))
+            if near_break or abs(total_score) >= 0.7 or (total_score > 0.25 and macd_diff_val > 0):
+                entry_mode = "BREAKOUT_LONG"
+            else:
+                action = "HOLD"
+                hold_reason = f"Retest Gate: BUY at ${current_price:.2f} far above break ${break_level:.2f} — no retest"
         elif sup_broken and action == "SELL":
-            entry_mode = "BREAKOUT_SHORT"
+            break_level = float(wall_state.get('support_break_level', support))
+            near_break = abs(current_price - break_level) / max(break_level, 1e-9) <= float(strategy_config.get('retest_gate_pct', 0.003))
+            if near_break or abs(total_score) >= 0.7 or (total_score < -0.25 and macd_diff_val < 0):
+                entry_mode = "BREAKOUT_SHORT"
+            else:
+                action = "HOLD"
+                hold_reason = f"Retest Gate: SELL at ${current_price:.2f} far below break ${break_level:.2f} — no retest"
         elif res_touch and not res_broken and action == "SELL":
             entry_mode = "REVERSAL_SHORT"
         elif sup_touch and not sup_broken and action == "BUY":
@@ -172,7 +209,6 @@ def classify_entry_mode_and_walls(ctx: SignalContext) -> None:
                     f"(${current_price:.3f} / wall ${float(resistance):.3f}). "
                     f"Wait for break>${float(wall_state.get('resistance_break_level', resistance)):.3f}."
                 )
-                sr_wall_locked = True
         elif sup_touch and not sup_broken and action == "SELL":
             wall_reversal_gate = float(strategy_config.get("wall_reversal_score_gate", 0.12) or 0.12)
             support_rejection_ready = (
@@ -191,21 +227,27 @@ def classify_entry_mode_and_walls(ctx: SignalContext) -> None:
                 entry_mode = "REVERSAL_LONG"
                 signal_reason_suffix += " [Wall Reclaim Long]"
             else:
-                breakdown_likely = (
-                    (macd_diff_val < 0)
-                    and (mtf_fast_bias == "SHORT_ONLY")
-                    and (total_score < -0.25)
-                )
-                if not breakdown_likely:
+                if not sup_broken:
                     action = "HOLD"
                     hold_reason = (
-                        f"Wall Veto: SELL near intact support (${current_price:.3f} / floor ${float(support):.3f}). "
+                        f"Wall Veto: SELL near support (${current_price:.3f} / floor ${float(support):.3f}) - support not broken. "
                         f"Need SHORT_ONLY MTF + score<-0.25 for breakdown entry."
                     )
-                    sr_wall_locked = True
                 else:
-                    entry_mode = "BREAKDOWN_SHORT"
-                    signal_reason_suffix += " [Breakdown Short]"
+                    breakdown_likely = (
+                        (macd_diff_val < 0)
+                        and (mtf_fast_bias == "SHORT_ONLY")
+                        and (total_score < -0.25)
+                    )
+                    if not breakdown_likely:
+                        action = "HOLD"
+                        hold_reason = (
+                            f"Wall Veto: SELL near support (${current_price:.3f} / floor ${float(support):.3f}). "
+                            f"Need SHORT_ONLY MTF + score<-0.25 for breakdown entry."
+                        )
+                    else:
+                        entry_mode = "BREAKDOWN_SHORT"
+                        signal_reason_suffix += " [Breakdown Short]"
 
     ctx['action'] = action
     ctx['entry_mode'] = entry_mode
@@ -287,83 +329,40 @@ def apply_midrange_policy(ctx: SignalContext) -> None:
     signal = ctx.get('signal', {})
     current_price = ctx['current_price']
     strategy_config = ctx['strategy_config']
-    mtf_fast_bias = ctx.get('mtf_fast_bias', 'NEUTRAL')
-    sr_score = ctx.get('sr_score', 0.0)
-    total_score = ctx.get('total_score', 0.0)
-    macd_diff_val = ctx.get('macd_diff', 0.0)
-    psar_bull = ctx.get('psar_bull', True)
-    ema_9_val = ctx.get('ema_9_val', ctx['latest_indicators'].get('ema_9', current_price))
-
     m5_s = signal.get("structure_support")
     m5_r = signal.get("structure_resistance")
 
     if m5_s and m5_r:
-        range_action_zone_pct = ctx.get('range_action_zone_pct', 0.20)
-        range_action_zone_pct = max(0.05, min(0.45, range_action_zone_pct))
         range_w = m5_r - m5_s
-        zone_size = range_w * range_action_zone_pct
-        top_action_zone = m5_r - zone_size
-        bottom_action_zone = m5_s + zone_size
-        in_middle = not (current_price >= top_action_zone) and not (current_price <= bottom_action_zone)
-
-        signal["action_support"] = float(bottom_action_zone)
-        signal["action_resistance"] = float(top_action_zone)
-        signal["top_action_zone"] = float(top_action_zone)
-        signal["bottom_action_zone"] = float(bottom_action_zone)
+        pos = (current_price - m5_s) / range_w if range_w > 0 else 0.5
+        in_middle = 0.25 <= pos <= 0.75
 
         final_action = signal.get("action", "HOLD")
         if final_action not in {"BUY", "SELL"} or not in_middle:
             return
 
-        wall_escape_gate = float(strategy_config.get("wall_breakout_score_gate", 0.15) or 0.15)
         _reason_str = signal.get("reason", "") or ""
         entry_mode = _reason_str.split("[Mode:")[-1].split("]")[0] if "[Mode:" in _reason_str else "TREND"
+        if "BREAKOUT" in entry_mode:
+            return
 
-        mid_min_score = float(strategy_config.get("midrange_min_score", 0.28) or 0.28)
-        mtf_aligned = mtf_fast_bias == ("LONG_ONLY" if final_action == "BUY" else "SHORT_ONLY")
-        score_ok = abs(float(signal.get("score", 0.0) or 0.0)) >= mid_min_score
-
-        if "REVERSAL" in entry_mode or "BREAKOUT" in entry_mode:
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = (
-                f"Gate: {entry_mode} needs edge "
-                f"(price ${current_price:.2f} between zones ${bottom_action_zone:.2f}–${top_action_zone:.2f})."
-            )
-        elif not mtf_aligned:
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = (
-                f"Midrange Gate: MTF ({mtf_fast_bias}) ≠ {final_action}. "
-                f"Wait for edge or unanimous MTF bias."
-            )
-        elif not score_ok:
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = (
-                f"Midrange Gate: score {float(signal.get('score', 0)):.3f} < {mid_min_score:.2f}. "
-                f"Need stronger signal for midrange trend entry."
-            )
-        elif final_action == "BUY" and sr_score <= -1.0 and not _sr_wall_escape_ready(
-            final_action, sr_score, float(signal.get("score", 0.0) or 0.0), mtf_fast_bias,
-            float(macd_diff_val or 0.0), bool(psar_bull), current_price, ema_9_val, wall_escape_gate,
-        ):
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = (
-                f"Midrange SR Block: BUY near resistance wall (sr={sr_score:.1f}) "
-                f"even with TREND mode — no long into ceiling."
-            )
-            signal["sr_wall_locked"] = True
-        elif final_action == "SELL" and sr_score >= 1.0 and not _sr_wall_escape_ready(
-            final_action, sr_score, float(signal.get("score", 0.0) or 0.0), mtf_fast_bias,
-            float(macd_diff_val or 0.0), bool(psar_bull), current_price, ema_9_val, wall_escape_gate,
-        ):
-            signal["action"] = "HOLD"
-            signal["hold_reason"] = (
-                f"Midrange SR Block: SELL near support wall (sr={sr_score:.1f}) "
-                f"even with TREND mode — no short into floor."
-            )
-            signal["sr_wall_locked"] = True
+        signal["action"] = "HOLD"
+        signal["hold_reason"] = (
+            f"Midrange Gate: TREND blocked in consolidation (pos={pos:.0%}, "
+            f"price ${current_price:.2f} between zones ${m5_s:.2f}–${m5_r:.2f})."
+        )
+        signal["sr_wall_locked"] = True
     else:
         _reason_str = signal.get("reason", "") or ""
         entry_mode = _reason_str.split("[Mode:")[-1].split("]")[0] if "[Mode:" in _reason_str else "TREND"
+        wall_state = ctx.get('wall_state', {}) or {}
+        sr_score = ctx.get('sr_score', 0.0)
+        mtf_fast_bias = ctx.get('mtf_fast_bias', 'NEUTRAL')
+        psar_bull = ctx.get('psar_bull', True)
+        ema_9_val = ctx.get('ema_9_val', ctx['latest_indicators'].get('ema_9', current_price))
+        macd_diff_val = ctx.get('macd_diff', 0.0)
+        support_broken = bool(wall_state.get("support_broken"))
+        resistance_broken = bool(wall_state.get("resistance_broken"))
         wall_escape_gate = float(strategy_config.get("wall_breakout_score_gate", 0.15) or 0.15)
 
         if "REVERSAL" in entry_mode:
@@ -372,6 +371,7 @@ def apply_midrange_policy(ctx: SignalContext) -> None:
         elif signal.get("action") == "BUY" and sr_score <= -1.0 and not _sr_wall_escape_ready(
             signal.get("action"), sr_score, float(signal.get("score", 0.0) or 0.0), mtf_fast_bias,
             float(macd_diff_val or 0.0), bool(psar_bull), current_price, ema_9_val, wall_escape_gate,
+            break_confirmed=resistance_broken,
         ):
             signal["action"] = "HOLD"
             signal["hold_reason"] = f"No-SR fallback SR block: BUY near resistance (sr={sr_score:.1f})"
@@ -379,6 +379,7 @@ def apply_midrange_policy(ctx: SignalContext) -> None:
         elif signal.get("action") == "SELL" and sr_score >= 1.0 and not _sr_wall_escape_ready(
             signal.get("action"), sr_score, float(signal.get("score", 0.0) or 0.0), mtf_fast_bias,
             float(macd_diff_val or 0.0), bool(psar_bull), current_price, ema_9_val, wall_escape_gate,
+            break_confirmed=support_broken,
         ):
             signal["action"] = "HOLD"
             signal["hold_reason"] = f"No-SR fallback SR block: SELL near support (sr={sr_score:.1f})"

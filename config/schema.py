@@ -111,6 +111,15 @@ class ExecutionConfig(TypedDict, total=False):
     dca_max_steps: int                            # Default 0
     dca_distance_pct: float                       # Default 0.01
 
+    # Scale-in (paper only)
+    scale_in_enabled: bool                        # Default False
+    scale_in_max_steps: int                       # Default 2
+    scale_in_min_pnl_pct: float                   # Default 0.0020
+    scale_in_cooldown_seconds: int                # Default 180
+    scale_in_position_pct: float                  # Default 0.5
+    scale_in_max_exposure_pct: float              # Default 0.50
+    scale_in_wall_buffer_pct: float               # Default 0.002
+
     # Paper-gate (live mode safety check)
     paper_gate_min_trades: int                    # Default 100
     paper_gate_min_profit_factor: float           # Default 1.2
@@ -311,6 +320,8 @@ class MemoryConfig(TypedDict, total=False):
 class LoggingConfig(TypedDict, total=False):
     max_mb: float                                    # Default 5
     backups: int                                     # Default 3
+    session_root: str                                # Default "sessions"
+    log_file: str                                    # Session-specific log file path
 
 
 class BotConfig(TypedDict, total=False):

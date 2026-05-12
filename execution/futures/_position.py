@@ -67,7 +67,7 @@ class PositionManagerMixin:
                         net_pnl = pnl - fees
                         exit_type = _realized_exit_type(str(pending_exit.get("exit_type", "TRAIL_WIN") or "TRAIL_WIN"), net_pnl)
                         self._record_closed_trade(exit_type, entry, fill_price, pnl, profit_pct * 100, fees)
-                        self._log_trade(pos.get("trade_id", 0), "EXIT", pending_exit.get("side", "SELL"), fill_price, amount, pnl, exit_fee, t_type=exit_type)
+                        self._log_trade(pos.get("trade_id", 0), "EXIT", pending_exit.get("side", "SELL"), fill_price, amount, pnl, exit_fee, t_type=exit_type, signal_reason=str(pos.get("signal_reason", "") or ""), entry_mode=str(pos.get("entry_mode", "") or ""))
                         self.trade_count += 1
                         self._last_trade_ts = time.time()
                         self._recently_closed_ts = time.time()
@@ -153,6 +153,8 @@ class PositionManagerMixin:
                             exit_fee,
                             t_type=exit_type,
                             reason="maker exit partial fill before market fallback",
+                            signal_reason=str(pos.get("signal_reason", "") or ""),
+                            entry_mode=str(pos.get("entry_mode", "") or ""),
                         )
                         self._last_trade_ts = time.time()
                         self.last_status = (
@@ -237,7 +239,7 @@ class PositionManagerMixin:
                         exit_type = _realized_exit_type("EXCHANGE_CLOSED", net_pnl)
                         order_side = "SELL" if side == "LONG" else "BUY"
                         self._record_closed_trade(exit_type, entry, fill_price, pnl, profit_pct * 100, fees)
-                        self._log_trade(trade_id, "EXIT", order_side, fill_price, amount, pnl, exit_fee, t_type=exit_type)
+                        self._log_trade(trade_id, "EXIT", order_side, fill_price, amount, pnl, exit_fee, t_type=exit_type, signal_reason=str(pos.get("signal_reason", "") or ""), entry_mode=str(pos.get("entry_mode", "") or ""))
                         self.trade_count += 1
                         self._last_trade_ts = time.time()
                         self._recently_closed_ts = time.time()
@@ -385,6 +387,8 @@ class PositionManagerMixin:
                         score=pending_score,
                         confidence=pending_confidence,
                         reason=pending_reason or "adopted existing exchange position",
+                        signal_reason="",
+                        entry_mode="ADOPTED",
                         t_type="ADOPTED",
                     )
                 else:

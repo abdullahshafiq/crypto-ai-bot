@@ -132,10 +132,18 @@ def apply_trend_confirmation_gate(ctx: SignalContext) -> None:
     bull_votes = int(ema_cross_bull) + int(psar_bull) + int(macd_final_bull)
     bear_votes = int(not ema_cross_bull) + int(not psar_bull) + int(macd_final_bear)
 
+    _not_at_range_bottom = True
+    _sup = ctx.get('support')
+    _res = ctx.get('resistance')
+    if _sup and _res and float(_res) > float(_sup):
+        _pos = (current_price - float(_sup)) / (float(_res) - float(_sup))
+        _not_at_range_bottom = _pos > 0.25
+
     sell_momentum_escape = (
         current_price < ema_21_val
-        and (not psar_bull or macd_diff_val < 0)
         and pa_score <= 0
+        and (not psar_bull or macd_diff_val <= 0)
+        and _not_at_range_bottom
     )
     buy_momentum_escape = (
         current_price > ema_21_val

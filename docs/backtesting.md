@@ -3,13 +3,13 @@
 Run the historical backtest with the same signal engine used live:
 
 ```powershell
-python backtest.py --config config.live.yaml --symbol AVAX/USDC:USDC --timeframe 5m --limit 1000
+python backtest/engine.py --config config.yaml --symbol AVAX/USDC:USDC --timeframe 5m --limit 1000
 ```
 
 Optional exports:
 
 ```powershell
-python backtest.py --config config.live.yaml --symbol AVAX/USDC:USDC --timeframe 5m --limit 1000 --trades-out backtest_trades.csv --equity-out backtest_equity.csv
+python backtest/engine.py --config config.yaml --symbol AVAX/USDC:USDC --timeframe 5m --limit 1000 --trades-out backtest_trades.csv --equity-out backtest_equity.csv
 ```
 
 What it does:

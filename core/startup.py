@@ -1,13 +1,15 @@
 import logging
-from logging.handlers import RotatingFileHandler
-import pandas as pd
-import time
 import os
+import time
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+import pandas as pd
 
 from .synthetic_data import _fallback_bootstrap_ohlcv
 
 
-def setup_logging(logging_cfg: dict | None = None):
+def setup_logging(logging_cfg: dict | None = None, log_file: str = "bot.log"):
     # Only log to file so we don't mess up the clean terminal dashboard
     logging_cfg = logging_cfg or {}
     max_mb = float(logging_cfg.get("max_mb", 5))
@@ -18,13 +20,19 @@ def setup_logging(logging_cfg: dict | None = None):
     if backups < 1:
         backups = 1
 
+    log_file = str(logging_cfg.get("log_file", log_file) or log_file)
+    log_path = Path(log_file)
+    if log_path.parent and str(log_path.parent) not in {"", "."}:
+        os.makedirs(log_path.parent, exist_ok=True)
+
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     logging.basicConfig(
         level=logging.INFO,
         format=log_format,
         handlers=[
-            RotatingFileHandler("bot.log", maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
-        ]
+            RotatingFileHandler(str(log_path), maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+        ],
+        force=True,
     )
 _NETWORK_FAIL_UNTIL = 0.0
 _NETWORK_COOLDOWN_SECONDS = 60.0
@@ -97,3 +105,10 @@ def _reapply_runtime_executor_config(executor, cfg):
     executor.dca_enabled = bool(exec_cfg.get("dca_enabled", False))
     executor.dca_max_steps = int(exec_cfg.get("dca_max_steps", 0))
     executor.dca_distance_pct = float(exec_cfg.get("dca_distance_pct", 0.01))
+    if hasattr(executor, "same_side_reentry_cooldown_seconds"):
+        executor.same_side_reentry_cooldown_seconds = int(
+            exec_cfg.get(
+                "same_side_reentry_cooldown_seconds",
+                getattr(executor, "same_side_reentry_cooldown_seconds", 180),
+            )
+        )

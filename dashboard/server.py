@@ -59,12 +59,7 @@ def get_index_html() -> str:
     global _INDEX_HTML_CACHE, _INDEX_HTML_CACHE_MTIME
     path = Path(__file__).parent / "static" / "index.html"
     try:
-        mtime = path.stat().st_mtime
-        if _INDEX_HTML_CACHE is not None and _INDEX_HTML_CACHE_MTIME == mtime:
-            return _INDEX_HTML_CACHE
-        _INDEX_HTML_CACHE = path.read_text(encoding="utf-8")
-        _INDEX_HTML_CACHE_MTIME = mtime
-        return _INDEX_HTML_CACHE
+        return path.read_text(encoding="utf-8")
     except Exception as exc:
         print(f"[DASHBOARD] Failed to load index.html: {exc}")
     _INDEX_HTML_CACHE = "<h1>Error loading index.html</h1>"

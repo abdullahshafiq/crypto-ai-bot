@@ -82,9 +82,14 @@ def _compute_trend_confirmation(ctx: SignalContext) -> None:
             (lookback_macds[i] < 0 and lookback_macds[i - 1] >= 0)
             for i in range(1, len(lookback_macds))
         )
+        
+        # Momentum Slope Check
+        macd_slope_bull = macd_diff_val2 > ctx.get('prev_macd_diff', 0.0)
+        macd_slope_bear = macd_diff_val2 < ctx.get('prev_macd_diff', 0.0)
+        
         macd_outside_noise = abs(macd_val) > macd_noise_threshold
-        macd_inst_bull = (macd_pos_bull or macd_zero_cross_bull) and macd_outside_noise
-        macd_inst_bear = ((not macd_pos_bull) or macd_zero_cross_bear) and macd_outside_noise
+        macd_inst_bull = (macd_pos_bull or macd_zero_cross_bull) and macd_outside_noise and macd_slope_bull
+        macd_inst_bear = ((not macd_pos_bull) or macd_zero_cross_bear) and macd_outside_noise and macd_slope_bear
         ctx['macd_final_bull'] = macd_inst_bull
         ctx['macd_final_bear'] = macd_inst_bear
 

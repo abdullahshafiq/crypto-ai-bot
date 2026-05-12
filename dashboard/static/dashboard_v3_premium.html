@@ -158,11 +158,12 @@
           
           <!-- Chart Card -->
           <div class="xl:col-span-3 space-y-6">
-            <div class="terminal-card rounded-2xl overflow-hidden relative border-slate-800/60 shadow-2xl">
+          <div class="terminal-card rounded-2xl overflow-hidden relative border-slate-800/60 shadow-2xl">
               <div class="absolute top-4 left-4 z-10 flex gap-2" id="chartHud"></div>
-              <div id="chartWrap" class="h-[500px] w-full bg-slate-950">
-                <div id="chart" class="absolute inset-0"></div>
-                <canvas id="chartCanvas" class="absolute inset-0 pointer-events-none opacity-50"></canvas>
+              <div id="chartWrap" class="relative w-full bg-slate-950 flex flex-col">
+                <div id="chart" class="relative flex-1 min-h-[360px]">
+                  <canvas id="chartCanvas" class="absolute inset-0 pointer-events-none opacity-50"></canvas>
+                </div>
               </div>
             </div>
 
@@ -176,7 +177,11 @@
                   </h3>
                   <span id="posSide" class="text-[10px] font-black px-2 py-0.5 rounded bg-slate-800 border border-slate-700">-</span>
                 </div>
-                <div class="grid grid-cols-3 gap-4">
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div>
+                    <p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Leverage</p>
+                    <p class="text-sm font-mono text-cyan-300 font-bold" id="posLev">-</p>
+                  </div>
                   <div>
                     <p class="text-[10px] font-bold text-slate-500 uppercase mb-1">Entry</p>
                     <p class="text-sm font-mono text-white font-bold" id="posEntry">-</p>
@@ -204,6 +209,8 @@
                     <span class="text-[10px] font-bold text-slate-500 uppercase">Direction</span>
                     <span id="signalText" class="text-xs font-bold text-slate-400">-</span>
                   </div>
+                  <p id="signalIntent" class="text-[10px] font-bold text-cyan-300 uppercase tracking-wide">Intent: -</p>
+                  <p id="macdLine" class="text-[10px] font-mono text-cyan-300 leading-relaxed uppercase tracking-wide">MACD: -</p>
                   <p id="gateTrace" class="text-[10px] font-mono text-amber-300 leading-relaxed uppercase tracking-wide">Gate: -</p>
                   <div class="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden">
                     <div id="signalConf" class="h-full bg-indigo-500 transition-all duration-500 w-0"></div>
@@ -248,7 +255,7 @@
     const SCHEMA = [];
     let STATE = null;
     let CONFIG = null;
-    let chart, candles, lines = {};
+    let chart, candles, lines = {}, macdHistSeries, macdLineSeries, macdZeroLine;
     let useLibraryChart = false;
     const CANVAS_ONLY = false;
     let canvasCtx = null;
@@ -263,6 +270,32 @@
     };
     const q = (id) => document.getElementById(id);
     const safeText = (v) => (v === null || v === undefined || v === '') ? '-' : String(v);
+    let indicatorVisibility = { ema9: true, ema21: true, sar: true, macd: true };
+    const indicatorBtnCls = (on) => on
+      ? 'px-2 py-1 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20 transition-colors'
+      : 'px-2 py-1 rounded bg-slate-800 text-slate-500 border border-slate-700 hover:bg-white/5 transition-colors';
+
+    function toggleIndicator(key) {
+      indicatorVisibility[key] = !indicatorVisibility[key];
+      _lastChartKey = null;
+      renderState(STATE);
+    }
+
+    function renderIndicatorControls() {
+      const box = q('chartHud');
+      if (!box) return;
+      box.innerHTML = [
+        `<button type="button" data-indicator="ema9" class="${indicatorBtnCls(indicatorVisibility.ema9)}">EMA9</button>`,
+        `<button type="button" data-indicator="ema21" class="${indicatorBtnCls(indicatorVisibility.ema21)}">EMA21</button>`,
+        `<button type="button" data-indicator="sar" class="${indicatorBtnCls(indicatorVisibility.sar)}">SAR</button>`,
+        `<button type="button" data-indicator="macd" class="${indicatorBtnCls(indicatorVisibility.macd)}">MACD</button>`,
+        `<span class="px-2 py-1 bg-obsidian/80 border border-slate-800 rounded text-[9px] font-bold text-slate-500 uppercase tracking-widest">ADX: <span class="text-white">${fmt((STATE?.latest_indicators || {}).adx, 1)}</span></span>`,
+        `<span class="px-2 py-1 bg-obsidian/80 border border-slate-800 rounded text-[9px] font-bold text-slate-500 uppercase tracking-widest">VWAPΔ: <span class="text-white">${fmt((STATE?.latest_indicators || {}).vwap_dist_pct, 2)}%</span></span>`,
+      ].join('');
+      box.querySelectorAll('[data-indicator]').forEach(btn => {
+        btn.onclick = () => toggleIndicator(btn.getAttribute('data-indicator'));
+      });
+    }
 
     function setConnection(ok, message) {
       const dot = q('connDot');
@@ -360,10 +393,36 @@
         lines.entry = chart.addLineSeries({ color: '#6366f1', lineWidth: 1, lineStyle: 2, title: 'ENTRY' });
         lines.sl = chart.addLineSeries({ color: '#f43f5e', lineWidth: 1, lineStyle: 2, title: 'STOP' });
         lines.tp = chart.addLineSeries({ color: '#10b981', lineWidth: 1, lineStyle: 2, title: 'TARGET' });
-        useLibraryChart = true;
-        _chartResizeObserver = new ResizeObserver(() => { if (chart) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }); });
-        _chartResizeObserver.observe(el);
-      } catch (e) { console.warn('Chart build failed', e); useLibraryChart = false; resizeFallbackChart(); }
+      lines.ema9 = chart.addLineSeries({ color: '#22d3ee', lineWidth: 1, title: 'EMA9' });
+      lines.ema21 = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, title: 'EMA21' });
+      macdHistSeries = chart.addHistogramSeries({
+        color: '#22c55e',
+        priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
+        base: 0,
+        priceScaleId: 'macd',
+      });
+      macdLineSeries = chart.addLineSeries({
+        color: '#22d3ee',
+        lineWidth: 1,
+        title: 'MACD',
+        priceScaleId: 'macd',
+      });
+      macdZeroLine = chart.addLineSeries({
+        color: '#475569',
+        lineWidth: 1,
+        lineStyle: 2,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        priceScaleId: 'macd',
+      });
+      if (macdHistSeries?.priceScale) macdHistSeries.priceScale().applyOptions({ scaleMargins: { top: 0.76, bottom: 0.06 } });
+      if (macdLineSeries?.priceScale) macdLineSeries.priceScale().applyOptions({ scaleMargins: { top: 0.76, bottom: 0.06 } });
+      if (macdZeroLine?.priceScale) macdZeroLine.priceScale().applyOptions({ scaleMargins: { top: 0.76, bottom: 0.06 } });
+      useLibraryChart = true;
+      _chartResizeObserver = new ResizeObserver(() => { if (chart) chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }); });
+      _chartResizeObserver.observe(el);
+    } catch (e) { console.warn('Chart build failed', e); useLibraryChart = false; resizeFallbackChart(); }
     }
 
     function getNested(obj, path) { return path.split('.').reduce((acc, k) => acc && acc[k], obj); }
@@ -471,6 +530,9 @@
         
         const sig = s.signal;
         const sigText = q('signalText'); if (sigText) sigText.textContent = sig ? `${sig.action} @ ${fmt(sig.confidence*100, 0)}%` : 'NEUTRAL';
+        const sigIntent = q('signalIntent'); if (sigIntent) sigIntent.textContent = sig?.intent ? `Intent: ${sig.intent}` : 'Intent: -';
+        const ind = s.latest_indicators || {};
+        const macdLine = q('macdLine'); if (macdLine) macdLine.textContent = Number.isFinite(Number(ind.macd)) ? `MACD: ${fmt(ind.macd, 4)} | SIG: ${fmt(ind.macd_signal, 4)} | DIF: ${fmt(ind.macd_diff, 4)}` : 'MACD: -';
         const gate = q('gateTrace'); if (gate) gate.textContent = sig?.gate_trace ? `Gate: ${sig.gate_trace}` : (sig?.hold_reason ? `Gate: ${sig.hold_reason}` : 'Gate: -');
         const sigConf = q('signalConf'); if (sigConf) {
           sigConf.style.width = sig ? `${sig.confidence*100}%` : '0%';
@@ -482,6 +544,7 @@
           ps.textContent = pos ? pos.side : 'NONE';
           ps.className = `text-[10px] font-black px-2 py-0.5 rounded border ${pos?.side === 'LONG' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : pos?.side === 'SHORT' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 'bg-slate-800 text-slate-500 border-slate-700'}`;
         }
+        const pl = q('posLev'); if (pl) pl.textContent = pos && pos.effective_leverage ? `${fmt(pos.effective_leverage, 1)}x` : '-';
         const pe = q('posEntry'); if (pe) pe.textContent = pos ? fmt(pos.entry, 5) : '-';
         const psl = q('posSl'); if (psl) psl.textContent = pos ? fmt(pos.sl, 5) : '-';
         const ptp = q('posTp'); if (ptp) ptp.textContent = pos ? fmt(pos.tp_price, 5) : '-';
@@ -509,23 +572,35 @@
           if (wasAtBottom) sl.scrollTop = sl.scrollHeight;
         }
 
-        const ch = q('chartHud'); if (ch) {
-          ch.innerHTML = [
-            `<span class="px-2 py-1 bg-obsidian/80 border border-slate-800 rounded text-[9px] font-bold text-slate-500 uppercase tracking-widest">ADX: <span class="text-white">${fmt(s.latest_indicators?.adx, 1)}</span></span>`,
-            `<span class="px-2 py-1 bg-obsidian/80 border border-slate-800 rounded text-[9px] font-bold text-slate-500 uppercase tracking-widest">VWAPΔ: <span class="text-white">${fmt(s.latest_indicators?.vwap_dist_pct, 2)}%</span></span>`,
-          ].join('');
-        }
+        renderIndicatorControls();
 
         if (useLibraryChart && s.chart && s.chart.length > 0) {
             const chartData = s.chart.map(c => ({
                 time: Math.floor(c.time / 1000),
                 open: Number(c.open), high: Number(c.high),
-                low: Number(c.low), close: Number(c.close)
+                low: Number(c.low), close: Number(c.close),
+                ema_9: Number(c.ema_9), ema_21: Number(c.ema_21),
+                psar: Number(c.psar),
+                macd: Number(c.macd),
+                macd_signal: Number(c.macd_signal),
+                macd_diff: Number(c.macd_diff),
             }));
             const last = chartData[chartData.length - 1];
             const chartKey = last.time + '|' + last.close;
             if (chartKey !== _lastChartKey) {
                 candles.setData(chartData);
+                if (lines.ema9) lines.ema9.setData(indicatorVisibility.ema9 ? chartData.filter(c => Number.isFinite(c.ema_9)).map(c => ({ time: c.time, value: c.ema_9 })) : []);
+                if (lines.ema21) lines.ema21.setData(indicatorVisibility.ema21 ? chartData.filter(c => Number.isFinite(c.ema_21)).map(c => ({ time: c.time, value: c.ema_21 })) : []);
+                if (candles.setMarkers) candles.setMarkers(indicatorVisibility.sar ? chartData.filter(c => Number.isFinite(c.psar)).map(c => ({
+                    time: c.time,
+                    position: c.psar <= c.close ? 'belowBar' : 'aboveBar',
+                    color: '#a855f7',
+                    shape: c.psar <= c.close ? 'arrowUp' : 'arrowDown',
+                    text: 'SAR'
+                })) : []);
+                if (macdHistSeries) macdHistSeries.setData(indicatorVisibility.macd ? chartData.filter(c => Number.isFinite(c.macd_diff)).map(c => ({ time: c.time, value: c.macd_diff, color: c.macd_diff >= 0 ? 'rgba(34,197,94,0.55)' : 'rgba(244,63,94,0.55)' })) : []);
+                if (macdLineSeries) macdLineSeries.setData(indicatorVisibility.macd ? chartData.filter(c => Number.isFinite(c.macd)).map(c => ({ time: c.time, value: c.macd })) : []);
+                if (macdZeroLine) macdZeroLine.setData(indicatorVisibility.macd && chartData.length ? [{ time: chartData[0].time, value: 0 }, { time: chartData[chartData.length - 1].time, value: 0 }] : []);
                 _lastChartKey = chartKey;
             }
             if (pos) {

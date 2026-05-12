@@ -2,7 +2,7 @@ import copy
 import time
 
 
-def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_start, status_lines, pivot_data, mtf_context, open_orders, latest_indicators, chart_bars, ai_overlay_state, cfg):
+def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_start, status_lines, pivot_data, mtf_context, open_orders, latest_indicators, chart_bars, ai_overlay_state, cfg, freshness=None):
     current_price = float(state.get("price", 0.0) or 0.0) if isinstance(state, dict) else 0.0
     portfolio_value = float(getattr(executor, "initial_balance", 0.0) or 0.0)
     if not getattr(executor, "is_paper", False):
@@ -190,5 +190,6 @@ def _build_dashboard_snapshot(symbol, regime, state, signal, executor, session_s
             "execution": copy.deepcopy(cfg.get("execution", {}) or {}),
             "strategy": copy.deepcopy(cfg.get("strategy", {}) or {}),
             "mtf": copy.deepcopy(cfg.get("mtf", {}) or {}),
-        }
+        },
+        "freshness": copy.deepcopy(freshness or {}),
     }

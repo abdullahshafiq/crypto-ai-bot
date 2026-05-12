@@ -41,6 +41,14 @@ class PaperFuturesExecution:
         self.reversal_min_confidence = 0.0
         self.reversal_min_score = 0.0
         self.reversal_min_net_edge_pct = 0.0
+        self.same_side_reentry_cooldown_seconds = 180
+        self.scale_in_enabled = False
+        self.scale_in_max_steps = 2
+        self.scale_in_min_pnl_pct = 0.0020
+        self.scale_in_cooldown_seconds = 180
+        self.scale_in_position_pct = 0.5
+        self.scale_in_max_exposure_pct = 0.50
+        self.scale_in_wall_buffer_pct = 0.002
         self.break_even_trigger_pct = 0.0010
         self.break_even_buffer_pct = 0.0003
         self.profit_trailing_enabled = True
@@ -53,6 +61,12 @@ class PaperFuturesExecution:
         self.trail_t1_gap_pct = 0.0025
         self.trail_t2_gap_pct = 0.0020
         self._last_trade_ts = 0.0
+        self._last_profitable_exit_side = ""
+        self._last_profitable_exit_ts = 0.0
+        self._last_defensive_exit_side = ""
+        self._last_defensive_exit_ts = 0.0
+        self._opposite_reset_seen_after_profit = False
+        self.psar_exit_min_streak = 2
         self.trade_log_file = TRADE_LOG_FILE
         self.active_positions = []
         self.last_status = "PAPER READY"
@@ -70,7 +84,10 @@ class PaperFuturesExecution:
         self._initial_price_set = True
         self._last_price = None
         self._current_atr_pct = 0.02
+        self._current_psar = None
+        self._current_psar_streak = 0
         self.min_profit_after_fees = 0.0002
+        self._current_signal_snapshot = {}
         self.daily_loss_cap_pct = None
         self.disable_loss_cap = False
         self.scalp_config = {
@@ -164,6 +181,184 @@ class PaperFuturesExecution:
         leverage = max(self.leverage_min, min(self.leverage_max, leverage))
         return leverage
 
+    def _same_side_reentry_veto(self, signal: dict, action: str, now: float) -> str:
+        last_prof_side = str(getattr(self, "_last_profitable_exit_side", "") or "").upper()
+        last_prof_ts = float(getattr(self, "_last_profitable_exit_ts", 0.0) or 0.0)
+        action = str(action or "").upper()
+        cooldown = float(getattr(self, "same_side_reentry_cooldown_seconds", 0) or 0)
+
+        def _same_side(side: str) -> bool:
+            return (side == "LONG" and action == "BUY") or (side == "SHORT" and action == "SELL")
+
+        if last_prof_side in {"LONG", "SHORT"} and last_prof_ts > 0 and _same_side(last_prof_side):
+            elapsed = now - last_prof_ts
+            if cooldown > 0 and elapsed < cooldown:
+                wait_s = int(max(1.0, cooldown - elapsed))
+                return f"Veto: post-profit same-side cooldown ({wait_s}s)"
+
+        last_def_side = str(getattr(self, "_last_defensive_exit_side", "") or "").upper()
+        last_def_ts = float(getattr(self, "_last_defensive_exit_ts", 0.0) or 0.0)
+        if last_def_side in {"LONG", "SHORT"} and last_def_ts > 0 and _same_side(last_def_side):
+            elapsed = now - last_def_ts
+            if cooldown > 0 and elapsed < cooldown:
+                wait_s = int(max(1.0, cooldown - elapsed))
+                return f"Veto: post-defensive same-side cooldown ({wait_s}s)"
+        return ""
+
+    def _paper_scale_in_gate(
+        self,
+        signal: dict,
+        action: str,
+        current_price: float,
+        now: float,
+        balance: float,
+        base_trade_usdt: float,
+        current_leverage: float,
+    ) -> tuple[bool, str, float]:
+        if not bool(getattr(self, "scale_in_enabled", False)):
+            return False, "", 0.0
+
+        action = str(action or "").upper()
+        if action not in {"BUY", "SELL"}:
+            return False, "", 0.0
+
+        pos_side = "LONG" if action == "BUY" else "SHORT"
+        same_side_positions = [
+            p for p in self.active_positions
+            if str(p.get("side", "")).upper() == pos_side
+        ]
+        if not same_side_positions:
+            return False, "", 0.0
+
+        if len(same_side_positions) != len(self.active_positions):
+            return False, "Veto: scale-in requires single-side exposure", 0.0
+
+        max_steps = max(1, int(getattr(self, "scale_in_max_steps", 2) or 2))
+        if len(same_side_positions) >= max_steps:
+            return False, f"Veto: scale-in max steps ({max_steps})", 0.0
+
+        cooldown = float(getattr(self, "scale_in_cooldown_seconds", 0) or 0.0)
+        last_entry_ts = max(float(p.get("entry_ts", now) or now) for p in same_side_positions)
+        elapsed = now - last_entry_ts
+        if cooldown > 0 and elapsed < cooldown:
+            wait_s = int(max(1.0, cooldown - elapsed))
+            return False, f"Veto: scale-in cooldown ({wait_s}s)", 0.0
+
+        total_amount = sum(float(p.get("amount", 0.0) or 0.0) for p in same_side_positions)
+        if total_amount <= 0:
+            return False, "Veto: scale-in invalid position size", 0.0
+
+        weighted_entry = sum(
+            float(p.get("entry", current_price) or current_price) * float(p.get("amount", 0.0) or 0.0)
+            for p in same_side_positions
+        ) / total_amount
+        if weighted_entry <= 0:
+            return False, "Veto: scale-in invalid entry", 0.0
+
+        pnl_pct = (
+            (current_price - weighted_entry) / weighted_entry
+            if pos_side == "LONG"
+            else (weighted_entry - current_price) / weighted_entry
+        )
+        min_pnl_pct = float(getattr(self, "scale_in_min_pnl_pct", 0.0) or 0.0)
+        if pnl_pct < min_pnl_pct:
+            return False, f"Veto: scale-in needs profit ({pnl_pct:+.2%} < {min_pnl_pct:.2%})", 0.0
+
+        wall_buffer_pct = float(getattr(self, "scale_in_wall_buffer_pct", 0.0) or 0.0)
+        resistance = signal.get("structure_resistance")
+        support = signal.get("structure_support")
+        resistance_broken = bool(signal.get("resistance_broken"))
+        support_broken = bool(signal.get("support_broken"))
+
+        try:
+            resistance = float(resistance) if resistance is not None else 0.0
+        except (TypeError, ValueError):
+            resistance = 0.0
+        try:
+            support = float(support) if support is not None else 0.0
+        except (TypeError, ValueError):
+            support = 0.0
+
+        if pos_side == "LONG":
+            if resistance > 0 and not resistance_broken:
+                resistance_broken = current_price >= (resistance * (1.0 + wall_buffer_pct))
+            if resistance > 0 and not resistance_broken and current_price >= (resistance * (1.0 - wall_buffer_pct)):
+                return False, "Veto: scale-in near resistance", 0.0
+        else:
+            if support > 0 and not support_broken:
+                support_broken = current_price <= (support * (1.0 - wall_buffer_pct))
+            if support > 0 and not support_broken and current_price <= (support * (1.0 + wall_buffer_pct)):
+                return False, "Veto: scale-in near support", 0.0
+
+        scale_in_position_pct = float(getattr(self, "scale_in_position_pct", 0.0) or 0.0)
+        if scale_in_position_pct <= 0:
+            return False, "Veto: scale-in disabled", 0.0
+
+        scale_trade_usdt = float(base_trade_usdt) * scale_in_position_pct
+        if scale_trade_usdt <= 0:
+            return False, "Veto: scale-in size too small", 0.0
+
+        max_exposure_pct = float(getattr(self, "scale_in_max_exposure_pct", 0.0) or 0.0)
+        if max_exposure_pct > 0 and balance > 0:
+            existing_notional = sum(
+                float(p.get("amount", 0.0) or 0.0) * float(current_price)
+                for p in same_side_positions
+            )
+            new_notional = scale_trade_usdt * float(current_leverage)
+            if (existing_notional + new_notional) / balance > max_exposure_pct:
+                return False, f"Veto: scale-in exposure > {max_exposure_pct:.0%}", 0.0
+
+        return True, "", scale_trade_usdt
+
+    def _paper_scale_in_combined_sl(
+        self,
+        signal: dict,
+        pos_side: str,
+        add_entry_price: float,
+        add_amount: float,
+    ) -> tuple[bool, float, str]:
+        same_side_positions = [
+            p for p in self.active_positions
+            if str(p.get("side", "")).upper() == pos_side
+        ]
+        if not same_side_positions:
+            return False, 0.0, "Veto: scale-in missing base position"
+
+        total_amount = float(add_amount or 0.0) + sum(float(p.get("amount", 0.0) or 0.0) for p in same_side_positions)
+        if total_amount <= 0:
+            return False, 0.0, "Veto: scale-in invalid combined size"
+
+        weighted_entry = (
+            float(add_entry_price or 0.0) * float(add_amount or 0.0)
+            + sum(float(p.get("entry", add_entry_price) or add_entry_price) * float(p.get("amount", 0.0) or 0.0) for p in same_side_positions)
+        ) / total_amount
+        if weighted_entry <= 0:
+            return False, 0.0, "Veto: scale-in invalid combined entry"
+
+        max_sl_pct = abs(float(getattr(self, "max_structural_sl_pct", 0.0120) or 0.0120))
+        default_sl_pct = abs(float(getattr(self, "default_sl_pct", 0.0030) or 0.0030))
+        combined_sl = _safe_initial_sl_price(
+            pos_side,
+            weighted_entry,
+            signal.get("sl"),
+            default_sl_pct,
+            signal.get("pivot_classic"),
+            max_sl_pct=max_sl_pct,
+        )
+        if combined_sl <= 0:
+            return False, 0.0, "Veto: scale-in invalid combined SL"
+
+        risk_pct = abs(weighted_entry - combined_sl) / weighted_entry if weighted_entry > 0 else 0.0
+        if max_sl_pct > 0 and risk_pct > (max_sl_pct + 1e-12):
+            return False, 0.0, f"Veto: scale-in combined risk {risk_pct:.2%} > {max_sl_pct:.2%}"
+
+        if pos_side == "LONG" and combined_sl >= weighted_entry:
+            return False, 0.0, "Veto: scale-in combined SL above entry"
+        if pos_side == "SHORT" and combined_sl <= weighted_entry:
+            return False, 0.0, "Veto: scale-in combined SL below entry"
+
+        return True, combined_sl, ""
+
     def _init_trade_log(self):
         log_file = getattr(self, "trade_log_file", TRADE_LOG_FILE)
         if not os.path.exists(log_file):
@@ -237,6 +432,190 @@ class PaperFuturesExecution:
                 return False
         return True
 
+    def _paper_runner_partial_exit(self, pos: dict, current_price: float, trade_id: int, exit_type: str = "TAKE_PROFIT") -> bool:
+        if not isinstance(pos, dict):
+            return False
+
+        side = str(pos.get("side", "")).upper()
+        amount = float(pos.get("amount", 0.0) or 0.0)
+        entry = float(pos.get("entry", current_price) or current_price)
+        if side not in {"LONG", "SHORT"} or amount <= 0 or entry <= 0:
+            return False
+
+        scalp_cfg = getattr(self, "scalp_config", {}) or {}
+        if not bool(scalp_cfg.get("runner_enabled", True)):
+            return False
+        if bool(pos.get("runner_scale_out_taken", False)):
+            return False
+
+        partial_pct = float(scalp_cfg.get("runner_partial_exit_pct", 0.0) or 0.0)
+        if not (0.0 < partial_pct < 1.0):
+            return False
+
+        close_amount = amount * partial_pct
+        remaining_amount = amount - close_amount
+        if close_amount <= 0 or remaining_amount <= 0:
+            return False
+
+        fee_rate = float(pos.get("fee_rate", getattr(self, "fee_rate", 0.0004)) or 0.0004)
+        min_profit = float(pos.get("min_profit_after_fees", getattr(self, "min_profit_after_fees", 0.0002)) or 0.0002)
+        min_net_profit = (2.0 * fee_rate) + min_profit
+        runner_lock = max(
+            float(scalp_cfg.get("runner_min_lock_pct", 0.0) or 0.0),
+            min_net_profit,
+        )
+
+        pnl = (current_price - entry) * close_amount if side == "LONG" else (entry - current_price) * close_amount
+        profit_pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
+        fees = (close_amount * entry * fee_rate) + (close_amount * current_price * fee_rate)
+        exit_fee = close_amount * current_price * fee_rate
+        net_pnl = pnl - fees
+        realized_type = _realized_exit_type(exit_type or "TAKE_PROFIT", net_pnl)
+        order_side = "SELL" if side == "LONG" else "BUY"
+
+        self.cash_usdt += net_pnl
+        self.stats_gross += pnl
+        self.stats_fees += fees
+
+        pos["amount"] = remaining_amount
+        pos["runner_scale_out_taken"] = True
+        pos["profit_runner_armed"] = True
+        pos["trail_armed"] = True
+        pos["runner_partial_exit_pct"] = partial_pct
+        pos["runner_remaining_amount"] = remaining_amount
+        pos["highest_profit_pct"] = max(float(pos.get("highest_profit_pct", 0.0) or 0.0), profit_pct)
+
+        if side == "LONG":
+            protected_sl = entry * (1.0 + runner_lock)
+            pos["sl"] = max(float(pos.get("sl", 0.0) or 0.0), protected_sl)
+            if current_price > float(pos.get("highest_price", entry) or entry):
+                pos["highest_price"] = current_price
+        else:
+            protected_sl = entry * (1.0 - runner_lock)
+            pos["sl"] = min(float(pos.get("sl", 0.0) or 0.0), protected_sl)
+            if current_price < float(pos.get("lowest_price", entry) or entry):
+                pos["lowest_price"] = current_price
+
+        pos["sl_pct_dist"] = abs(entry - float(pos.get("sl", entry) or entry)) / entry if entry else float(pos.get("sl_pct_dist", 0.0) or 0.0)
+
+        self._log_trade(
+            trade_id,
+            "PARTIAL_EXIT",
+            order_side,
+            current_price,
+            close_amount,
+            pnl,
+            exit_fee,
+            t_type=realized_type,
+            reason="paper runner scale-out",
+        )
+        self._last_trade_ts = time.time()
+        self.last_status = (
+            f"{realized_type}: {side} scale-out {close_amount:.8f} @ ${current_price:.5f} "
+            f"Net ${net_pnl:+,.2f} | Rem {remaining_amount:.8f}"
+        )
+        logger.info(
+            f"[PAPER_PARTIAL_EXIT] {side} scale-out {close_amount:.8f}/{amount:.8f} @ {current_price:.5f} "
+            f"| Net: {net_pnl:+.4f} ({profit_pct:+.2%}) | Remaining: {remaining_amount:.8f}"
+        )
+        return True
+
+    def _should_defensive_exit(self, pos: dict, current_price: float) -> bool:
+        signal = getattr(self, "_current_signal_snapshot", {}) or {}
+        side = str(pos.get("side", "")).upper()
+        if side not in {"LONG", "SHORT"}:
+            return False
+
+        entry = float(pos.get("entry", current_price) or current_price)
+        if entry <= 0:
+            return False
+
+        entry_ts = float(pos.get("entry_ts", time.time()) or time.time())
+        hold_time = time.time() - entry_ts
+        fee_rate = float(pos.get("fee_rate", getattr(self, "fee_rate", 0.0004)) or 0.0004)
+        slippage_buffer_pct = float(getattr(self, "fee_slippage_buffer_pct", 0.0) or 0.0)
+        fee_slippage_buffer_pct = max(0.0, (2.0 * fee_rate) + slippage_buffer_pct)
+
+        def _normalized_mode() -> str:
+            if signal.get("aggressive_scalp"):
+                return "AGGRESSIVE_SCALP"
+
+            mode_text = " ".join(
+                str(value)
+                for value in (
+                    pos.get("entry_mode"),
+                    signal.get("entry_mode"),
+                    signal.get("mode"),
+                    signal.get("intent"),
+                    signal.get("reason"),
+                )
+                if value
+            ).upper()
+            if "AGGRESSIVE_SCALP" in mode_text:
+                return "AGGRESSIVE_SCALP"
+            if "RANGE" in mode_text:
+                return "RANGE"
+            if "BREAKOUT" in mode_text or "TREND" in mode_text:
+                return "TREND"
+            return "TREND"
+
+        def _min_hold_seconds(mode: str) -> float:
+            if mode == "AGGRESSIVE_SCALP":
+                return 45.0
+            if mode == "RANGE":
+                return 60.0
+            return 120.0
+
+        sl_price = pos.get("sl")
+        try:
+            sl_price = float(sl_price) if sl_price is not None else 0.0
+        except (TypeError, ValueError):
+            sl_price = 0.0
+        sl_distance_pct = float(pos.get("sl_pct_dist", 0.0) or 0.0)
+        if sl_price > 0 and entry > 0:
+            sl_distance_pct = abs(entry - sl_price) / entry
+
+        if hold_time < _min_hold_seconds(_normalized_mode()):
+            return False
+
+        adverse_move_buffer_pct = max(fee_slippage_buffer_pct, 0.40 * sl_distance_pct)
+
+        if side == "LONG":
+            adverse_move_pct = max(0.0, (entry - current_price) / entry)
+        else:
+            adverse_move_pct = max(0.0, (current_price - entry) / entry)
+
+        if adverse_move_pct < adverse_move_buffer_pct:
+            return False
+
+        bias = str(signal.get("mtf_fast_bias") or signal.get("market_bias") or "").upper()
+        amount = float(pos.get("amount", 0.0) or 0.0)
+        fees = (amount * entry * fee_rate) + (amount * current_price * fee_rate)
+        net_pnl = ((current_price - entry) * amount - fees) if side == "LONG" else ((entry - current_price) * amount - fees)
+        if net_pnl > 0:
+            return False
+
+        if side == "SHORT":
+            if bias not in {"LONG_ONLY", "BULLISH"}:
+                return False
+            resistance = signal.get("structure_resistance")
+            try:
+                resistance = float(resistance) if resistance is not None else 0.0
+            except (TypeError, ValueError):
+                resistance = 0.0
+            reclaim_level = entry if resistance <= 0 else min(entry, resistance)
+            return current_price >= reclaim_level
+
+        if bias not in {"SHORT_ONLY", "BEARISH"}:
+            return False
+        support = signal.get("structure_support")
+        try:
+            support = float(support) if support is not None else 0.0
+        except (TypeError, ValueError):
+            support = 0.0
+        loss_level = entry if support <= 0 else max(entry, support)
+        return current_price <= loss_level
+
     def process_orders_and_positions(self, symbol: str, current_price: float):
         self.symbol = _normalize_futures_symbol(symbol or self.symbol)
         self.symbol_id = _market_id_from_symbol(self.symbol)
@@ -252,6 +631,8 @@ class PaperFuturesExecution:
 
                 exit_type = ""
                 psar = getattr(self, "_current_psar", None)
+                scalp_cfg = getattr(self, "scalp_config", {}) or {}
+                runner_enabled = bool(scalp_cfg.get("runner_enabled", True))
 
                 if side == 'LONG':
                     if current_price > float(pos.get('highest_price', entry) or entry):
@@ -267,6 +648,10 @@ class PaperFuturesExecution:
                     if bool(pos.get("profit_trailing_enabled", True)):
                         trail_activation = max(trail_activation, float(pos.get('break_even_trigger_pct', 0.0030) or 0.0030))
 
+                    if not closed and self._should_defensive_exit(pos, current_price):
+                        closed = True
+                        exit_type = "DEFENSIVE_EXIT"
+
                     if not closed and _trailing_tp_hit(pos, profit_pct, min_net_profit):
                         closed = True
                         exit_type = "TRAIL_TP"
@@ -274,13 +659,26 @@ class PaperFuturesExecution:
                     # TAKE PROFIT: explicit TP price hit
                     _tp_price = float(pos.get('tp_price') or 0.0)
                     if not closed and _tp_price > 0 and current_price >= _tp_price:
-                        closed = True
-                        exit_type = "TAKE_PROFIT"
+                        if runner_enabled and not bool(pos.get("runner_scale_out_taken", False)):
+                            if self._paper_runner_partial_exit(pos, current_price, trade_id, exit_type="TAKE_PROFIT"):
+                                remaining.append(pos)
+                                continue
+                            closed = True
+                            exit_type = "TAKE_PROFIT"
+                        else:
+                            closed = True
+                            exit_type = "TAKE_PROFIT"
 
-                    # PRIMARY EXIT: Parabolic SAR flip (SAR moves ABOVE price = trend reversal)
-                    if not closed and psar is not None and hold_time > 10:
-                        if psar > current_price and profit_pct >= min_net_profit:
-                            # SAR flipped bearish while we are in profit — clean exit
+                    # PRIMARY EXIT: Parabolic SAR flip (streak-confirmed reversal)
+                    if not closed and psar is not None and hold_time > 60:
+                        psar_streak = int(getattr(self, "_current_psar_streak", 0) or 0)
+                        min_psar_streak = max(1, int(getattr(self, "psar_exit_min_streak", 2) or 2))
+                        if (
+                            psar > current_price
+                            and profit_pct >= min_net_profit
+                            and psar_streak <= -min_psar_streak
+                        ):
+                            # SAR flipped bearish with enough streak confirmation while profitable.
                             closed = True
                             exit_type = "PSAR_EXIT"
 
@@ -301,7 +699,11 @@ class PaperFuturesExecution:
                     # TTL EXIT: cut stuck positions after timeout (losers AND barely-profitable)
                     ttl_seconds = int(getattr(self, 'ttl_exit_seconds', 0))
                     if not closed and ttl_seconds > 0 and hold_time > ttl_seconds:
-                        if profit_pct < break_even_trigger:  # not yet locked in profit — cut it
+                        if profit_pct >= 0:
+                            min_sl_price = entry * (1 + (2.0 * fee_rate) + min_profit)
+                            if min_sl_price > float(pos['sl']):
+                                pos['sl'] = min_sl_price
+                        elif profit_pct < break_even_trigger:  # not yet locked in profit — cut it
                             closed = True
                             exit_type = "TTL_EXIT"
 
@@ -324,6 +726,10 @@ class PaperFuturesExecution:
                     if bool(pos.get("profit_trailing_enabled", True)):
                         trail_activation = max(trail_activation, float(pos.get('break_even_trigger_pct', 0.0030) or 0.0030))
 
+                    if not closed and self._should_defensive_exit(pos, current_price):
+                        closed = True
+                        exit_type = "DEFENSIVE_EXIT"
+
                     if not closed and _trailing_tp_hit(pos, profit_pct, min_net_profit):
                         closed = True
                         exit_type = "TRAIL_TP"
@@ -331,13 +737,26 @@ class PaperFuturesExecution:
                     # TAKE PROFIT: explicit TP price hit
                     _tp_price = float(pos.get('tp_price') or 0.0)
                     if not closed and _tp_price > 0 and current_price <= _tp_price:
-                        closed = True
-                        exit_type = "TAKE_PROFIT"
+                        if runner_enabled and not bool(pos.get("runner_scale_out_taken", False)):
+                            if self._paper_runner_partial_exit(pos, current_price, trade_id, exit_type="TAKE_PROFIT"):
+                                remaining.append(pos)
+                                continue
+                            closed = True
+                            exit_type = "TAKE_PROFIT"
+                        else:
+                            closed = True
+                            exit_type = "TAKE_PROFIT"
 
-                    # PRIMARY EXIT: Parabolic SAR flip (SAR moves BELOW price = trend reversal for short)
-                    if not closed and psar is not None and hold_time > 10:
-                        if psar < current_price and profit_pct >= min_net_profit:
-                            # SAR flipped bullish while we are in profit — clean exit
+                    # PRIMARY EXIT: Parabolic SAR flip (streak-confirmed reversal)
+                    if not closed and psar is not None and hold_time > 60:
+                        psar_streak = int(getattr(self, "_current_psar_streak", 0) or 0)
+                        min_psar_streak = max(1, int(getattr(self, "psar_exit_min_streak", 2) or 2))
+                        if (
+                            psar < current_price
+                            and profit_pct >= min_net_profit
+                            and psar_streak >= min_psar_streak
+                        ):
+                            # SAR flipped bullish with enough streak confirmation while profitable.
                             closed = True
                             exit_type = "PSAR_EXIT"
 
@@ -358,7 +777,11 @@ class PaperFuturesExecution:
                     # TTL EXIT: cut stuck positions after timeout (losers AND barely-profitable)
                     ttl_seconds = int(getattr(self, 'ttl_exit_seconds', 0))
                     if not closed and ttl_seconds > 0 and hold_time > ttl_seconds:
-                        if profit_pct < break_even_trigger:  # not yet locked in profit — cut it
+                        if profit_pct >= 0:
+                            max_sl_price = entry * (1 - (2.0 * fee_rate) - min_profit)
+                            if max_sl_price < float(pos['sl']):
+                                pos['sl'] = max_sl_price
+                        elif profit_pct < break_even_trigger:  # not yet locked in profit — cut it
                             closed = True
                             exit_type = "TTL_EXIT"
 
@@ -375,7 +798,7 @@ class PaperFuturesExecution:
                     fees = (amount * entry * self.fee_rate) + (amount * current_price * self.fee_rate)
                     exit_fee = amount * current_price * self.fee_rate
                     net_pnl = pnl - fees
-                    exit_type = _realized_exit_type(exit_type or "TRAIL_WIN", net_pnl)
+                    exit_type = exit_type if exit_type == "DEFENSIVE_EXIT" else _realized_exit_type(exit_type or "TRAIL_WIN", net_pnl)
                     self.cash_usdt += (pnl - fees)
 
                     self._record_closed_trade(exit_type, entry, current_price, pnl, profit_pct * 100, fees)
@@ -383,6 +806,9 @@ class PaperFuturesExecution:
                     self.trade_count += 1
                     self.last_status = f"PAPER {exit_type}: {side} @ ${current_price:.2f} P&L ${pnl:+,.2f}"
                     self._last_trade_ts = time.time()
+                    if exit_type == "DEFENSIVE_EXIT":
+                        self._last_defensive_exit_side = side
+                        self._last_defensive_exit_ts = self._last_trade_ts
                 else:
                     remaining.append(pos)
             self.active_positions = remaining
@@ -420,14 +846,36 @@ class PaperFuturesExecution:
 
             if self.active_positions:
                 current_pos = self.active_positions[0]
-                if (action == "SELL" and current_pos['side'] == "LONG") or (action == "BUY" and current_pos['side'] == "SHORT"):
-                    hold_until = float(current_pos.get("hold_until_ts", 0.0) or 0.0)
+                current_side = str(current_pos.get("side", "")).upper()
+                if (action == "SELL" and current_side == "LONG") or (action == "BUY" and current_side == "SHORT"):
+                    reversal_positions = [
+                        p for p in self.active_positions
+                        if str(p.get("side", "")).upper() == current_side
+                    ]
+                    if not reversal_positions:
+                        return
+
+                    hold_until = max(float(p.get("hold_until_ts", 0.0) or 0.0) for p in reversal_positions)
                     if hold_until and now < hold_until:
                         self.last_status = "Veto: hold period"
                         return
+
                     entry_ts = float(current_pos.get("entry_ts", now))
                     age = now - entry_ts
-                    profit_pct = (current_price - current_pos['entry']) / current_pos['entry'] if current_pos['side'] == 'LONG' else (current_pos['entry'] - current_price) / current_pos['entry']
+                    total_amount = sum(float(p.get("amount", 0.0) or 0.0) for p in reversal_positions)
+                    if total_amount <= 0:
+                        self.last_status = "Veto: reversal invalid size"
+                        return
+
+                    weighted_entry = sum(
+                        float(p.get("entry", current_price) or current_price) * float(p.get("amount", 0.0) or 0.0)
+                        for p in reversal_positions
+                    ) / total_amount
+                    profit_pct = (
+                        (current_price - weighted_entry) / weighted_entry
+                        if current_side == "LONG"
+                        else (weighted_entry - current_price) / weighted_entry
+                    )
 
                     round_trip_fee_pct = 2.0 * float(self.fee_rate)
                     reentry_fee_pct = float(self.fee_rate)
@@ -451,22 +899,97 @@ class PaperFuturesExecution:
                         self.last_status = "Veto: reversal weak"
                         return
 
-                    logger.info(f"[REVERSAL] Banking {current_pos['side']} before {action} (P&L: {profit_pct:+.2%})")
-                    order_side = 'SELL' if current_pos['side'] == 'LONG' else 'BUY'
-                    pnl = (current_price - current_pos['entry']) * current_pos['amount'] if current_pos['side'] == 'LONG' else (current_pos['entry'] - current_price) * current_pos['amount']
-                    fees = (current_pos['amount'] * current_pos['entry'] * self.fee_rate) + (current_pos['amount'] * current_price * self.fee_rate)
-                    exit_fee = current_pos['amount'] * current_price * self.fee_rate
-                    net_pnl = pnl - fees
-                    self.cash_usdt += (pnl - fees)
+                    logger.info(
+                        f"[REVERSAL] Banking {len(reversal_positions)} {current_side} legs before {action} "
+                        f"(P&L: {profit_pct:+.2%})"
+                    )
+                    order_side = 'SELL' if current_side == 'LONG' else 'BUY'
                     exit_type = "REVERSAL_BANK" if getattr(self, 'exit_on_reversal_only_in_profit', True) else "REVERSAL"
-                    self._record_closed_trade(exit_type, current_pos['entry'], current_price, pnl, profit_pct * 100, fees)
-                    self._log_trade(current_pos.get("trade_id", 0), "EXIT", order_side, current_price, current_pos['amount'], pnl, exit_fee, t_type=exit_type)
+                    total_net_pnl = 0.0
+                    total_pnl = 0.0
+                    total_fees = 0.0
+                    for pos in reversal_positions:
+                        pos_entry = float(pos.get("entry", current_price) or current_price)
+                        pos_amount = float(pos.get("amount", 0.0) or 0.0)
+                        pos_pnl = (current_price - pos_entry) * pos_amount if current_side == "LONG" else (pos_entry - current_price) * pos_amount
+                        pos_fees = (pos_amount * pos_entry * self.fee_rate) + (pos_amount * current_price * self.fee_rate)
+                        pos_exit_fee = pos_amount * current_price * self.fee_rate
+                        pos_profit_pct = (
+                            (current_price - pos_entry) / pos_entry * 100.0
+                            if current_side == "LONG"
+                            else (pos_entry - current_price) / pos_entry * 100.0
+                        )
+                        pos_net_pnl = pos_pnl - pos_fees
+                        total_pnl += pos_pnl
+                        total_fees += pos_fees
+                        total_net_pnl += pos_net_pnl
+                        self.cash_usdt += pos_net_pnl
+                        self._record_closed_trade(exit_type, pos_entry, current_price, pos_pnl, pos_profit_pct, pos_fees)
+                        self._log_trade(
+                            pos.get("trade_id", 0),
+                            "EXIT",
+                            order_side,
+                            current_price,
+                            pos_amount,
+                            pos_pnl,
+                            pos_exit_fee,
+                            t_type=exit_type,
+                        )
                     self.active_positions = []
                     self._last_trade_ts = now
-                    self.last_status = f"{exit_type}: {current_pos['side']} @ ${current_price:.5f} Net ${net_pnl:+,.2f}"
+                    self.last_status = f"{exit_type}: {current_side} x{len(reversal_positions)} @ ${current_price:.5f} Net ${total_net_pnl:+,.2f}"
+                    if total_net_pnl > 0:
+                        self._last_profitable_exit_side = current_side
+                        self._last_profitable_exit_ts = now
+                        self._opposite_reset_seen_after_profit = False
                     # Keep going so the opposite-side reversal can enter immediately.
 
-            if len(self.active_positions) >= self.max_open_positions:
+            balance = self.get_portfolio_value(current_price)
+            if balance <= 0:
+                self.last_status = "No equity available"
+                return
+
+            configured_trade_usdt = float(getattr(self, 'fixed_trade_usdt', 0.0) or 0.0)
+            if configured_trade_usdt > 0:
+                base_trade_usdt = min(configured_trade_usdt, balance * 0.90)
+            else:
+                base_trade_usdt = balance * 0.25
+
+            if base_trade_usdt < 10.0:
+                self.last_status = f"Equity too low: ${balance:,.2f}"
+                return
+
+            confidence = float(signal.get('confidence', 0.5) or 0.5)
+            score = float(signal.get('score', 0.5) or 0.5)
+            atr_pct = signal.get('atr_pct')
+            current_leverage = self.calculate_dynamic_leverage(confidence, score, atr_pct=atr_pct)
+
+            scale_in_allowed = False
+            scale_in_trade_usdt = 0.0
+            if self.active_positions:
+                current_side = str(self.active_positions[0].get("side", "")).upper()
+                same_side_action = (action == "BUY" and current_side == "LONG") or (action == "SELL" and current_side == "SHORT")
+                if same_side_action:
+                    scale_in_allowed, scale_in_veto, scale_in_trade_usdt = self._paper_scale_in_gate(
+                        signal,
+                        action,
+                        current_price,
+                        now,
+                        balance,
+                        base_trade_usdt,
+                        current_leverage,
+                    )
+                    if not scale_in_allowed:
+                        self.last_status = scale_in_veto
+                        return
+
+            if not scale_in_allowed:
+                same_side_veto = self._same_side_reentry_veto(signal, action, now)
+                if same_side_veto:
+                    self.last_status = same_side_veto
+                    return
+
+            if len(self.active_positions) >= self.max_open_positions and not scale_in_allowed:
                 pos_info = f"{len(self.active_positions)} pos "
                 if self.active_positions:
                     p = self.active_positions[0]
@@ -474,27 +997,10 @@ class PaperFuturesExecution:
                 self.last_status = f"Max positions: {pos_info}"
                 return
 
-            balance = self.get_portfolio_value(current_price)
-            if balance <= 0:
-                self.last_status = "No equity available"
-                return
-
-            # Determine trade size conservatively so paper matches live risk more closely.
-            configured_trade_usdt = float(getattr(self, 'fixed_trade_usdt', 0.0) or 0.0)
-            if configured_trade_usdt > 0:
-                trade_usdt = min(configured_trade_usdt, balance * 0.90)
-            else:
-                trade_usdt = balance * 0.25
-
+            trade_usdt = scale_in_trade_usdt if scale_in_allowed else base_trade_usdt
             if trade_usdt < 10.0:
-                self.last_status = f"Equity too low: ${balance:,.2f}"
+                self.last_status = f"Trade too small: ${trade_usdt:.2f}"
                 return
-
-            # Use dynamic leverage based on signal confidence (PAPER VERSION)
-            confidence = float(signal.get('confidence', 0.5) or 0.5)
-            score = float(signal.get('score', 0.5) or 0.5)
-            atr_pct = signal.get('atr_pct')  # Get ATR from signal if available
-            current_leverage = self.calculate_dynamic_leverage(confidence, score, atr_pct=atr_pct)
             amount = (trade_usdt * current_leverage) / current_price
             trade_id = self._next_trade_id
             self._next_trade_id += 1
@@ -507,13 +1013,27 @@ class PaperFuturesExecution:
             use_limit = getattr(self, 'use_limit_orders', False)
             simulated_entry_price = float(signal.get('entry', current_price)) if use_limit else current_price
             pos_side = 'LONG' if action == "BUY" else 'SHORT'
+            max_structural_sl_pct = float(getattr(self, 'max_structural_sl_pct', 0.0120) or 0.0120)
             sl_price = _safe_initial_sl_price(
                 pos_side,
                 simulated_entry_price,
                 signal.get('sl'),
                 getattr(self, 'default_sl_pct', 0.0030),
                 signal.get('pivot_classic'),
+                max_sl_pct=max_structural_sl_pct,
             )
+            if scale_in_allowed:
+                sl_ok, combined_sl_price, sl_veto = self._paper_scale_in_combined_sl(
+                    signal,
+                    pos_side,
+                    simulated_entry_price,
+                    amount,
+                )
+                if not sl_ok:
+                    self.last_status = sl_veto
+                    return
+                sl_price = float(combined_sl_price)
+
             sl_dist = abs(simulated_entry_price - sl_price) / simulated_entry_price if simulated_entry_price else float(getattr(self, 'default_sl_pct', 0.0030))
             try:
                 tp_price = float(signal.get('tp')) if signal.get('tp') else None
@@ -553,6 +1073,13 @@ class PaperFuturesExecution:
                 'structure_resistance': signal.get('structure_resistance'),
                 'tp_target': float(signal.get('tp_target', 0.0) or 0.0),
             })
+            if scale_in_allowed:
+                for pos in self.active_positions:
+                    if str(pos.get("side", "")).upper() != pos_side:
+                        continue
+                    entry_px = float(pos.get("entry", simulated_entry_price) or simulated_entry_price)
+                    pos["sl"] = sl_price
+                    pos["sl_pct_dist"] = abs(entry_px - sl_price) / entry_px if entry_px > 0 else float(getattr(self, 'default_sl_pct', 0.0030))
 
             self.trade_count += 1
             self.last_status = f"PAPER ENTRY {action} {amount:.6f}"

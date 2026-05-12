@@ -7,7 +7,7 @@ from .location import (
     _compute_market_location_score, _compute_wall_state,
 )
 from .signals import (
-    generate_quant_signal, validate_signal_integrity, generate_alpha_overlay,
+    generate_quant_signal, generate_alpha_overlay,
     _apply_rejection_confirmation_gate, compute_advanced_pivots,
 )
 from .helpers import (
@@ -34,7 +34,6 @@ __all__ = [
     "_compute_market_location_score",
     "_compute_wall_state",
     "generate_quant_signal",
-    "validate_signal_integrity",
     "generate_alpha_overlay",
     "_apply_rejection_confirmation_gate",
     "get_trend_status",

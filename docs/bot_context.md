@@ -14,16 +14,16 @@ Crypto trading bot. `main.py` is the runtime loop: market data â†’ indicators â†
 |------|------|
 | `main.py` | Entry point, runtime loop, dashboard wiring |
 | `indicators.py` | Signal engine: 13 indicators, SMC, MTF |
-| `execution.py` | Binance futures/spot/paper: orders, SL/TP, trailing |
-| `execution_factory.py` | Chooses executor from config |
+| `execution/futures/_entry.py`, `_position.py`, `_exit.py`, `_protection.py` | Binance futures: orders, SL/TP, trailing |
+| `execution/factory.py` | Chooses executor from config |
 | `agents.py` | Multi-provider AI: regime, overlay, post-trade |
-| `market_data.py` | Binance OHLCV, order book, funding |
+| `market/data.py` | Binance OHLCV, order book, funding |
 | `ml_optimizer.py` | Logistic regression weight learning from trades |
-| `dashboard_server.py` | HTTP dashboard + REST API |
+| `dashboard/server.py` | HTTP dashboard + REST API |
 | `news_data.py` | CryptoPanic news |
 | `performance_gate.py` | Paper performance gate before live |
 | `ai_context.py` | Loads task-specific AI prompts from `ai_context/` |
-| `backtest.py` | Historical backtesting |
+| `backtest/engine.py` | Historical backtesting |
 
 ## Signal Contract
 `generate_quant_signal()` returns: `action`, `score`, `confidence`, `reason`, `tp`, `sl`, `entry`, `structure_support`, `structure_resistance`, `hold_until_ts`, `market_bias`
@@ -51,7 +51,7 @@ Variant: `config.paper.test.yaml` (paper mode). `config.live.yaml` is deprecated
 ## Artifacts
 `trade_log_futures.csv`, `trade_log_demo_futures.csv`, `learning_state.json`, `weights.json`, `ui_state.json`, `bot.log`
 
-## Dashboard API (from dashboard_server.py)
+## Dashboard API (from dashboard/server.py)
 `GET /api/state`, `/api/config`, `/api/schema` | `POST /api/settings`, `/api/toggle-pause`, `/api/command`, `/api/emergency-exit`
 
 ## Operational Notes

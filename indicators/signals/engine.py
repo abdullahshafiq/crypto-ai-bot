@@ -81,6 +81,9 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     current_price = ctx['current_price']
     ctx['ema_21'] = float(latest_indicators.get('ema_21', current_price) or current_price)
     ctx['ema_9'] = float(latest_indicators.get('ema_9', current_price) or current_price)
+    ctx['ema_200'] = float(latest_indicators.get('ema_200', current_price) or current_price)
+    ctx['ema_200_bull'] = current_price > ctx['ema_200'] if ctx['ema_200'] > 0 else False
+    ctx['ema_200_pct_dist'] = float(latest_indicators.get('ema_200_pct_dist', 0.0) or 0.0)
     ctx['atr_pct_now'] = float(latest_indicators.get("atr_pct", 0.5) or 0.5) / 100.0
 
     # ── Phase 4: Indicator scores ──────────────────────────────────────
@@ -104,36 +107,49 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     early_exit = apply_chasing_guard(ctx)
     if early_exit:
         return early_exit
+    _near_extreme_block = 'Near-Extreme' in ctx.get('hold_reason', '')
 
     # ── Phase 8: Trend confirmation + article setups ────────────────────
     _compute_trend_confirmation(ctx)
 
     # ── Phase 9: Build signal dict ──────────────────────────────────────
     signal = _build_signal_dict(ctx)
+    ctx['signal'] = signal
+    entry_mode = signal.get('entry_mode', 'TREND')
 
     # ── Phase 10: Mean reversion + wick sweep setups ───────────────────
     _apply_setup_overrides(signal, ctx)
 
-    # ── Phase 11: Stop loss / take profit ───────────────────────────────
+    # ── Phase 11: Range reversal sniper ─────────────────────────────────
+    apply_range_reversal_sniper(ctx)
+    signal = ctx['signal']
+    entry_mode = signal.get('entry_mode', entry_mode)
+
+    # ── Phase 11b: Late re-snipe (near-extreme HOLD rescue) ─────────────
+    if _near_extreme_block and ctx['signal'].get('action') == 'HOLD':
+        apply_range_reversal_sniper(ctx)
+        signal = ctx['signal']
+        entry_mode = signal.get('entry_mode', entry_mode)
+
+    # ── Phase 12: Stop loss / take profit (after sniper may flip action) ──
     signal = _compute_sl_tp(signal, ctx)
     ctx['signal'] = signal
 
-    # ── Phase 12: MTF trend veto ────────────────────────────────────────
-    apply_mtf_trend_veto(ctx)
-    signal = ctx['signal']
+    # ── Phase 13: MTF trend veto (skipped for RANGE — sniper handles MTF internally) ──
+    if entry_mode != 'RANGE':
+        apply_mtf_trend_veto(ctx)
+        signal = ctx['signal']
 
-    # ── Phase 13: Range reversal sniper ─────────────────────────────────
-    apply_range_reversal_sniper(ctx)
-    signal = ctx['signal']
+    # ── Phase 14: Midrange policy (skipped for RANGE and BREAKOUT) ─────
+    if entry_mode == 'TREND':
+        apply_midrange_policy(ctx)
+        signal = ctx['signal']
 
-    # ── Phase 14: Midrange policy ───────────────────────────────────────
-    apply_midrange_policy(ctx)
-    signal = ctx['signal']
-
-    # ── Phase 15: Rejection confirmation gate ───────────────────────────
-    signal, _rejection_applied = _apply_rejection_confirmation_gate(
-        signal, df_indicators, strategy_config, support=ctx['support'], resistance=ctx['resistance'],
-    )
+    # ── Phase 15: Rejection confirmation gate (skipped for RANGE) ──────
+    if entry_mode != 'RANGE':
+        signal, _rejection_applied = _apply_rejection_confirmation_gate(
+            signal, df_indicators, strategy_config, support=ctx['support'], resistance=ctx['resistance'],
+        )
 
     # ── Phase 16: Exhaustion & divergence gate ──────────────────────────
     ctx['signal'] = signal
@@ -143,4 +159,5 @@ def generate_quant_signal(state, latest_indicators, strategy_config, df_indicato
     # ── Phase 17: Wall rejection rescue ─────────────────────────────────
     ctx['signal'] = signal
     apply_wall_rejection_rescue(ctx)
+
     return ctx['signal']

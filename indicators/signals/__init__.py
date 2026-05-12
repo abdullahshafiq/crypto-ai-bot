@@ -34,13 +34,12 @@ Quick file finder — edit the file next to the thing you want to change:
 """
 
 from .engine import generate_quant_signal
-from .alpha import generate_alpha_overlay, validate_signal_integrity, compute_advanced_pivots
+from .alpha import generate_alpha_overlay, compute_advanced_pivots
 from .gates import _apply_rejection_confirmation_gate
 from .signal_types import QuantSignal, RejectionConfirmation, MarketLocationInfo, SetupInfo
 
 __all__ = [
     "generate_quant_signal",
-    "validate_signal_integrity",
     "generate_alpha_overlay",
     "_apply_rejection_confirmation_gate",
     "compute_advanced_pivots",

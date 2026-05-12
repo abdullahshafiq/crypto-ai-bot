@@ -19,6 +19,8 @@ TRADE_LOG_HEADER = [
     "score",
     "confidence",
     "reason",
+    "signal_reason",
+    "entry_mode",
     "type",
 ]
 

@@ -133,6 +133,12 @@ class EntryMixin:
                                 self.pending_entry = None
                                 self.last_status = f"Maker entry synced @ {fill_price:.5f}"
                                 return
+                        # Capture signal diagnostics for logging and post-trade analysis
+                        signal_reason = str(signal.get('reason', '') or '')[:180]
+                        entry_mode = str(signal.get('entry_mode', 'UNKNOWN') or 'UNKNOWN')
+                        signal_score = float(signal.get('score', 0.0) or 0.0)
+                        signal_confidence = float(signal.get('confidence', 0.0) or 0.0)
+
                         filled_pos = {
                             'trade_id': trade_id,
                             'side': pos_side,
@@ -142,6 +148,10 @@ class EntryMixin:
                             'effective_leverage': float(pending_entry.get('effective_leverage', getattr(self, 'leverage', 1.0)) or getattr(self, 'leverage', 1.0)),
                             'entry_ts': now,
                             'hold_until_ts': float(pending_entry.get("hold_until_ts", 0.0) or 0.0),
+                            'signal_reason': signal_reason,
+                            'entry_mode': entry_mode,
+                            'signal_score': signal_score,
+                            'signal_confidence': signal_confidence,
                             'highest_price': fill_price if action == "BUY" else 0,
                             'lowest_price': fill_price if action == "SELL" else 0,
                             'highest_profit_pct': 0.0,
@@ -273,7 +283,7 @@ class EntryMixin:
                         exit_fee = current_pos['amount'] * current_price * self.fee_rate
                         net_pnl = pnl - fees
                         self._record_closed_trade("REVERSAL_BANK", current_pos['entry'], current_price, pnl, profit_pct * 100, fees)
-                        self._log_trade(current_pos.get("trade_id", 0), "EXIT", order_side, current_price, current_pos['amount'], pnl, exit_fee, t_type="REVERSAL_BANK")
+                        self._log_trade(current_pos.get("trade_id", 0), "EXIT", order_side, current_price, current_pos['amount'], pnl, exit_fee, t_type="REVERSAL_BANK", signal_reason=str(current_pos.get("signal_reason", "") or ""), entry_mode=str(current_pos.get("entry_mode", "") or ""))
                         self.active_positions = []
                         self._last_trade_ts = now
                         self._last_closed_side = current_pos['side']
@@ -303,7 +313,7 @@ class EntryMixin:
                             float(pnl) * 100.0 / float(current_pos['entry'] * current_pos['amount']),
                             float(fees),
                         )
-                        self._log_trade(current_pos.get("trade_id", 0), "EXIT", order_side, current_price, current_pos['amount'], pnl, exit_fee, t_type="REVERSAL")
+                        self._log_trade(current_pos.get("trade_id", 0), "EXIT", order_side, current_price, current_pos['amount'], pnl, exit_fee, t_type="REVERSAL", signal_reason=str(current_pos.get("signal_reason", "") or ""), entry_mode=str(current_pos.get("entry_mode", "") or ""))
                         self.active_positions = []
                         self._last_trade_ts = now
                         self._last_closed_side = current_pos['side']
@@ -604,6 +614,8 @@ class EntryMixin:
                 score=float(signal.get("score", 0.0) or 0.0),
                 confidence=float(signal.get("confidence", 0.0) or 0.0),
                 reason=str(signal.get("reason", "") or ""),
+                signal_reason=str(signal.get("reason", "") or "")[:180],
+                entry_mode=str(signal.get("entry_mode", "") or ""),
             )
         except Exception as e:
             logger.error(f"Placement Error: {e}")

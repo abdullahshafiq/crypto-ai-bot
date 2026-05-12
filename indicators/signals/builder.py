@@ -5,11 +5,41 @@ from __future__ import annotations
 from .ctx import SignalContext
 
 
+
+
+def _build_trade_intent(action: str, entry_mode: str, hold_reason: str) -> str:
+    """Return a short human-readable intent for the current setup."""
+    mode = str(entry_mode or "TREND").upper()
+    action = str(action or "HOLD").upper()
+    hold_reason_l = str(hold_reason or "").lower()
+    wants_retest = "retest" in hold_reason_l or "test" in hold_reason_l
+
+    if "BREAKDOWN_SHORT" in mode:
+        return "Wait for retest, then short" if action == "HOLD" and wants_retest else "Breakdown short"
+    if "BREAKOUT_SHORT" in mode:
+        return "Wait for retest, then short" if action == "HOLD" and wants_retest else "Breakout short"
+    if "BREAKOUT_LONG" in mode:
+        return "Wait for retest, then long" if action == "HOLD" and wants_retest else "Breakout long"
+    if "REVERSAL_SHORT" in mode:
+        return "Wait for rejection, then short" if action == "HOLD" else "Reversal short"
+    if "REVERSAL_LONG" in mode:
+        return "Wait for reclaim, then long" if action == "HOLD" else "Reversal long"
+    if action == "BUY":
+        return "Trend long"
+    if action == "SELL":
+        return "Trend short"
+    if "SHORT" in mode:
+        return "Waiting for short setup"
+    if "LONG" in mode:
+        return "Waiting for long setup"
+    return "Waiting for alignment"
+
 def _build_signal_dict(ctx: SignalContext) -> dict:
     """Construct the signal dict with all metadata. Reads from ctx, returns the signal dict."""
     total_score = ctx['total_score']
     action = ctx['action']
     hold_reason = ctx.get('hold_reason', '')
+    entry_mode = ctx.get('entry_mode', 'TREND')
     sr_wall_locked = ctx.get('sr_wall_locked', False)
     signal_reason_suffix = ctx.get('signal_reason_suffix', '')
     support = ctx['support']
@@ -49,6 +79,7 @@ def _build_signal_dict(ctx: SignalContext) -> dict:
         "score": total_score,
         "confidence": min(abs(total_score), 1.0),
         "reason": reason,
+        "intent": _build_trade_intent(action, entry_mode, hold_reason),
         "psar_streak": psar_streak,
         "psar_exit": True if psar_streak != 0 else False,
         "psar_closed_bull": bool(ctx.get('psar_closed_bull', True)),
@@ -89,5 +120,26 @@ def _build_signal_dict(ctx: SignalContext) -> dict:
         "levels": location_levels,
     }
     signal["sr_wall_locked"] = bool(sr_wall_locked)
+
+    # Apply EMA 200 confidence adjustment for trend alignment
+    ema_200_bull = ctx.get('ema_200_bull', False)
+    if signal.get("action") in {"BUY", "SELL"} and ema_200_bull is not None:
+        base_conf = float(signal.get("confidence", 0.0))
+        if ema_200_bull and signal["action"] == "BUY":
+            # Aligned with bullish trend: boost confidence
+            signal["confidence"] = min(base_conf * 1.10, 1.0)
+            signal["reason"] = f"{signal['reason']} [TrendAlign:BULL↑]"
+        elif ema_200_bull and signal["action"] == "SELL":
+            # Against bullish trend: slightly reduce confidence
+            signal["confidence"] = max(base_conf * 0.95, base_conf - 0.05)
+            signal["reason"] = f"{signal['reason']} [TrendContra:BULL]"
+        elif not ema_200_bull and signal["action"] == "SELL":
+            # Aligned with bearish trend: boost confidence
+            signal["confidence"] = min(base_conf * 1.10, 1.0)
+            signal["reason"] = f"{signal['reason']} [TrendAlign:BEAR↓]"
+        elif not ema_200_bull and signal["action"] == "BUY":
+            # Against bearish trend: slightly reduce confidence
+            signal["confidence"] = max(base_conf * 0.95, base_conf - 0.05)
+            signal["reason"] = f"{signal['reason']} [TrendContra:BEAR]"
 
     return signal

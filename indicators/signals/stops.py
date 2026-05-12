@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from .ctx import SignalContext
 from .setups import _detect_mean_reversion_setup, _detect_wick_sweep_setup
+from .scalper import detect_best_scalper_signal
+from ..mtf import _pick_structural_levels
 
 
 def _apply_setup_overrides(signal: dict, ctx: SignalContext) -> None:
-    """Apply mean reversion and wick sweep setups to the signal dict. Mutates signal in-place."""
+    """Apply mean reversion, wick sweep, and ultimate scalper setups to the signal dict. Mutates signal in-place."""
     df_indicators = ctx['df_indicators']
     current_price = ctx['current_price']
     strategy_config = ctx['strategy_config']
@@ -19,6 +21,28 @@ def _apply_setup_overrides(signal: dict, ctx: SignalContext) -> None:
     sr_wall_locked = ctx.get('sr_wall_locked', False)
     gate_locked = bool(hold_reason) or sr_wall_locked
 
+    # --- Setup 1: Best Scalper (Volman/Brooks/Cameron Hybrid) ---
+    scalp_setup = detect_best_scalper_signal(df_indicators, strategy_config, support=support, resistance=resistance)
+    if scalp_setup.get("triggered"):
+        signal["scalper_setup"] = scalp_setup
+        signal["reason"] = f"{signal['reason']} Scalp:{scalp_setup['reason']}"
+        signal["score"] = float(signal["score"]) + float(scalp_setup.get("score", 0.0))
+        signal["confidence"] = min(abs(float(signal["score"])), 1.0)
+        
+        # Override action — S/R scalps are contra-MTF by design (shorting at resistance when MTF is still bullish)
+        if not gate_locked:
+            if scalp_setup["direction"] == "LONG" and mtf_fast_bias != "SHORT_ONLY":
+                signal["action"] = "BUY"
+                signal["entry_mode"] = "SR_SCALP"
+            elif scalp_setup["direction"] == "SHORT" and mtf_fast_bias != "LONG_ONLY":
+                signal["action"] = "SELL"
+                signal["entry_mode"] = "SR_SCALP"
+            elif scalp_setup["direction"] == "SHORT" and mtf_fast_bias == "LONG_ONLY":
+                # Resistance rejection overrides bullish MTF bias — price AT resistance is the signal
+                signal["action"] = "SELL"
+                signal["entry_mode"] = "SR_SCALP_CONTRA"
+
+    # --- Setup 2: Mean Reversion ---
     mr_setup = _detect_mean_reversion_setup(df_indicators, strategy_config)
     if mr_setup.get("triggered"):
         signal["mean_reversion"] = {
@@ -68,15 +92,30 @@ def _compute_sl_tp(signal: dict, ctx: SignalContext) -> dict:
     pivot_data = ctx.get('pivot_data')
     article_sl_override = ctx.get('article_sl_override')
     wick_setup = ctx.get('wick_setup', {})
+    max_sl_pct = float(strategy_config.get("max_structural_sl_pct", 0.0040) or 0.0040)
+    atr_pct_now = float(ctx.get("atr_pct_now", 0.0) or 0.0)
+    atr_buffer = current_price * atr_pct_now * 1.5 if current_price > 0 and atr_pct_now > 0 else 0.0
+    strong_support, strong_resistance = _pick_structural_levels(
+        current_price,
+        ctx.get("mtf_context"),
+        pivot_data,
+        max_sl_pct=max_sl_pct,
+    )
 
     stop_buffer = 0.0005
     final_action = signal["action"]
     if article_sl_override and final_action in {"BUY", "SELL"}:
         signal["sl"] = float(article_sl_override)
-    elif final_action == "BUY" and support is not None:
-        signal["sl"] = float(support) * (1 - stop_buffer)
-    elif final_action == "SELL" and resistance is not None:
-        signal["sl"] = float(resistance) * (1 + stop_buffer)
+    elif final_action == "BUY":
+        anchor_support = strong_support if strong_support is not None else support
+        if anchor_support is not None:
+            signal["sl"] = max(0.0, float(anchor_support) - atr_buffer)
+            signal["sl_source"] = "strong_support_atr" if strong_support is not None else "support_atr"
+    elif final_action == "SELL":
+        anchor_resistance = strong_resistance if strong_resistance is not None else resistance
+        if anchor_resistance is not None:
+            signal["sl"] = float(anchor_resistance) + atr_buffer
+            signal["sl_source"] = "strong_resistance_atr" if strong_resistance is not None else "resistance_atr"
         classic_pivots = pivot_data.get("classic", {}) if isinstance(pivot_data, dict) else {}
         try:
             r1_level = float(classic_pivots.get("r1", 0.0) or 0.0)
@@ -91,6 +130,14 @@ def _compute_sl_tp(signal: dict, ctx: SignalContext) -> dict:
         max_sl_pct = float(strategy_config.get("max_structural_sl_pct", 0.0040) or 0.0040)
         fallback_sl_pct = float(strategy_config.get("sl_pct", 0.0015) or 0.0015)
         sl_dist_pct = abs(float(signal["sl"]) - float(current_price)) / float(current_price)
+
+        min_sl_pct = float(strategy_config.get("sl_pct", 0.0025) or 0.0025)
+        if sl_dist_pct < min_sl_pct:
+            if final_action == "BUY":
+                signal["sl"] = current_price * (1 - min_sl_pct)
+            else:
+                signal["sl"] = current_price * (1 + min_sl_pct)
+            sl_dist_pct = min_sl_pct
 
         tp_pct_cfg = float(strategy_config.get("tp_pct", 0.0025) or 0.0025)
         if final_action == "BUY" and resistance is not None:

@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import copy
+import re
 import pandas as pd
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,13 +33,16 @@ from core.startup import (
     _reapply_runtime_executor_config,
     setup_logging,
 )
+from core.session import create_session_paths, write_session_manifest
 from core.signal_gates import (
     compute_loss_tilt_override,
     apply_loss_tilt_pause,
     apply_scalp_hold_guard,
     apply_confidence_floor,
+    apply_loss_tilt_hard_gate,
     apply_reward_risk_gate,
     format_gate_trace,
+    apply_aggressive_scalp_gate,
 )
 from core.ai_gates import (
     apply_ai_overlay,
@@ -55,6 +59,64 @@ from ui.windows_vt import (
 )
 
 
+def _timeframe_to_seconds(timeframe: str) -> int:
+    tf = str(timeframe or "").strip()
+    match = re.fullmatch(r"(\d+)\s*([smhdwSMHDW]?)", tf)
+    if not match:
+        return 0
+    value = int(match.group(1))
+    unit = (match.group(2) or "m").lower()
+    multipliers = {
+        "s": 1,
+        "m": 60,
+        "h": 3600,
+        "d": 86400,
+        "w": 604800,
+    }
+    return value * multipliers.get(unit, 0)
+
+
+def _closed_chart_candles(df: pd.DataFrame, timeframe: str, include_live: bool = False) -> pd.DataFrame:
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return df
+    tf_seconds = _timeframe_to_seconds(timeframe)
+    if tf_seconds <= 0:
+        return df.reset_index(drop=True)
+    closed = df.copy()
+    now_utc = pd.Timestamp.utcnow()
+    last_close = closed["timestamp"].iloc[-1] + pd.Timedelta(seconds=tf_seconds)
+    if not include_live and last_close > now_utc:
+        closed = closed.iloc[:-1]
+    return closed.reset_index(drop=True)
+
+
+def _chart_bar_payload(row: pd.Series) -> dict:
+    """Build a dashboard candle payload with overlay indicator values."""
+    def _num(key: str) -> float:
+        val = row.get(key, None)
+        try:
+            return float(val) if val is not None and pd.notna(val) else 0.0
+        except Exception:
+            return 0.0
+
+    payload = {
+        "time": int(row["timestamp"].timestamp() * 1000),
+        "open": _num("open"),
+        "high": _num("high"),
+        "low": _num("low"),
+        "close": _num("close"),
+        "volume": _num("volume"),
+        "ema_9": _num("ema_9"),
+        "ema_21": _num("ema_21"),
+        "macd": _num("macd"),
+        "macd_signal": _num("macd_signal"),
+        "macd_diff": _num("macd_diff"),
+        "psar": _num("psar"),
+        "psar_streak": _num("psar_streak"),
+    }
+    return payload
+
+
 def run_hybrid_bot():
     load_dotenv()
 
@@ -62,7 +124,24 @@ def run_hybrid_bot():
     cfg = load_config(config_path)
     _enforce_single_instance(_instance_port_for_config(cfg))
     _enable_windows_vt_mode()
-    setup_logging(cfg.get("logging", {}) or {})
+    exec_cfg = cfg.get("execution", {}) or {}
+    leverage = int(exec_cfg.get("leverage", 5))
+    requested_exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "live"))).strip().lower()
+    logging_cfg = cfg.get("logging", {}) or {}
+    session_root = str(logging_cfg.get("session_root", "sessions") or "sessions")
+    session_paths = create_session_paths(
+        session_root=session_root,
+        mode=requested_exec_mode,
+        symbol=cfg.get("symbol", "unknown"),
+        timeframe=cfg.get("timeframe", "unknown"),
+        trade_log_name="trade_log.csv",
+    )
+    logging_cfg = dict(logging_cfg)
+    logging_cfg["log_file"] = session_paths.log_file
+    cfg["logging"] = logging_cfg
+    exec_cfg["trade_log_file"] = session_paths.trade_log_file
+    cfg["execution"] = exec_cfg
+    setup_logging(logging_cfg, log_file=session_paths.log_file)
     logger = logging.getLogger("main")
     symbol = cfg['symbol']
     mtf_cfg = cfg.get("mtf", {}) or {}
@@ -75,6 +154,7 @@ def run_hybrid_bot():
         ai_overlay_cfg = dict(ai_overlay_cfg)
         ai_overlay_cfg["refresh_seconds"] = ai_overlay_cfg.get("overlay_refresh_seconds")
     ui_cfg = cfg.setdefault("ui", {})
+    ui_cfg.setdefault("chart_tf", cfg.get("timeframe", "5m"))
     mem_cfg = cfg.get("memory", {}) or {}
     auto_learning_cfg = cfg.get("auto_learning", {}) or {}
 
@@ -82,10 +162,6 @@ def run_hybrid_bot():
     api_secret = os.getenv("BINANCE_SECRET")
 
     print("Booting up Hybrid Crypto AI Bot...")
-
-    exec_cfg = cfg.get("execution", {}) or {}
-    leverage = int(exec_cfg.get("leverage", 5))
-    requested_exec_mode = str(exec_cfg.get("mode", os.getenv("EXECUTION_MODE", "live"))).strip().lower()
 
     strategy_config = dict(cfg.get("strategy", {}) or {})
     # Keep the full strategy block available to indicators.py so paper/live configs
@@ -168,6 +244,17 @@ def run_hybrid_bot():
     symbol = resolved_symbol
     cfg["symbol"] = resolved_symbol
     strategy_config["symbol"] = resolved_symbol
+    write_session_manifest(
+        session_paths,
+        {
+            "config_path": config_path,
+            "execution_mode": requested_exec_mode,
+            "symbol": symbol,
+            "timeframe": cfg["timeframe"],
+            "resolved_symbol": resolved_symbol,
+            "paper_mode": paper_mode,
+        },
+    )
 
     df_indicators = calculate_base_indicators(hist_df)
     if len(df_indicators) > 1:
@@ -175,18 +262,27 @@ def run_hybrid_bot():
     else:
         latest_indicators = df_indicators.iloc[-1].to_dict()
     bootstrap_price = float(hist_df.iloc[-1]['close'])
+    chart_tf = str(ui_cfg.get("chart_tf", cfg.get("timeframe", "5m")) or cfg.get("timeframe", "5m"))
+    chart_hist_df = _runtime_fetch_ohlcv(
+        market,
+        symbol,
+        chart_tf,
+        200,
+        paper_mode=paper_mode,
+        logger=logger,
+    )
+    if chart_hist_df is None or chart_hist_df.empty:
+        chart_hist_df = hist_df
+    chart_hist_df = _closed_chart_candles(chart_hist_df, chart_tf, include_live=True)
+    if not chart_hist_df.empty:
+        chart_hist_df = calculate_base_indicators(chart_hist_df)
     # Initialize chart_bars with history for dashboard
     candle_limit = (
         int(cfg.get("dashboard", {}).get("candle_limit", 240)) or 240
     )
     chart_bars = deque(maxlen=candle_limit)
-    for _, row in hist_df.iterrows():
-        chart_bars.append({
-            "time": int(row["timestamp"].timestamp() * 1000),
-            "open": float(row["open"]), "high": float(row["high"]),
-            "low": float(row["low"]), "close": float(row["close"]),
-            "volume": float(row["volume"]),
-        })
+    for _, row in chart_hist_df.iterrows():
+        chart_bars.append(_chart_bar_payload(row))
 
     if requested_exec_mode == "live":
         exec_market = str(exec_cfg.get("market", "usdm") or "usdm").strip().lower()
@@ -246,6 +342,14 @@ def run_hybrid_bot():
     executor.dca_enabled = bool(exec_cfg.get('dca_enabled', False))
     executor.dca_max_steps = int(exec_cfg.get('dca_max_steps', 0))
     executor.dca_distance_pct = float(exec_cfg.get('dca_distance_pct', 0.01))
+    executor.scale_in_enabled = bool(exec_cfg.get('scale_in_enabled', False))
+    executor.scale_in_max_steps = int(exec_cfg.get('scale_in_max_steps', 2))
+    executor.scale_in_min_pnl_pct = float(exec_cfg.get('scale_in_min_pnl_pct', 0.0020))
+    executor.scale_in_cooldown_seconds = int(exec_cfg.get('scale_in_cooldown_seconds', 180))
+    executor.scale_in_position_pct = float(exec_cfg.get('scale_in_position_pct', 0.5))
+    executor.scale_in_max_exposure_pct = float(exec_cfg.get('scale_in_max_exposure_pct', 0.50))
+    executor.scale_in_wall_buffer_pct = float(exec_cfg.get('scale_in_wall_buffer_pct', 0.002))
+    executor.psar_exit_min_streak = int(exec_cfg.get('psar_exit_min_streak', 2))
 
     if executor.dynamic_leverage_enabled:
         logger.info(f"Dynamic Leverage ENABLED: {executor.leverage_min:.1f}x-{executor.leverage_max:.1f}x (confidence-based)")
@@ -287,6 +391,8 @@ def run_hybrid_bot():
     last_pivot_refresh_ts = 0.0
     df_indicators = None
     latest_indicators = {}
+    state_fetch_ts = 0.0
+    last_indicator_fetch_ts = 0.0
     last_ai_trade_ts = 0.0
     last_ai_trade_key = None
     last_ai_trade_resp = None
@@ -307,7 +413,7 @@ def run_hybrid_bot():
 
     signal_history = deque(maxlen=5) # 5-second smoothing buffer
     # chart_bars initialized above
-    last_chart_tf = cfg.get("timeframe", "5m")
+    last_chart_tf = chart_tf
 
     dashboard_cfg = cfg.get("dashboard", {}) or {}
     dashboard_runtime = None
@@ -334,15 +440,13 @@ def run_hybrid_bot():
                 status(f"Switching Chart to {ui_tf}")
                 try:
                     new_hist = _runtime_fetch_ohlcv(market, symbol, ui_tf, 100, paper_mode=paper_mode, logger=logger)
+                    new_hist = _closed_chart_candles(new_hist, ui_tf, include_live=True)
+                    if not new_hist.empty:
+                        new_hist = calculate_base_indicators(new_hist)
                     if not new_hist.empty:
                         chart_bars.clear()
                         for _, row in new_hist.iterrows():
-                            chart_bars.append({
-                                "time": int(row["timestamp"].timestamp() * 1000),
-                                "open": float(row["open"]), "high": float(row["high"]),
-                                "low": float(row["low"]), "close": float(row["close"]),
-                                "volume": float(row["volume"]),
-                            })
+                            chart_bars.append(_chart_bar_payload(row))
                         last_chart_tf = ui_tf
                         status(f"Chart TF: {ui_tf} Loaded")
                     else:
@@ -383,18 +487,28 @@ def run_hybrid_bot():
                 # Chart update
                 try:
                     chart_update_df = fetched.get("chart", pd.DataFrame())
+                    chart_update_df = _closed_chart_candles(chart_update_df, ui_tf, include_live=True)
+                    updated = False
                     if not chart_update_df.empty:
-                        seen_times = {b["time"] for b in chart_bars}
+                        bar_map = {b["time"]: i for i, b in enumerate(chart_bars)}
                         for _, row in chart_update_df.iterrows():
-                            new_bar = {
-                                "time": int(row["timestamp"].timestamp() * 1000),
-                                "open": float(row["open"]), "high": float(row["high"]),
-                                "low": float(row["low"]), "close": float(row["close"]),
-                                "volume": float(row["volume"])
-                            }
-                            if new_bar["time"] not in seen_times:
+                            new_bar = _chart_bar_payload(row)
+                            if new_bar["time"] in bar_map:
+                                chart_bars[bar_map[new_bar["time"]]] = new_bar
+                                updated = True
+                            else:
                                 chart_bars.append(new_bar)
-                                seen_times.add(new_bar["time"])
+                                bar_map[new_bar["time"]] = len(chart_bars) - 1
+                                updated = True
+                    if updated and chart_bars:
+                        combined = pd.DataFrame(list(chart_bars))
+                        if not combined.empty:
+                            combined = combined.sort_values("time").drop_duplicates(subset=["time"], keep="last")
+                            combined["timestamp"] = pd.to_datetime(combined["time"], unit="ms", utc=True)
+                            combined = calculate_base_indicators(combined)
+                            chart_bars.clear()
+                            for _, row in combined.iterrows():
+                                chart_bars.append(_chart_bar_payload(row))
                 except Exception as e:
                     logger.warning(f"Chart periodic update failed: {e}")
 
@@ -416,6 +530,7 @@ def run_hybrid_bot():
                 if not new_df.empty:
                     df_indicators = calculate_base_indicators(new_df)
                     latest_indicators = (df_indicators.iloc[-2] if len(df_indicators) > 1 else df_indicators.iloc[-1]).to_dict()
+                    last_indicator_fetch_ts = time.time()
 
                 # Pivot points (fetched in parallel above if needed)
                 if need_pivots:
@@ -480,6 +595,7 @@ def run_hybrid_bot():
                 status("Market data: retrying (API/ratelimit)")
                 time.sleep(tick_delay)
                 continue
+            state_fetch_ts = time.time()
 
             # Sync dynamic overrides/config
             target_mode = str(cfg.get("execution", {}).get("mode", getattr(executor, "label", "paper"))).lower()
@@ -572,8 +688,9 @@ def run_hybrid_bot():
             psar = latest_indicators.get('psar')
             if psar is not None and pd.notna(psar):
                 executor._current_psar = float(psar)
-
-            executor.process_orders_and_positions(symbol, state['price'])
+            psar_streak = latest_indicators.get('psar_streak')
+            if psar_streak is not None and pd.notna(psar_streak):
+                executor._current_psar_streak = int(psar_streak)
 
             if auto_learning_enabled:
                 closed_trades = int(getattr(executor, "stats_trades", 0) or 0)
@@ -644,6 +761,9 @@ def run_hybrid_bot():
 
             signal = apply_scalp_hold_guard(signal, executor, exec_cfg)
 
+            if paper_mode:
+                signal = apply_aggressive_scalp_gate(signal, state, exec_cfg, runtime_strategy_config, executor)
+
             raw_score = float(signal.get('score', 0.0) or 0.0)
             signal_history.append(raw_score)
 
@@ -651,13 +771,12 @@ def run_hybrid_bot():
             signal['confidence'] = abs(max(-1.0, min(1.0, raw_score)))
 
             min_conf_floor = float(runtime_strategy_config.get("min_conf", 0.10))
-            signal = apply_confidence_floor(signal, min_conf_floor)
+            signal = apply_confidence_floor(signal, min_conf_floor, runtime_strategy_config)
 
             hard_min = float(runtime_strategy_config.get("entry_min_confidence_hard", 0.0) or 0.0)
-            if hard_min > 0.0 and signal.get("action") in {"BUY", "SELL"}:
-                if abs(raw_score) < hard_min:
-                    signal["action"] = "HOLD"
-                    signal["hold_reason"] = f"Hard score gate ({abs(raw_score):.2f} < {hard_min:.2f})"
+            _is_aggressive = bool(signal.get("aggressive_scalp", False))
+            if not _is_aggressive:
+                signal = apply_loss_tilt_hard_gate(signal, hard_min, raw_score, runtime_strategy_config)
 
             min_rr = float(runtime_strategy_config.get("min_reward_risk", 0.0) or 0.0)
             if min_rr > 0.0:
@@ -691,7 +810,10 @@ def run_hybrid_bot():
             if signal['action'] != "HOLD":
                 signal = apply_regime_veto(signal, is_ai_enabled, regime)
 
-                # Re-check action after vetoes
+            executor._current_signal_snapshot = dict(signal or {})
+            executor.process_orders_and_positions(symbol, state['price'])
+
+            # Re-check action after vetoes
             if not is_paused and signal['action'] != "HOLD":
                 dispatch_entry(signal, ai_overlay_state, state, executor, symbol)
 
@@ -705,12 +827,22 @@ def run_hybrid_bot():
                 open_orders_cache = executor.get_open_orders(symbol)
             ui_mode = _detect_ui_mode(str(ui_cfg.get("mode", "auto")))
             ui_cfg["paused"] = is_paused # Pass pause state to UI
+            now = time.time()
+            freshness = {
+                "live_price_age": now - state_fetch_ts,
+                "signal_candle_age": now - last_indicator_fetch_ts if last_indicator_fetch_ts > 0 else -1,
+                "mtf_ages": {
+                    tf: now - entry.get("computed_at", 0)
+                    for tf, entry in mtf_context.items()
+                    if isinstance(entry, dict) and entry.get("computed_at", 0) > 0
+                },
+            }
             print_dashboard(
                 ticks, symbol, regime, state, signal, executor, session_start,
                 mtf_context=mtf_context, mtf_cfg=mtf_cfg,
                 status_lines=list(status_buf)[-int(ui_cfg.get("status_lines", 3) or 3):],
                 ui_cfg=ui_cfg, ai_overlay=ai_overlay_state, pivot_data=pivot_data,
-                open_orders=open_orders_cache
+                open_orders=open_orders_cache, freshness=freshness
             )
 
             if dashboard_runtime is not None:
@@ -721,7 +853,7 @@ def run_hybrid_bot():
                         symbol, regime, state, signal, executor, session_start,
                         list(status_buf)[-int(ui_cfg.get("status_lines", 3) or 3):],
                         pivot_data, mtf_context, open_orders_cache, latest_indicators,
-                        chart_bars, ai_overlay_state, cfg
+                        chart_bars, ai_overlay_state, cfg, freshness=freshness
                     )
                 )
 

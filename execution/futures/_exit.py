@@ -425,6 +425,8 @@ class ExitMixin:
                     exit_fee,
                     t_type=realized_type,
                     reason="runner scale-out",
+                    signal_reason=str(pos.get("signal_reason", "") or ""),
+                    entry_mode=str(pos.get("entry_mode", "") or ""),
                 )
                 self._ensure_exchange_stop_loss(pos)
                 self._ensure_exchange_take_profit(pos)
@@ -443,7 +445,7 @@ class ExitMixin:
             use_scale_out = False
 
         self._record_closed_trade(realized_type, entry, fill_price, pnl, profit_pct * 100, fees)
-        self._log_trade(trade_id, "EXIT", order_side, fill_price, filled_amount, pnl, exit_fee, t_type=realized_type)
+        self._log_trade(trade_id, "EXIT", order_side, fill_price, filled_amount, pnl, exit_fee, t_type=realized_type, signal_reason=str(pos.get("signal_reason", "") or ""), entry_mode=str(pos.get("entry_mode", "") or ""))
         self.trade_count += 1
         self._last_trade_ts = time.time()
         self._recently_closed_ts = time.time()

@@ -6,6 +6,58 @@ from ..ctx import SignalContext
 from ..utils import _session_blackout_state
 
 
+def _is_structural_range_edge(ctx: SignalContext) -> bool:
+    support = ctx.get('support')
+    resistance = ctx.get('resistance')
+    if not support or not resistance:
+        return False
+
+    try:
+        support_f = float(support)
+        resistance_f = float(resistance)
+        current_price = float(ctx['current_price'])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    if resistance_f <= support_f:
+        return False
+
+    zone_pct = float(ctx.get('range_action_zone_pct', 0.20) or 0.20)
+    zone = (resistance_f - support_f) * zone_pct
+    return current_price <= support_f + zone or current_price >= resistance_f - zone
+
+
+def _is_local_range_edge(ctx: SignalContext) -> bool:
+    df_indicators = ctx.get('df_indicators')
+    if df_indicators is None or len(df_indicators) < 2:
+        return False
+
+    try:
+        if "high" not in df_indicators.columns or "low" not in df_indicators.columns:
+            return False
+        current_price = float(ctx['current_price'])
+        local_lookback = max(20, min(40, len(df_indicators)))
+        local_recent = df_indicators.iloc[-(local_lookback + 1):-1]
+        if len(local_recent) == 0:
+            local_recent = df_indicators.iloc[-local_lookback:]
+        local_hi = float(local_recent["high"].max())
+        local_lo = float(local_recent["low"].min())
+        local_width = local_hi - local_lo
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+    if local_width <= 0:
+        return False
+
+    strategy_config = ctx.get('strategy_config', {}) or {}
+    bottom = float(strategy_config.get("range_veto_bottom_pct", 0.25) or 0.25)
+    top = float(strategy_config.get("range_veto_top_pct", 0.75) or 0.75)
+    local_pos = (current_price - local_lo) / local_width
+    if local_pos < -0.10 or local_pos > 1.10:
+        return False
+    return local_pos <= bottom or local_pos >= top
+
+
 def apply_spread_guard(ctx: SignalContext) -> dict | None:
     """Return a HOLD signal dict if spread/ATR guard triggers, else None."""
     state = ctx['state']
@@ -60,38 +112,87 @@ def apply_chasing_guard(ctx: SignalContext) -> dict | None:
     )
     ctx['trend_continuation'] = trend_continuation
     if trend_continuation:
-        max_chase_pct = max(base_max_chase_pct, min(0.0065, max(0.0045, atr_pct_now * 0.75)))
+        max_chase_pct = max(base_max_chase_pct, min(0.0070, max(0.0045, atr_pct_now * 0.75)))
     else:
         max_chase_pct = base_max_chase_pct
     ctx['ema_dist_pct'] = ema_dist_pct
     ctx['max_chase_pct'] = max_chase_pct
 
-    if ema_dist_pct > max_chase_pct:
+    # Skip chasing guard at floor/ceiling — sniper handles range reversals
+    range_edge = _is_structural_range_edge(ctx) or _is_local_range_edge(ctx)
+
+    if ema_dist_pct > max_chase_pct and not range_edge:
         return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chasing Guard ({ema_dist_pct:.3%}>{max_chase_pct:.3%})", "weights": {}}
 
-    # Near-extreme guard: block BUY near 20c high, SELL near 20c low
-    extreme_lookback = strategy_config.get("chase_recent_extreme_lookback")
-    if extreme_lookback is None:
-        extreme_lookback = 20
-    else:
-        extreme_lookback = int(extreme_lookback)
+    # --- Institutional Confluence of Danger Guard ---
+    # Block only when multiple danger signs agree to prevent over-filtering.
+    danger_signals = []
 
-    near_extreme_pct = strategy_config.get("chase_near_extreme_pct")
-    if near_extreme_pct is None:
-        near_extreme_pct = 0.0025
-    else:
-        near_extreme_pct = float(near_extreme_pct)
+    # 1. Price distance from EMA21 (Overextension)
+    price_dist_ema21 = (current_price - ema_21) / ema_21
+    max_price_dist = max(0.006, atr_pct_now * 1.8)
+    overextended = (action == "BUY" and price_dist_ema21 > max_price_dist) or \
+                   (action == "SELL" and price_dist_ema21 < -max_price_dist)
+    if overextended:
+        danger_signals.append(f"Overextended({price_dist_ema21:.2%})")
+
+    # 2. RSI Extreme (Momentum Exhaustion)
+    rsi_val = ctx.get('rsi_14', 50.0)
+    rsi_extreme = (action == "BUY" and rsi_val > 72) or \
+                  (action == "SELL" and rsi_val < 28)
+    if rsi_extreme:
+        danger_signals.append(f"RSI-Extreme({rsi_val:.1f})")
+
+    # 3. MACD Momentum Weakening
+    macd_diff = ctx.get('macd_diff', 0.0)
+    prev_macd_diff = ctx.get('prev_macd_diff', 0.0)
+    macd_weakening = (action == "BUY" and macd_diff > 0 and macd_diff < prev_macd_diff) or \
+                     (action == "SELL" and macd_diff < 0 and macd_diff > prev_macd_diff)
+    if macd_weakening:
+        danger_signals.append("MACD-Weakening")
+
+    # 4. Near SR Wall
+    sr_score = ctx.get('sr_score', 0.0)
+    wall_state = ctx.get('wall_state', {}) or {}
+    support_broken = bool(wall_state.get("support_broken"))
+    resistance_broken = bool(wall_state.get("resistance_broken"))
+    near_wall = (
+        (action == "BUY" and sr_score <= -1.0 and not resistance_broken)
+        or
+        (action == "SELL" and sr_score >= 1.0 and not support_broken)
+    )
+    if near_wall:
+        danger_signals.append(f"Near-Wall(sr={sr_score:.1f})")
+
+    if len(danger_signals) >= 2 and not range_edge:
+        reasons = " + ".join(danger_signals)
+        return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Confluence of Danger: {reasons}", "weights": {}}
+
+    # Near-extreme guard: block BUY near 30c high, SELL near 30c low
+    extreme_lookback = int(strategy_config.get("chase_recent_extreme_lookback") or 30)
+    near_extreme_pct = float(strategy_config.get("chase_near_extreme_pct") or 0.0035)
 
     if near_extreme_pct > 0 and action in {"BUY", "SELL"} and len(df_indicators) >= extreme_lookback:
         recent_ext = df_indicators.tail(extreme_lookback)
-        if action == "BUY":
-            recent_high = float(recent_ext["high"].max())
+        recent_high = float(recent_ext["high"].max())
+        recent_low = float(recent_ext["low"].min())
+
+        if recent_high <= 0 or recent_low <= 0:
+            pass  # skip near-extreme on bad data
+        elif recent_high < current_price / 5 and action == "BUY":
+            pass  # stale high from prior symbol — skip
+        elif recent_low > current_price * 5 and action == "SELL":
+            pass  # stale low from prior symbol — skip
+        elif action == "BUY":
             if current_price >= recent_high * (1 - near_extreme_pct):
-                return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Near-Extreme Guard: BUY too close to {extreme_lookback}c high (${recent_high:.3f})", "weights": {}}
+                ctx['action'] = "HOLD"
+                ctx['hold_reason'] = f"Near-Extreme: BUY too close to {extreme_lookback}c high (${recent_high:.3f})"
+                return None
         elif action == "SELL":
-            recent_low = float(recent_ext["low"].min())
             if current_price <= recent_low * (1 + near_extreme_pct):
-                return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Near-Extreme Guard: SELL too close to {extreme_lookback}c low (${recent_low:.3f})", "weights": {}}
+                ctx['action'] = "HOLD"
+                ctx['hold_reason'] = f"Near-Extreme: SELL too close to {extreme_lookback}c low (${recent_low:.3f})"
+                return None
 
     # Block entries after extended uninterrupted run (price already exhausted)
     max_consec = int(strategy_config.get("max_consecutive_candles_chase", 4) or 4)
@@ -99,11 +200,11 @@ def apply_chasing_guard(ctx: SignalContext) -> dict | None:
         recent = df_indicators.tail(max_consec)
         if action == "BUY":
             all_green = all(recent['close'].values[i] >= recent['open'].values[i] for i in range(max_consec))
-            if all_green:
+            if all_green and not range_edge:
                 return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chase Guard: {max_consec} consecutive green candles — wait for pullback", "weights": {}}
         elif action == "SELL":
             all_red = all(recent['close'].values[i] <= recent['open'].values[i] for i in range(max_consec))
-            if all_red:
+            if all_red and not range_edge:
                 return {"action": "HOLD", "score": 0.0, "confidence": 0.0, "reason": f"Chase Guard: {max_consec} consecutive red candles — wait for bounce", "weights": {}}
 
     return None
@@ -126,14 +227,8 @@ def apply_adx_range_filter(ctx: SignalContext) -> dict | None:
     total_score = ctx.get('total_score', 0.0)
     if adx_value < 15:
         # S/R edge bounce entries are valid in ranging markets — skip block when at the walls
-        support = ctx.get('support')
-        resistance = ctx.get('resistance')
-        current_price = ctx['current_price']
-        range_action_zone_pct = float(ctx.get('range_action_zone_pct', 0.20) or 0.20)
-        if support and resistance:
-            zone = (float(resistance) - float(support)) * range_action_zone_pct
-            if current_price <= float(support) + zone or current_price >= float(resistance) - zone:
-                return None
+        if _is_structural_range_edge(ctx) or _is_local_range_edge(ctx):
+            return None
         return {"action": "HOLD", "score": total_score, "confidence": min(abs(total_score), 1.0), "reason": f"Ranging market (ADX:{adx_value:.0f}<15)", "weights": {}}
     return None
 

@@ -52,6 +52,7 @@ class QuantSignal(TypedDict):
     score: float                   # Composite score (neg=short, pos=long)
     confidence: float              # min(abs(score), 1.0)
     reason: str                    # Human-readable reason string
+    intent: NotRequired[str]       # Short intent label like "Wait for retest, then short"
     hold_reason: str               # Empty string when action != HOLD
 
     # ── Stops (set for BUY/SELL by _compute_sl_tp) ───────────────

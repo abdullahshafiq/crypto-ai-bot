@@ -31,6 +31,7 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
 
     ema_9 = ta.trend.ema_indicator(df['close'], window=9).iloc[-1]
     ema_21 = ta.trend.ema_indicator(df['close'], window=21).iloc[-1]
+    ema_200 = ta.trend.ema_indicator(df['close'], window=200).iloc[-1] if len(df) >= 200 else None
     rsi_series = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
     current_price = df['close'].iloc[-1]
 
@@ -114,6 +115,8 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
             structure_state = "HIGHER_LOW"
 
     _win20 = min(20, len(df))
+    ema_200_bull = ema_200 is not None and current_price > ema_200
+    ema_200_pct_dist = (current_price - ema_200) / ema_200 * 100 if ema_200 is not None else 0.0
     return {
         "trend": trend,
         "support_levels": all_supports,
@@ -132,6 +135,9 @@ def build_mtf_timeframe_context(df: pd.DataFrame) -> dict:
         "ema_9": float(ema_9),
         "ema_21": float(ema_21),
         "ema_21_prev": float(ta.trend.ema_indicator(df['close'], window=21).iloc[-2]),
+        "ema_200": float(ema_200) if ema_200 is not None else 0.0,
+        "ema_200_bull": ema_200_bull,
+        "ema_200_pct_dist": float(ema_200_pct_dist),
         "high": float(df['high'].iloc[-1]),
         "low": float(df['low'].iloc[-1]),
         "structure": structure_state,
@@ -161,13 +167,10 @@ def _tighten_level(current_price: float, confirmed, candidate, is_support: bool,
 
 
 def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivot_data: dict = None, max_sl_pct: float = 0.012) -> tuple:
-    """Return structural support/resistance prioritizing 5m chart swings.
+    """Return structural support/resistance prioritizing the strongest valid swing levels.
 
-    5m swings give wider, more meaningful levels that allow room for profit booking.
-    Fallback order: 5m → 15m → 1h → 4h → daily pivots → 3m.
-    For each source, we pick the NEAREST level on the correct side of price.
-    If the confirmed swing is farther than max_sl_pct, tightens using recent 20-candle
-    extremes from 5m/15m so fresh session levels (e.g. recent bounce highs) aren't missed.
+    We keep only levels on the correct side of price, reject stale levels outside the
+    structural cap, and then choose the deepest valid support / highest valid resistance.
     """
     def _extract_levels(levels_list, side):
         """Extract valid float levels on the correct side of price."""
@@ -183,78 +186,70 @@ def _pick_structural_levels(current_price: float, mtf_context: dict = None, pivo
                 pass
         return results
 
-    def _pick_nearest(candidates, side):
-        """Pick the nearest level: max for support (closest below), min for resistance (closest above)."""
-        if not candidates:
-            return None
-        return max(candidates) if side == "support" else min(candidates)
+    def _within_cap(level: float) -> bool:
+        if level is None or current_price <= 0:
+            return False
+        try:
+            return abs(float(level) - current_price) / current_price <= max_sl_pct
+        except (TypeError, ValueError):
+            return False
 
-    # Build ordered source list: 5m first, then wider timeframes, then 3m as last resort
-    # Priority: 5m → 15m → 1h → 4h → pivots → 3m
+    def _pick_strongest(candidates, side):
+        """Pick the strongest valid level: deepest support or highest resistance."""
+        valid = [float(v) for v in candidates if _within_cap(v)]
+        if not valid:
+            return None
+        return min(valid) if side == "support" else max(valid)
+
+    # Build a candidate pool from MTF swings, recent extremes, pivots, and 3m fallback.
     tf_order = ["5m", "15m", "1h", "4h"]
 
-    support = None
-    resistance = None
+    mtf_support_candidates = []
+    mtf_resistance_candidates = []
+    pivot_support_candidates = []
+    pivot_resistance_candidates = []
+    fallback_support_candidates = []
+    fallback_resistance_candidates = []
 
-    # --- Try MTF timeframes in priority order ---
+    # --- Collect MTF candidates ---
     if isinstance(mtf_context, dict):
         for tf in tf_order:
             tf_data = mtf_context.get(tf) or {}
+            mtf_support_candidates.extend(_extract_levels(tf_data.get("support_levels"), "support"))
+            mtf_resistance_candidates.extend(_extract_levels(tf_data.get("resistance_levels"), "resistance"))
+            mtf_support_candidates.extend(_extract_levels([tf_data.get("recent_low_20")], "support"))
+            mtf_resistance_candidates.extend(_extract_levels([tf_data.get("recent_high_20")], "resistance"))
 
-            if support is None:
-                candidates = _extract_levels(tf_data.get("support_levels"), "support")
-                support = _pick_nearest(candidates, "support")
-
-            if resistance is None:
-                candidates = _extract_levels(tf_data.get("resistance_levels"), "resistance")
-                resistance = _pick_nearest(candidates, "resistance")
-
-            if support is not None and resistance is not None:
-                break
-
-    # --- Fallback to daily pivots if still missing ---
-    if isinstance(pivot_data, dict) and (support is None or resistance is None):
+    # --- Add daily pivots if available ---
+    if isinstance(pivot_data, dict):
         classic = pivot_data.get("classic", {}) or {}
-        if support is None:
-            pivot_sups = []
-            for key in ["s1", "s2", "s3", "pp"]:
-                v = classic.get(key)
-                if v is not None:
-                    try:
-                        fv = float(v)
-                        if fv < current_price:
-                            pivot_sups.append(fv)
-                    except (TypeError, ValueError):
-                        pass
-            support = _pick_nearest(pivot_sups, "support")
-
-        if resistance is None:
-            pivot_res = []
-            for key in ["r1", "r2", "r3", "pp"]:
-                v = classic.get(key)
-                if v is not None:
-                    try:
-                        fv = float(v)
-                        if fv > current_price:
-                            pivot_res.append(fv)
-                    except (TypeError, ValueError):
-                        pass
-            resistance = _pick_nearest(pivot_res, "resistance")
+        for key in ["s1", "s2", "s3", "pp"]:
+            pivot_support_candidates.extend(_extract_levels([classic.get(key)], "support"))
+        for key in ["r1", "r2", "r3", "pp"]:
+            pivot_resistance_candidates.extend(_extract_levels([classic.get(key)], "resistance"))
 
     # --- Last resort: 3m (tightest, least room) ---
-    if isinstance(mtf_context, dict) and (support is None or resistance is None):
-        tf_data = mtf_context.get("3m") or {}
-        if support is None:
-            candidates = _extract_levels(tf_data.get("support_levels"), "support")
-            support = _pick_nearest(candidates, "support")
-        if resistance is None:
-            candidates = _extract_levels(tf_data.get("resistance_levels"), "resistance")
-            resistance = _pick_nearest(candidates, "resistance")
-
     if isinstance(mtf_context, dict):
-        for _tf in ["5m", "15m"]:
-            _tfd = mtf_context.get(_tf) or {}
-            support = _tighten_level(current_price, support, _tfd.get("recent_low_20"), True, max_sl_pct) or support
-            resistance = _tighten_level(current_price, resistance, _tfd.get("recent_high_20"), False, max_sl_pct) or resistance
+        tf_data = mtf_context.get("3m") or {}
+        fallback_support_candidates.extend(_extract_levels(tf_data.get("support_levels"), "support"))
+        fallback_resistance_candidates.extend(_extract_levels(tf_data.get("resistance_levels"), "resistance"))
+
+    support = _pick_strongest(mtf_support_candidates, "support")
+    if support is None:
+        support = _pick_strongest(pivot_support_candidates, "support")
+    if support is None:
+        support = _pick_strongest(fallback_support_candidates, "support")
+
+    resistance = _pick_strongest(mtf_resistance_candidates, "resistance")
+    if resistance is None:
+        resistance = _pick_strongest(pivot_resistance_candidates, "resistance")
+    if resistance is None:
+        resistance = _pick_strongest(fallback_resistance_candidates, "resistance")
+
+    if support is None:
+        support = current_price * (1 - max_sl_pct * 0.8)
+
+    if resistance is None:
+        resistance = current_price * (1 + max_sl_pct * 0.8)
 
     return support, resistance

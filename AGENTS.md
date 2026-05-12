@@ -3,6 +3,17 @@
 > This file is read first by AI agents. It maps the entire codebase so agents
 > never need to grep for "where is X defined?" or "what keys does Y have?".
 
+## Canonical Agent Map
+
+This file is the canonical architecture and agent-routing map for this repo.
+
+Before using Claude, Codex, or any high-cost model:
+1. Read this file first.
+2. Use CodeGraph to identify affected modules.
+3. Use Serena to inspect exact symbols.
+4. Use RTK or a cheap log agent for command/test output.
+5. Send premium models only a short handoff, not full repo context.
+
 ## Architecture
 
 ```

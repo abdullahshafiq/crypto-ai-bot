@@ -9,7 +9,7 @@
 #   - dashboard stays local
 # =============================================================================
 
-symbol: "AVAX/USDC:USDC"
+symbol: "AVAX/USDT:USDT"
 timeframe: "3m"
 macro_timeframe: "5m"
 
@@ -38,13 +38,13 @@ execution:
   reversal_min_confidence: 0.45
   reversal_min_score: 0.25
   reversal_min_net_edge_pct: 0.0020
-  break_even_trigger_pct: 0.0030
+  break_even_trigger_pct: 0.0025
   break_even_buffer_pct: 0.0008
   profit_trailing_enabled: true
-  profit_trailing_activation_pct: 0.0030
+  profit_trailing_activation_pct: 0.0025
   trailing_tp_enabled: true
   trailing_tp_giveback_pct: 0.35
-  trailing_tp_min_peak_pct: 0.0060
+  trailing_tp_min_peak_pct: 0.0035
   trail_tighten_1_pct: 0.0050
   trail_tighten_2_pct: 0.0100
   trail_t1_gap_pct: 0.0040
@@ -56,6 +56,7 @@ execution:
   use_exchange_stop_loss: false
   use_exchange_take_profit: false
   market_fallback_on_timeout: true
+  psar_exit_min_streak: 2
   pending_entry_ttl_seconds: 10
   use_resting_support_orders: true
   resting_entry_ttl_seconds: 120
@@ -65,6 +66,13 @@ execution:
   trailing_callback_pct: 0.65
   same_side_reentry_cooldown_seconds: 300
   same_side_reentry_strong_confidence: 0.85
+  scale_in_enabled: true
+  scale_in_max_steps: 2
+  scale_in_min_pnl_pct: 0.0020
+  scale_in_cooldown_seconds: 180
+  scale_in_position_pct: 0.5
+  scale_in_max_exposure_pct: 0.50
+  scale_in_wall_buffer_pct: 0.002
   scalp_min_hold_seconds: 20
   scalp_runner_enabled: true
   scalp_runner_pullback_pct: 0.0020
@@ -126,7 +134,7 @@ auto_learning:
 
 strategy:
   max_spread: 0.0005
-  min_conf: 0.15
+  min_conf: 0.10
   signal_smoothing_ticks: 3
   max_ret_30s: 0.0040
   max_ret_5s: 0.0018
@@ -135,14 +143,14 @@ strategy:
   tp_pct: 0.0060
   sl_pct: 0.0025
   max_structural_sl_pct: 0.0120
-  min_reward_risk: 0.65
+  min_reward_risk: 0.50
   range_action_zone_pct: 0.20
   wall_veto_zone_pct: 0.12
   support_veto_pct: 0.0010
   resistance_veto_pct: 0.0010
   support_break_pct: 0.0010
   resistance_break_pct: 0.0010
-  max_chase_pct: 0.0030
+  max_chase_pct: 0.0035
   mtf_neutral_allow_score: 0.35
   entry_min_confidence_hard: 0.20
   midrange_min_score: 0.28
@@ -180,6 +188,9 @@ strategy:
   spread_atr_ratio_max: 0.15
   ob_midpoint_tolerance_pct: 0.0015
   anchored_vwap_near_pct: 0.0010
+  aggressive_scalp_enabled: true
+  aggressive_scalp_min_conf: 0.06
+  aggressive_scalp_fee_buffer_pct: 0.0003
   loss_tilt_min_losses: 3
   loss_tilt_pause_losses: 5
   loss_tilt_pause_minutes: 15

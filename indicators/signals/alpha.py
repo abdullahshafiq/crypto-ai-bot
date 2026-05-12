@@ -31,21 +31,6 @@ def generate_alpha_overlay(df: pd.DataFrame, smc_score: float, macro_bias: str) 
     return alpha
 
 
-def validate_signal_integrity(signal: dict, vol_context: dict) -> dict:
-    """
-    Signal Integrity Validation.
-    Final filter to ensure we aren't trading in 'Dangerous' conditions.
-    """
-    if vol_context.get('squeeze'):
-        signal['squeeze_warning'] = "Volatility Squeeze: Potential Breakout Setup"
-
-    if vol_context.get('atr_rank', 1.0) < 0.05:
-        signal['action'] = "HOLD"
-        signal['hold_reason'] = "Low Volatility: Insufficient Profit Potential"
-
-    return signal
-
-
 def compute_advanced_pivots(df: pd.DataFrame) -> dict:
     """
     Calculates institutional pivot points.

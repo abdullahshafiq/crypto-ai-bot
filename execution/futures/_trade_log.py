@@ -129,12 +129,14 @@ class TradeLogMixin:
         score: float = 0.0,
         confidence: float = 0.0,
         reason: str = "",
+        signal_reason: str = "",
+        entry_mode: str = "",
         t_type: str = "",
     ):
         if event.upper() == "ENTRY":
             if not hasattr(self, "_entry_info"):
                 self._entry_info = {}
-            self._entry_info[int(trade_id)] = {"side": str(side).upper(), "reason": str(reason or "")}
+            self._entry_info[int(trade_id)] = {"side": str(side).upper(), "reason": str(reason or ""), "signal_reason": str(signal_reason or ""), "entry_mode": str(entry_mode or "")}
         try:
             log_file = getattr(self, "trade_log_file", TRADE_LOG_FILE)
             with open(log_file, 'a', newline='') as f:
@@ -151,6 +153,8 @@ class TradeLogMixin:
                     f"{float(score):.6f}",
                     f"{float(confidence):.6f}",
                     (reason or ""),
+                    (signal_reason or ""),
+                    (entry_mode or ""),
                     (t_type or ""),
                 ])
         except Exception as e:

@@ -5,7 +5,7 @@
 #          Fast entries, tight stops, aggressive trailing. No bag holding.
 # =============================================================================
 
-symbol: "AVAX/USDC:USDC"
+symbol: "JUP/USDT:USDT"
 timeframe: "15m"
 macro_timeframe: "1h"
 
@@ -15,7 +15,7 @@ data:
 
 # Execution Settings
 execution:
-  mode: "live"            # live trading
+  mode: "paper"            # live trading
   market: "usdm"
   paused: false
   close_positions_on_pause: false
@@ -88,7 +88,7 @@ leverage:
 mtf:
   enabled: true
   timeframes: ["5m", "15m", "1h", "4h"]
-  min_agree: 3
+  min_agree: 2
   require_full_confirmation: false
   strict_veto_on_missing: false
   veto_on_missing: false
@@ -135,7 +135,7 @@ strategy:
   block_on_volume_spike: false
   fixed_trade_usdt: 25
   tp_pct: 0.0120                # 1.20% TP — scaled up to match wider SL (4:1 R/R)
-  sl_pct: 0.0030                # 0.30% SL — wide enough to survive AVAX 15m noise
+  sl_pct: 0.0030                # 0.30% SL — wide enough to survive JUP 15m noise
   max_structural_sl_pct: 0.0120 # cap structural SL at 1.20%
   min_reward_risk: 3.0          # 4:1 R/R minimum — only high-quality scalps
   range_action_zone_pct: 0.20
@@ -145,6 +145,9 @@ strategy:
   support_break_pct: 0.0010
   resistance_break_pct: 0.0010
   max_chase_pct: 0.0020         # tight chase tolerance — don't chase moves
+  max_consecutive_candles_chase: 4  # block entry after N consecutive same-direction candles
+  chase_recent_extreme_lookback: 20  # candles to look back for recent high/low
+  chase_near_extreme_pct: 0.0025    # block BUY within 0.25% of 20c high, SELL within 0.25% of 20c low
   mtf_neutral_allow_score: 0.55 # higher bar when swing TF is neutral
   entry_min_confidence_hard: 0.50
   midrange_min_score: 0.40
@@ -215,7 +218,7 @@ risk:
 
 # Refresh Intervals (in ticks, 1 tick ≈ 5 seconds on swing)
 intervals:
-  indicator_refresh: 3         # recalc every 3 ticks (~3s) — fast signal response
+  indicator_refresh: 1         # recalc every tick (~1s) — buttery smooth response
   regime_refresh: 300          # macro regime every 5 min
   tick_delay_seconds: 1.0      # 1s loop — scalping needs fast polling
 
